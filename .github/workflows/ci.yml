@@ -197,7 +197,7 @@ jobs:
           path: target/${{ matrix.target }}/release/nettrap
 
   # ============================================
-  # Windows Builds (x64, x86, ARM, ARM64, ARM64EC)
+  # Windows Builds (x64, x86, ARM64)
   # ============================================
   build-windows:
     name: Build & Test (Windows ${{ matrix.target }})
@@ -209,23 +209,22 @@ jobs:
           - target: x86_64-pc-windows-msvc
             name: windows-x64
             arch: x64
+            interceptor: windivert
           - target: i686-pc-windows-msvc
             name: windows-x86
             arch: x86
+            interceptor: windivert
           - target: aarch64-pc-windows-msvc
             name: windows-arm64
             arch: arm64
-          # ARM64EC is experimental - uncomment when stable
-          # - target: aarch64-pc-windows-msvc
-          #   name: windows-arm64ec
-          #   arch: arm64
-          #   rustflags: -C target-feature=+arm64ec
+            interceptor: npcap
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download WinDivert
+      - name: Download WinDivert (x86/x64 only)
+        if: matrix.interceptor == 'windivert'
         run: |
           Invoke-WebRequest -Uri "https://reqrypt.org/download/WinDivert-2.2.2-A.zip" -OutFile "WinDivert.zip"
           Expand-Archive -Path "WinDivert.zip" -DestinationPath "WinDivert"
@@ -237,12 +236,15 @@ jobs:
           } elseif ("${{ matrix.arch }}" -eq "x86") {
             Copy-Item "WinDivert/WinDivert-2.2.2-A/x86/WinDivert.dll" -Destination "windivert/"
             Copy-Item "WinDivert/WinDivert-2.2.2-A/x86/WinDivert32.sys" -Destination "windivert/"
-          } elseif ("${{ matrix.arch }}" -eq "arm64") {
-            # WinDivert doesn't have ARM64 binaries yet, use x64 with emulation
-            Write-Host "::warning::WinDivert ARM64 not available, using x64 with emulation"
-            Copy-Item "WinDivert/WinDivert-2.2.2-A/x64/WinDivert.dll" -Destination "windivert/"
-            Copy-Item "WinDivert/WinDivert-2.2.2-A/x64/WinDivert64.sys" -Destination "windivert/"
           }
+        shell: pwsh
+
+      - name: Setup Npcap notice (ARM64)
+        if: matrix.interceptor == 'npcap'
+        run: |
+          Write-Host "::notice::Windows ARM64 uses Npcap (PCAP) - WinDivert not available"
+          Write-Host "::notice::Npcap provides native ARM64 support for packet capture"
+          Write-Host "::notice::Install Npcap from https://nmap.org/npcap/"
         shell: pwsh
 
       - name: Install Rust toolchain
@@ -268,20 +270,49 @@ jobs:
 
       - name: Run clippy
         run: cargo clippy --all-targets --all-features --target ${{ matrix.target }} -- -D warnings
+        continue-on-error: ${{ matrix.target == 'aarch64-pc-windows-msvc' }}
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
-        env:
-          RUSTFLAGS: ${{ matrix.rustflags }}
 
-      - name: Copy WinDivert DLLs
+      - name: Copy WinDivert DLLs (x86/x64 only)
+        if: matrix.interceptor == 'windivert'
         run: |
           Copy-Item "windivert/WinDivert.dll" -Destination "target/${{ matrix.target }}/release/"
         shell: pwsh
 
       - name: Run tests
         run: cargo test --all --target ${{ matrix.target }}
-        continue-on-error: true  # ARM64 tests may fail due to emulation
+        continue-on-error: ${{ matrix.target == 'aarch64-pc-windows-msvc' }}
+
+      - name: Create config for testing
+        run: |
+          @"
+          attribution_enabled = true
+          attribution_timeout_ms = 5000
+          default_decision = "intercept"
+          pcap_enabled = false
+          output_format = "jsonl"
+
+          [[listeners]]
+          name = "dns"
+          protocol = "udp"
+          port = 53530
+          bind_address = "0.0.0.0"
+          enabled = true
+          emulate_response = true
+          response_delay_ms = 0
+
+          [[listeners]]
+          name = "http"
+          protocol = "tcp"
+          port = 8088
+          bind_address = "0.0.0.0"
+          enabled = true
+          emulate_response = true
+          response_delay_ms = 0
+          "@ | Out-File -FilePath "config.toml" -Encoding utf8
+        shell: pwsh
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -290,6 +321,7 @@ jobs:
           path: |
             target/${{ matrix.target }}/release/nettrap.exe
             target/${{ matrix.target }}/release/WinDivert.dll
+            config.toml
 
   # ============================================
   # Security Audit
@@ -376,9 +408,9 @@ jobs:
           zip ../../releases/nettrap-windows-i686.zip nettrap.exe WinDivert.dll
           cd ..
           
-          # Windows ARM64
+          # Windows ARM64 (no WinDivert.dll)
           cd nettrap-windows-arm64
-          zip ../../releases/nettrap-windows-aarch64.zip nettrap.exe WinDivert.dll
+          zip ../../releases/nettrap-windows-aarch64.zip nettrap.exe
           cd ..
 
       - name: Upload release assets

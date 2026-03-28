@@ -98,35 +98,41 @@ sudo ./target/release/nettrap run -c config.toml
 
 ### Windows
 
-| Architecture | Rust Target | WinDivert | Notes |
-|-------------|-------------|-----------|-------|
-| x86_64 | `x86_64-pc-windows-msvc` | ✅ | 64-bit Intel/AMD |
-| i686 | `i686-pc-windows-msvc` | ✅ | 32-bit Intel/AMD |
-| ARM64 | `aarch64-pc-windows-msvc` | ⚠️ | x64 emulation |
+| Architecture | Rust Target | WinDivert | PCAP/Npcap | Notes |
+|-------------|-------------|-----------|------------|-------|
+| x86_64 | `x86_64-pc-windows-msvc` | ✅ Native | ✅ Native | Full packet modification + capture |
+| i686 | `i686-pc-windows-msvc` | ✅ Native | ✅ Native | Full packet modification + capture |
+| ARM64 | `aarch64-pc-windows-msvc` | ❌ N/A | ✅ Native | **PCAP only** (Npcap native driver) |
 
 #### WinDivert Notes
 
 **Windows x86_64 and i686:**
 - Full support with native WinDivert driver
 - Driver is signed with WHQL certificate
+- Provides packet modification, filtering, and PID tracking
 - No special permissions needed beyond Administrator
 
 **Windows ARM64:**
-- WinDivert doesn't have native ARM64 binaries
-- Uses x64 binaries with emulation
-- Performance is reduced due to emulation
-- Some features may not work correctly
+- **WinDivert is NOT available for ARM64** - no native driver exists
+- Use Npcap (PCAP) for packet capture on ARM64
+- Npcap has native ARM64 support since version 1.60
+- Packet capture only, no modification capabilities
+- Download from: https://nmap.org/npcap/
 
-#### Building on Windows
+#### Building on Windows x86_64/i686
 
 ```powershell
 # Download WinDivert
 Invoke-WebRequest -Uri "https://reqrypt.org/download/WinDivert-2.2.2-A.zip" -OutFile "WinDivert.zip"
 Expand-Archive -Path "WinDivert.zip" -DestinationPath "WinDivert"
 
-# Copy DLLs
+# Copy DLLs for x64
 Copy-Item "WinDivert/WinDivert-2.2.2-A/x64/WinDivert.dll" -Destination "target/release/"
 Copy-Item "WinDivert/WinDivert-2.2.2-A/x64/WinDivert64.sys" -Destination "target/release/"
+
+# Or for x86
+Copy-Item "WinDivert/WinDivert-2.2.2-A/x86/WinDivert.dll" -Destination "target/release/"
+Copy-Item "WinDivert/WinDivert-2.2.2-A/x86/WinDivert32.sys" -Destination "target/release/"
 
 # Build
 cargo build --release
@@ -135,19 +141,30 @@ cargo build --release
 .\target\release\nettrap.exe run -c config.toml
 ```
 
-#### ARM64 Considerations
-
-For Windows on ARM:
+#### Building on Windows ARM64
 
 ```powershell
-# Use x64 binaries (emulated)
-Copy-Item "WinDivert/WinDivert-2.2.2-A/x64/WinDivert.dll" -Destination "target/release/"
-Copy-Item "WinDivert/WinDivert-2.2.2-A/x64/WinDivert64.sys" -Destination "target/release/"
+# Install Npcap (native ARM64 driver)
+# Download from: https://nmap.org/npcap/
+# During installation, select "Install Npcap in WinPcap API-compatible Mode"
 
-# Build with ARM64 target
+# Build
 rustup target add aarch64-pc-windows-msvc
 cargo build --release --target aarch64-pc-windows-msvc
+
+# Run as Administrator
+.\target\aarch64-pc-windows-msvc\release\nettrap.exe run -c config.toml
 ```
+
+#### Architecture Selection
+
+NetTrap automatically selects the best interceptor:
+
+| Windows Architecture | Default Interceptor | Features |
+|---------------------|---------------------|----------|
+| x86_64 | WinDivert | Packet capture, modification, PID tracking |
+| i686 | WinDivert | Packet capture, modification, PID tracking |
+| ARM64 | PCAP/Npcap | Packet capture only |
 
 ## Architecture-Specific Behavior
 
