@@ -1,4 +1,3 @@
-use crate::prelude::*;
 
 #[derive(Debug, Clone)]
 pub struct HttpRequest {

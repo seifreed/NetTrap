@@ -11,7 +11,7 @@ pub mod windivert_dll {
 
     /// Find WinDivert DLL in common locations
     pub fn find_windivert_dll() -> Option<PathBuf> {
-        WINDIVERT_PATH
+        Some(WINDIVERT_PATH
             .get_or_init(|| {
                 // Try common locations in order
                 let candidates = get_dll_search_paths();
@@ -30,7 +30,7 @@ pub mod windivert_dll {
                 );
                 PathBuf::from(get_dll_name())
             })
-            .clone()
+            .clone())
     }
 
     fn get_dll_search_paths() -> Vec<PathBuf> {

@@ -7,11 +7,17 @@
 mod bindings;
 #[cfg(windows)]
 mod dll;
-#[cfg(windows)]
-mod interceptor;
 
 #[cfg(windows)]
-pub use interceptor::WinDivertInterceptor;
+pub use bindings::WinDivert;
+#[cfg(windows)]
+pub use bindings::HANDLE;
+#[cfg(windows)]
+pub use bindings::{
+    WindivertAddress, WindivertIpHdr, WindivertIpv6Hdr, WindivertTcpHdr, WindivertUdpHdr,
+    IPPROTO_TCP, IPPROTO_UDP, WINDIVERT_DIRECTION_IN, WINDIVERT_DIRECTION_OUT,
+    WINDIVERT_LAYER_NETWORK,
+};
 #[cfg(windows)]
 pub use dll::windivert_dll::{find_windivert_dll, get_driver_name};
 

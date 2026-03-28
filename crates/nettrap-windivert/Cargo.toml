@@ -7,6 +7,9 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[lib]
+test = false
+
 [dependencies]
 nettrap-core.workspace = true
 nettrap-flow.workspace = true

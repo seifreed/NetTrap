@@ -1,5 +1,3 @@
-use crate::prelude::*;
-
 pub struct FtpHandler {
     banner: String,
 }
@@ -37,9 +35,7 @@ impl FtpHandler {
             FtpResponse::new(200, "Type set to I")
         } else if upper.starts_with("PASV") {
             FtpResponse::new(227, "Entering Passive Mode")
-        } else if upper.starts_with("LIST") {
-            FtpResponse::new(150, "Opening data connection")
-        } else if upper.starts_with("RETR") {
+        } else if upper.starts_with("LIST") || upper.starts_with("RETR") {
             FtpResponse::new(150, "Opening data connection")
         } else if upper.starts_with("QUIT") {
             FtpResponse::new(221, "Goodbye")

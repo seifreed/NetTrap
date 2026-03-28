@@ -97,31 +97,17 @@ impl EventBus {
     }
     
     pub async fn process(&self) -> Result<()> {
-        loop {
-            match self.receiver.recv() {
-                Ok(event) => {
-                    self.dispatch_to_handlers(&event)?;
-                    self.stats.write().events_processed += 1;
-                }
-                Err(_) => {
-                    break;
-                }
-            }
+        while let Ok(event) = self.receiver.recv() {
+            self.dispatch_to_handlers(&event)?;
+            self.stats.write().events_processed += 1;
         }
         Ok(())
     }
     
     pub fn process_blocking(&self) -> Result<()> {
-        loop {
-            match self.receiver.recv() {
-                Ok(event) => {
-                    self.dispatch_to_handlers(&event)?;
-                    self.stats.write().events_processed += 1;
-                }
-                Err(_) => {
-                    break;
-                }
-            }
+        while let Ok(event) = self.receiver.recv() {
+            self.dispatch_to_handlers(&event)?;
+            self.stats.write().events_processed += 1;
         }
         Ok(())
     }

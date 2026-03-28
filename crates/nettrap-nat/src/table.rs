@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use nettrap_core::prelude::*;
 
 use crate::nat::NatEntry;
-use crate::types::Timestamp;
 
 pub struct NatTable {
     entries: DashMap<FlowKey, NatEntry>,
@@ -27,7 +26,7 @@ impl PortPool {
 
     fn allocate(&mut self, key: FlowKey) -> u16 {
         let port = self.next_port;
-        self.next_port = if self.next_port >= 65535 {
+        self.next_port = if self.next_port == u16::MAX {
             40000
         } else {
             self.next_port + 1
@@ -60,7 +59,7 @@ impl NatTable {
             five_tuple.protocol,
         );
 
-        let entry = NatEntry::new(five_tuple.clone(), translated.clone());
+        let entry = NatEntry::new(five_tuple, translated);
         self.entries.insert(five_tuple.to_flow_key(), entry);
 
         translated
@@ -69,14 +68,14 @@ impl NatTable {
     pub fn translate_outbound(&self, five_tuple: &FiveTuple) -> Option<FiveTuple> {
         self.entries
             .get(&five_tuple.to_flow_key())
-            .map(|e| e.translated.clone())
+            .map(|e| e.translated)
     }
 
     pub fn translate_inbound(&self, five_tuple: &FiveTuple) -> Option<FiveTuple> {
         let reverse = five_tuple.reverse();
         self.entries
             .get(&reverse.to_flow_key())
-            .map(|e| e.original.clone())
+            .map(|e| e.original)
     }
 
     pub fn remove(&self, key: &FlowKey) {
@@ -87,10 +86,10 @@ impl NatTable {
 
     pub fn get(&self, key: &FlowKey) -> Option<NatEntry> {
         self.entries.get(key).map(|e| NatEntry {
-            original: e.original.clone(),
-            translated: e.translated.clone(),
-            created_at: e.created_at.clone(),
-            last_used: e.last_used.clone(),
+            original: e.original,
+            translated: e.translated,
+            created_at: e.created_at,
+            last_used: e.last_used,
             bytes_sent: e.bytes_sent,
             bytes_received: e.bytes_received,
         })

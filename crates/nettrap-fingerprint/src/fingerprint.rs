@@ -1,5 +1,5 @@
 use md5::{Digest as Md5Digest, Md5};
-use sha2::{Digest as Sha256Digest, Sha256};
+use sha2::Sha256;
 
 pub fn compute_fingerprint(data: &[u8]) -> String {
     let mut hasher = Sha256::new();

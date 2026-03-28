@@ -1,7 +1,8 @@
 #[cfg(windows)]
 fn main() {
-    // Tell cargo to link against WinDivert
-    // The DLL should be placed in the windivert/ directory or in PATH
+    // WinDivert is loaded dynamically at runtime via libloading, so we do not
+    // link against WinDivert.lib here. That keeps builds and tests working on
+    // Windows machines that only have the DLL/SYS payloads staged.
 
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     let windivert_dir = std::path::Path::new(&manifest_dir)
@@ -24,9 +25,6 @@ fn main() {
             println!("cargo:rerun-if-changed={}", sys_path.display());
         }
     }
-
-    // Link against WinDivert
-    println!("cargo:rustc-link-lib=dylib=WinDivert");
 }
 
 #[cfg(not(windows))]

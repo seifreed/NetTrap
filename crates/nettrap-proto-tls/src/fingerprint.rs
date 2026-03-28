@@ -1,6 +1,5 @@
 use sha2::{Digest, Sha256};
 
-use crate::prelude::*;
 
 #[derive(Debug, Clone)]
 pub struct TlsFingerprint {
@@ -78,9 +77,9 @@ pub fn extract_sni(data: &[u8]) -> Option<String> {
 
         if ext_type == 0x0000 {
             pos += 4;
-            let sni_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+            let _sni_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
             pos += 2;
-            let hostname_type = data[pos];
+            let _hostname_type = data[pos];
             pos += 1;
             let hostname_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
             pos += 2;

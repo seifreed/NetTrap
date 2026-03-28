@@ -122,11 +122,11 @@ impl FlowMatcher {
         self
     }
 
-    pub fn tcp(mut self) -> Self {
+    pub fn tcp(self) -> Self {
         self.protocol(Protocol::Tcp)
     }
 
-    pub fn udp(mut self) -> Self {
+    pub fn udp(self) -> Self {
         self.protocol(Protocol::Udp)
     }
 

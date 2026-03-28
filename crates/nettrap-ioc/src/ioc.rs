@@ -1,6 +1,5 @@
 use regex::Regex;
 
-use crate::prelude::*;
 
 #[derive(Debug, Clone)]
 pub struct IoC {

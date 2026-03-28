@@ -1,6 +1,5 @@
 use md5::{Digest as Md5Digest, Md5};
 
-use crate::prelude::*;
 
 pub fn calculate_ja3(
     version: u16,

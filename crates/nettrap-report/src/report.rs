@@ -125,8 +125,8 @@ impl Default for ReportBuilder {
 
 pub fn generate_report(
     flows: &[Flow],
-    events: &[nettrap_events::Event],
-    iocs: &[nettrap_ioc::IoC],
+    _events: &[nettrap_events::Event],
+    _iocs: &[nettrap_ioc::IoC],
 ) -> Report {
     ReportBuilder::new()
         .add_flows(flows.iter().cloned())

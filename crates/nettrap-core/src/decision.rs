@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum PolicyDecision {
+    #[default]
     Intercept,
     Emulate,
     Passthrough,
@@ -11,11 +13,6 @@ pub enum PolicyDecision {
     Drop,
 }
 
-impl Default for PolicyDecision {
-    fn default() -> Self {
-        PolicyDecision::Intercept
-    }
-}
 
 impl std::fmt::Display for PolicyDecision {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

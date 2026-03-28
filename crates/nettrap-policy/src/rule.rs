@@ -4,19 +4,16 @@ use serde::{Deserialize, Serialize};
 use crate::prelude::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum RulePriority {
     Critical = 0,
     High = 100,
     Medium = 500,
     Low = 900,
+    #[default]
     Default = 1000,
 }
 
-impl Default for RulePriority {
-    fn default() -> Self {
-        RulePriority::Default
-    }
-}
 
 impl Ord for RulePriority {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {

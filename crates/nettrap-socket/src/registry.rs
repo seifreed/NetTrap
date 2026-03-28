@@ -25,13 +25,13 @@ impl ListenerRegistry {
         self.listeners
             .write()
             .entry(port)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(listener.clone());
         
         self.port_index
             .write()
             .entry(port)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(listener.name().to_string());
         
         tracing::debug!("Registered listener {} on port {}", listener.name(), port);

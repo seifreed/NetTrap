@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 use crate::prelude::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum InterceptionMode {
+    #[default]
     Userspace,
     KernelEbpf,
     KernelWfp,
@@ -23,51 +25,29 @@ impl std::fmt::Display for InterceptionMode {
     }
 }
 
-impl Default for InterceptionMode {
-    fn default() -> Self {
-        #[cfg(target_os = "linux")]
-        {
-            InterceptionMode::Userspace
-        }
-        #[cfg(target_os = "windows")]
-        {
-            InterceptionMode::Userspace
-        }
-        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-        {
-            InterceptionMode::Userspace
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum LogLevel {
     Trace,
     Debug,
+    #[default]
     Info,
     Warn,
     Error,
 }
 
-impl Default for LogLevel {
-    fn default() -> Self {
-        LogLevel::Info
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum OutputFormat {
+    #[default]
     Jsonl,
     Json,
     Csv,
     Table,
 }
 
-impl Default for OutputFormat {
-    fn default() -> Self {
-        OutputFormat::Jsonl
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListenerConfig {
@@ -134,17 +114,11 @@ impl Default for EngineConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct Config {
     pub engine: EngineConfig,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            engine: EngineConfig::default(),
-        }
-    }
-}
 
 impl Config {
     pub fn from_file(path: &str) -> crate::Result<Self> {

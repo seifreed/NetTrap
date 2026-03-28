@@ -63,7 +63,6 @@ impl FlowWriter {
             std::fs::create_dir_all(parent)?;
         }
 
-        use std::io::Write;
         let file = std::fs::File::create(path)?;
         *self.file.write() = Some(file);
 

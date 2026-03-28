@@ -6,11 +6,11 @@ pub async fn run_server(addr: std::net::SocketAddr, state: ApiState) -> crate::R
     
     let listener = tokio::net::TcpListener::bind(addr)
         .await
-        .map_err(|e| Error::Io(e))?;
+        .map_err(Error::Io)?;
     
     axum::serve(listener, router)
         .await
-        .map_err(|e| Error::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        .map_err(|e| Error::Io(std::io::Error::other(e)))?;
     
     Ok(())
 }

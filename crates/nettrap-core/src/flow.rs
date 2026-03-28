@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 use crate::prelude::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum FlowState {
+    #[default]
     New,
     Connecting,
     Established,
@@ -33,11 +35,6 @@ impl FlowState {
     }
 }
 
-impl Default for FlowState {
-    fn default() -> Self {
-        FlowState::New
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlowMetadata {

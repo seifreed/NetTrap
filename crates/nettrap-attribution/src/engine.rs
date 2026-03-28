@@ -126,7 +126,7 @@ impl AttributionEngine {
                 let (_, timestamp) = entry.value();
                 now.duration_since(*timestamp) >= self.cache_timeout
             })
-            .map(|entry| entry.key().clone())
+            .map(|entry| *entry.key())
             .collect();
 
         for key in expired {

@@ -1,5 +1,3 @@
-use crate::prelude::*;
-
 pub fn extract_domains(data: &str) -> Vec<String> {
     let re =
         regex::Regex::new(r"\b([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}\b")
@@ -37,7 +35,7 @@ pub fn extract_ipv4(data: &str) -> Vec<String> {
 }
 
 pub fn extract_urls(data: &str) -> Vec<String> {
-    let re = regex::Regex::new(r#"\bhttps?://[^\s<>"{}|\\^`[\]]+\b"#).unwrap();
+    let re = regex::Regex::new(r#"\bhttps?://[^\s<>"{}|\\^`\[\]]+\b"#).unwrap();
 
     re.captures_iter(data)
         .map(|cap| cap[0].to_string())

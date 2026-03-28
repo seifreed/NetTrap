@@ -1,5 +1,3 @@
-use crate::prelude::*;
-
 pub struct DnsResponse {
     pub domain: String,
     pub query_type: u16,
@@ -31,7 +29,7 @@ impl Default for DnsConfig {
     }
 }
 
-pub fn fake_response(domain: &str, query_type: u16) -> Option<Vec<String>> {
+pub fn fake_response(_domain: &str, query_type: u16) -> Option<Vec<String>> {
     match query_type {
         1 => Some(vec!["192.168.100.1".to_string()]),
         28 => Some(vec!["fd00::1".to_string()]),

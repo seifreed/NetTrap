@@ -43,7 +43,7 @@ impl ListenerTrait for TcpListenerWrapper {
     }
     
     fn protocol(&self) -> Protocol {
-        self.config.protocol.clone()
+        self.config.protocol
     }
     
     fn binds_to(&self) -> std::net::IpAddr {
@@ -98,7 +98,7 @@ impl ListenerTrait for UdpListenerWrapper {
     }
     
     fn protocol(&self) -> Protocol {
-        self.config.protocol.clone()
+        self.config.protocol
     }
     
     fn binds_to(&self) -> std::net::IpAddr {

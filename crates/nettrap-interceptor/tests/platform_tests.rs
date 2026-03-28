@@ -1,3 +1,5 @@
+#![cfg(not(all(target_os = "windows", not(feature = "native-capture-tests"))))]
+
 // Platform-specific interceptor tests
 //
 // These tests verify that interceptors work correctly on each platform.

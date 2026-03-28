@@ -40,7 +40,7 @@ pub struct RunArgs {
     #[arg(short = 'a', long)]
     pub attribution: bool,
 
-    #[arg(short, long)]
+    #[arg(short = 'I', long)]
     pub intercept: bool,
 
     #[arg(short, long)]
@@ -55,7 +55,7 @@ pub struct RunArgs {
     #[arg(long)]
     pub pcap_path: Option<std::path::PathBuf>,
 
-    #[arg(short = 'v', long)]
+    #[arg(long)]
     pub verbose_flows: bool,
 
     #[arg(long)]

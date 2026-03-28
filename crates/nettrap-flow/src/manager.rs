@@ -1,7 +1,6 @@
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::collections::VecDeque;
-use std::sync::Arc;
 
 use crate::prelude::*;
 

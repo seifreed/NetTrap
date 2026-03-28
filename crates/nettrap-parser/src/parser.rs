@@ -1,5 +1,5 @@
 use nom::{
-    bytes::complete::{tag, take},
+    bytes::complete::take,
     number::complete::{be_u16, be_u32},
     IResult,
 };
@@ -200,7 +200,7 @@ pub fn detect_protocol(data: &[u8]) -> Option<ApplicationProtocol> {
         let maybe_dns = &data[0..2];
         let flags = u16::from_be_bytes([maybe_dns[0], maybe_dns[1]]);
         if (flags & 0x8000) == 0 {
-            if let Ok(Some(_)) = std::str::from_utf8(&data).map(|s| s.find('.')) {
+            if let Ok(Some(_)) = std::str::from_utf8(data).map(|s| s.find('.')) {
                 return Some(ApplicationProtocol::Dns);
             }
         }

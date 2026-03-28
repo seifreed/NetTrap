@@ -3,40 +3,18 @@ use async_trait::async_trait;
 use crate::prelude::*;
 
 pub struct SmtpHandler {
-    responses: SmtpResponses,
     domain: String,
-}
-
-struct SmtpResponses {
-    welcome: String,
-    ok: String,
-    ready_for_data: String,
-    goodbye: String,
-}
-
-impl SmtpResponses {
-    fn new(domain: &str) -> Self {
-        Self {
-            welcome: format!("220 {} ESMTP NetTrap Ready", domain),
-            ok: "250 OK".to_string(),
-            ready_for_data: "354 End data with <CR><LF>.<CR><LF>".to_string(),
-            goodbye: "221 Bye".to_string(),
-        }
-    }
 }
 
 impl SmtpHandler {
     pub fn new() -> Self {
         Self {
-            responses: SmtpResponses::new("nettrap.local"),
             domain: "nettrap.local".to_string(),
         }
     }
     
     pub fn with_domain(mut self, domain: impl Into<String>) -> Self {
-        let domain = domain.into();
-        self.responses = SmtpResponses::new(&domain);
-        self.domain = domain;
+        self.domain = domain.into();
         self
     }
     
@@ -66,22 +44,18 @@ impl SmtpHandlerTrait for SmtpHandler {
     async fn handle(&self, command: &str) -> Result<SmtpResponse> {
         let upper = command.to_uppercase();
         
-        if upper.starts_with("EHLO") || upper.starts_with("HELO") {
-            Ok(SmtpResponse::ok())
-        } else if upper.starts_with("MAIL FROM") {
-            Ok(SmtpResponse::ok())
-        } else if upper.starts_with("RCPT TO") {
+        if upper.starts_with("EHLO") || upper.starts_with("HELO")
+            || upper.starts_with("MAIL FROM")
+            || upper.starts_with("RCPT TO")
+            || upper.starts_with("RSET")
+            || upper.starts_with("NOOP")
+            || upper.starts_with("VRFY")
+        {
             Ok(SmtpResponse::ok())
         } else if upper.starts_with("DATA") {
             Ok(SmtpResponse::start_data())
         } else if upper.starts_with("QUIT") {
             Ok(SmtpResponse::bye())
-        } else if upper.starts_with("RSET") {
-            Ok(SmtpResponse::ok())
-        } else if upper.starts_with("NOOP") {
-            Ok(SmtpResponse::ok())
-        } else if upper.starts_with("VRFY") {
-            Ok(SmtpResponse::ok())
         } else if upper.starts_with("HELP") {
             Ok(SmtpResponse::message("250-This is NetTrap SMTP honeypot\r\n250-Commands: EHLO HELO MAIL RCPT DATA RSET NOOP QUIT"))
         } else if upper.starts_with("STARTTLS") {

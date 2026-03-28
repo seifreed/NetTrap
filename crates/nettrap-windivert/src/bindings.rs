@@ -152,9 +152,11 @@ impl WinDivert {
     ) -> Result<HANDLE, String> {
         use widestring::U16CString;
 
+        let dll_path = crate::find_windivert_dll()
+            .ok_or_else(|| "Failed to resolve WinDivert DLL path".to_string())?;
         let lib = unsafe {
-            libloading::Library::new("WinDivert.dll")
-                .map_err(|e| format!("Failed to load WinDivert.dll: {}", e))?
+            libloading::Library::new(&dll_path)
+                .map_err(|e| format!("Failed to load {}: {}", dll_path.display(), e))?
         };
 
         let filter_wide =

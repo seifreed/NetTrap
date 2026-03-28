@@ -11,6 +11,8 @@ fn main() {
 }
 
 fn run() -> Result<()> {
+    configure_windows_arm64_runtime();
+
     let cli = Cli::parse();
     
     let config_path = cli.config.clone();
@@ -24,3 +26,36 @@ fn run() -> Result<()> {
         nettrap_cli::handle_command(cli.command, cli.verbose, config_path).await
     })
 }
+
+#[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+fn configure_windows_arm64_runtime() {
+    use std::path::PathBuf;
+
+    fn prepend_path(dir: PathBuf) {
+        if !dir.exists() {
+            return;
+        }
+
+        let current = std::env::var_os("PATH").unwrap_or_default();
+        let mut paths = vec![dir];
+        paths.extend(std::env::split_paths(&current));
+
+        if let Ok(joined) = std::env::join_paths(paths) {
+            unsafe {
+                std::env::set_var("PATH", joined);
+            }
+        }
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            prepend_path(dir.to_path_buf());
+        }
+    }
+
+    prepend_path(PathBuf::from(r"C:\Windows\System32\Npcap"));
+    prepend_path(PathBuf::from(r"C:\Program Files\Npcap"));
+}
+
+#[cfg(not(all(target_os = "windows", target_arch = "aarch64")))]
+fn configure_windows_arm64_runtime() {}

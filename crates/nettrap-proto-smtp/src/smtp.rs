@@ -1,4 +1,3 @@
-use crate::prelude::*;
 
 pub struct SmtpResponse {
     pub code: u16,
