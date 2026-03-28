@@ -1,0 +1,23 @@
+[package]
+name = "nettrap-core"
+description = "Core types and traits for NetTrap"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+toml.workspace = true
+bytes.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+ipnet.workspace = true
+hashbrown.workspace = true
+smallvec.workspace = true
+bitflags.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+async-trait.workspace = true

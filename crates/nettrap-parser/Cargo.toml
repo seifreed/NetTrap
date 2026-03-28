@@ -1,0 +1,17 @@
+[package]
+name = "nettrap-parser"
+description = "Protocol parsing for NetTrap"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+nettrap-core.workspace = true
+thiserror.workspace = true
+bytes.workspace = true
+memchr.workspace = true
+nom.workspace = true
+regex.workspace = true
+tracing.workspace = true

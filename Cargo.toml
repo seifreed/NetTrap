@@ -1,0 +1,119 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/nettrap-core",
+    "crates/nettrap-flow",
+    "crates/nettrap-events",
+    "crates/nettrap-policy",
+    "crates/nettrap-attribution",
+    "crates/nettrap-interceptor",
+    "crates/nettrap-socket",
+    "crates/nettrap-nat",
+    "crates/nettrap-proto-dns",
+    "crates/nettrap-proto-http",
+    "crates/nettrap-proto-tls",
+    "crates/nettrap-proto-raw",
+    "crates/nettrap-proto-smtp",
+    "crates/nettrap-proto-ftp",
+    "crates/nettrap-proto-quic",
+    "crates/nettrap-parser",
+    "crates/nettrap-fingerprint",
+    "crates/nettrap-ioc",
+    "crates/nettrap-pcap",
+    "crates/nettrap-report",
+    "crates/nettrap-storage",
+    "crates/nettrap-cli",
+    "crates/nettrap-tui",
+    "crates/nettrap-api",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["NetTrap Team"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/nettrap/nettrap"
+
+[workspace.dependencies]
+tokio = { version = "1.44", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+bytes = { version = "1.10", features = ["serde"] }
+uuid = { version = "1.15", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+ipnet = "2.11"
+socket2 = "0.5"
+pcap-file = "2.0"
+parking_lot = "0.12"
+dashmap = "6.1"
+crossbeam = "0.8"
+futures = "0.3"
+async-trait = "0.1"
+pin-project-lite = "0.2"
+hashbrown = "0.15"
+smallvec = "1.15"
+bitflags = "2.8"
+clap = { version = "4.5", features = ["derive", "env"] }
+config = "0.15"
+toml = "0.8"
+directories = "6.0"
+which = "7.0"
+once_cell = "1.21"
+regex = "1.11"
+base64 = "0.22"
+hex = "0.4"
+sha2 = "0.10"
+md-5 = "0.10"
+hmac = "0.12"
+rand = "0.9"
+trust-dns-proto = "0.23"
+trust-dns-client = "0.23"
+http = "1.3"
+http-body-util = "0.1"
+hyper = { version = "1.6", features = ["full"] }
+hyper-util = "0.1"
+tokio-rustls = "0.26"
+rustls-pemfile = "2.2"
+rcgen = "0.13"
+memchr = "2.7"
+nom = "8.0"
+pcap = "2.4"
+
+nettrap-core = { path = "crates/nettrap-core" }
+nettrap-flow = { path = "crates/nettrap-flow" }
+nettrap-events = { path = "crates/nettrap-events" }
+nettrap-policy = { path = "crates/nettrap-policy" }
+nettrap-attribution = { path = "crates/nettrap-attribution" }
+nettrap-interceptor = { path = "crates/nettrap-interceptor" }
+nettrap-socket = { path = "crates/nettrap-socket" }
+nettrap-nat = { path = "crates/nettrap-nat" }
+nettrap-proto-dns = { path = "crates/nettrap-proto-dns" }
+nettrap-proto-http = { path = "crates/nettrap-proto-http" }
+nettrap-proto-tls = { path = "crates/nettrap-proto-tls" }
+nettrap-proto-raw = { path = "crates/nettrap-proto-raw" }
+nettrap-proto-smtp = { path = "crates/nettrap-proto-smtp" }
+nettrap-proto-ftp = { path = "crates/nettrap-proto-ftp" }
+nettrap-proto-quic = { path = "crates/nettrap-proto-quic" }
+nettrap-parser = { path = "crates/nettrap-parser" }
+nettrap-fingerprint = { path = "crates/nettrap-fingerprint" }
+nettrap-ioc = { path = "crates/nettrap-ioc" }
+nettrap-pcap = { path = "crates/nettrap-pcap" }
+nettrap-report = { path = "crates/nettrap-report" }
+nettrap-storage = { path = "crates/nettrap-storage" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+strip = true
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

@@ -1,0 +1,24 @@
+[package]
+name = "nettrap-socket"
+description = "Socket and listener management for NetTrap"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+nettrap-core.workspace = true
+nettrap-flow.workspace = true
+nettrap-events.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+parking_lot.workspace = true
+dashmap.workspace = true
+hashbrown.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+socket2.workspace = true

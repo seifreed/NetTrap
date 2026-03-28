@@ -1,0 +1,18 @@
+[package]
+name = "nettrap-tui"
+description = "TUI for NetTrap"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+nettrap-core.workspace = true
+nettrap-flow.workspace = true
+nettrap-events.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+ratatui = "0.29"
+crossterm = "0.29"
+tracing.workspace = true

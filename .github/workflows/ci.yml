@@ -1,0 +1,299 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build-linux:
+    name: Build & Test (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpcap-dev libnetfilter-queue-dev libnfnetlink-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Run tests
+        run: cargo test --all
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: nettrap:test
+
+      - name: Run integration tests in Docker
+        run: |
+          docker run --rm nettrap:test /app/integration_test.sh
+
+  build-macos:
+    name: Build & Test (macOS)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          brew install libpcap
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Run tests
+        run: cargo test --all
+
+      - name: Create config for testing
+        run: |
+          cat > /tmp/nettrap_config.toml << 'EOF'
+          attribution_enabled = true
+          attribution_timeout_ms = 5000
+          default_decision = "intercept"
+          pcap_enabled = false
+          output_format = "jsonl"
+
+          [[listeners]]
+          name = "dns"
+          protocol = "udp"
+          port = 53530
+          bind_address = "0.0.0.0"
+          enabled = true
+          emulate_response = true
+          response_delay_ms = 0
+
+          [[listeners]]
+          name = "http"
+          protocol = "tcp"
+          port = 8088
+          bind_address = "0.0.0.0"
+          enabled = true
+          emulate_response = true
+          response_delay_ms = 0
+
+          [[listeners]]
+          name = "https"
+          protocol = "tcp"
+          port = 8448
+          bind_address = "0.0.0.0"
+          enabled = true
+          emulate_response = true
+          response_delay_ms = 0
+
+          [[listeners]]
+          name = "smtp"
+          protocol = "tcp"
+          port = 25250
+          bind_address = "0.0.0.0"
+          enabled = true
+          emulate_response = true
+          response_delay_ms = 0
+
+          [[listeners]]
+          name = "ftp"
+          protocol = "tcp"
+          port = 21210
+          bind_address = "0.0.0.0"
+          enabled = true
+          emulate_response = true
+          response_delay_ms = 0
+          EOF
+
+      - name: Run integration tests on macOS
+        run: |
+          ./target/release/nettrap run -c /tmp/nettrap_config.toml &
+          NETTRAP_PID=$!
+          sleep 3
+
+          echo "=== macOS Integration Tests ==="
+          
+          echo "--- DNS Tests ---"
+          dig @127.0.0.1 -p 53530 example.com A +short | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' && echo "DNS: PASS" || echo "DNS: FAIL"
+
+          echo "--- HTTP Tests ---"
+          curl -s http://127.0.0.1:8088/ | grep -i "NetTrap" && echo "HTTP: PASS" || echo "HTTP: FAIL"
+
+          echo "--- SMTP Tests ---"
+          { echo 'EHLO test'; sleep 0.2; echo 'QUIT'; } | nc 127.0.0.1 25250 | grep '220' && echo "SMTP: PASS" || echo "SMTP: FAIL"
+
+          echo "--- FTP Tests ---"
+          { echo 'USER test'; sleep 0.2; echo 'PASS test'; sleep 0.2; echo 'QUIT'; } | nc 127.0.0.1 21210 | grep '220' && echo "FTP: PASS" || echo "FTP: FAIL"
+
+          kill $NETTRAP_PID 2>/dev/null || true
+          echo "=== Tests Completed ==="
+
+  build-windows:
+    name: Build & Test (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Run tests
+        run: cargo test --all
+
+  security-audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+
+      - name: Run security audit
+        run: cargo audit
+
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpcap-dev libnetfilter-queue-dev libnfnetlink-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov
+
+      - name: Generate coverage report
+        run: cargo llvm-cov --all --lcov --output-path lcov.info
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: lcov.info
+          fail_ci_if_error: true
+
+  release:
+    name: Release
+    needs: [build-linux, build-macos, build-windows]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpcap-dev libnetfilter-queue-dev libnfnetlink-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Create release archive
+        run: |
+          tar -czvf nettrap-linux-x86_64.tar.gz ./target/release/nettrap
+
+      - name: Upload release artifact
+        uses: softprops/action-gh-release@v2
+        with:
+          files: nettrap-linux-x86_64.tar.gz
+          generate_release_notes: true

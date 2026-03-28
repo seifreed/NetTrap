@@ -1,0 +1,18 @@
+[package]
+name = "nettrap-ioc"
+description = "IOC extraction for NetTrap"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+nettrap-core.workspace = true
+nettrap-flow.workspace = true
+nettrap-events.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+regex.workspace = true
+ipnet.workspace = true
+tracing.workspace = true

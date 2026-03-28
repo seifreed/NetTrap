@@ -1,0 +1,38 @@
+[package]
+name = "nettrap-interceptor"
+description = "Network interception for NetTrap"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+nettrap-core.workspace = true
+nettrap-flow.workspace = true
+nettrap-events.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+socket2.workspace = true
+pcap-file.workspace = true
+pcap.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.29", features = ["net", "socket", "ioctl"] }
+rtnetlink = "0.16"
+netlink-packet-core = "0.7"
+netlink-packet-route = "0.21"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.60", features = ["Win32_Foundation", "Win32_NetworkManagement", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock", "Win32_System_Threading", "Win32_System_Diagnostics_Debug"] }
+
+[features]
+default = ["userspace"]
+userspace = []
+ebpf = []

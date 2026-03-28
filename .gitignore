@@ -1,0 +1,17 @@
+target/
+Cargo.lock
+*.swp
+*.swo
+*~
+.vim/
+.idea/
+.vscode/
+*.log
+logs/
+*.pcap
+*.pcapng
+*.jsonl
+.env
+.env.*
+coverage/
+benches/results/

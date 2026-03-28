@@ -1,0 +1,42 @@
+[package]
+name = "nettrap-cli"
+description = "CLI for NetTrap"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "nettrap"
+path = "src/main.rs"
+
+[dependencies]
+nettrap-core.workspace = true
+nettrap-flow.workspace = true
+nettrap-events.workspace = true
+nettrap-policy.workspace = true
+nettrap-attribution.workspace = true
+nettrap-interceptor.workspace = true
+nettrap-socket.workspace = true
+nettrap-proto-dns.workspace = true
+nettrap-proto-http.workspace = true
+nettrap-proto-tls.workspace = true
+nettrap-proto-smtp.workspace = true
+nettrap-proto-ftp.workspace = true
+nettrap-proto-raw.workspace = true
+nettrap-pcap.workspace = true
+nettrap-report.workspace = true
+nettrap-storage.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+clap.workspace = true
+config.workspace = true
+directories.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tokio.workspace = true
+chrono.workspace = true
