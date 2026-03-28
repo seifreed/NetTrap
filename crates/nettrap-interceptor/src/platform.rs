@@ -4,62 +4,104 @@ use crate::prelude::*;
 pub type DefaultInterceptor = crate::pcap::PcapInterceptor;
 
 #[cfg(target_os = "windows")]
-pub type DefaultInterceptor = WindowsInterceptor;
+pub type DefaultInterceptor = crate::windivert::WinDivertInterceptor;
 
 #[cfg(target_os = "windows")]
-pub struct WindowsInterceptor {
-    config: InterceptorConfig,
-    running: parking_lot::RwLock<bool>,
-    stats: crate::intercept::InterceptStats,
-}
-
-#[cfg(target_os = "windows")]
-impl WindowsInterceptor {
-    pub fn new(config: InterceptorConfig) -> Result<Self> {
-        Ok(Self {
-            config,
-            running: parking_lot::RwLock::new(false),
-            stats: crate::intercept::InterceptStats::default(),
-        })
+pub mod windivert {
+    use crate::prelude::*;
+    use parking_lot::RwLock;
+    use std::sync::Arc;
+    
+    pub struct WinDivertInterceptor {
+        config: InterceptorConfig,
+        running: RwLock<bool>,
+        stats: crate::intercept::InterceptStats,
+        handle: Arc<RwLock<Option<isize>>>,
+        windivert: Arc<RwLock<Option<()>>>,
+        filter: String,
     }
-
-    pub fn config(&self) -> &InterceptorConfig {
-        &self.config
-    }
-}
-
-#[cfg(target_os = "windows")]
-#[async_trait]
-impl Interceptor for WindowsInterceptor {
-    async fn init(&mut self) -> Result<()> {
-        tracing::info!("Initializing Windows WFP interceptor");
-        *self.running.write() = true;
+    
+    impl WinDivertInterceptor {
+        pub fn new(config: InterceptorConfig) -> Result<Self> {
+            Ok(Self {
+                config,
+                running: RwLock::new(false),
+                stats: crate::intercept::InterceptStats::default(),
+                handle: Arc::new(RwLock::new(None)),
+                windivert: Arc::new(RwLock::new(None)),
+                filter: "outbound and ip".to_string(),
+            })
+        }
         
-        Err(Error::NotSupported(
-            "Windows WFP interception requires elevated privileges and a kernel driver. \
-             Use pcap mode for userspace packet capture on Windows.".into()
-        ))
+        pub fn with_filter(mut self, filter: impl Into<String>) -> Self {
+            self.filter = filter.into();
+            self
+        }
     }
-
-    async fn recv_packet(&self) -> Result<Packet> {
-        Err(Error::NotSupported("Windows WFP not initialized".into()))
-    }
-
-    async fn send_packet(&self, _packet: Packet) -> Result<()> {
-        Ok(())
-    }
-
-    async fn shutdown(&mut self) -> Result<()> {
-        *self.running.write() = false;
-        Ok(())
-    }
-
-    fn name(&self) -> &'static str {
-        "windows_wfp"
-    }
-
-    fn is_running(&self) -> bool {
-        *self.running.read()
+    
+    #[async_trait]
+    impl Interceptor for WinDivertInterceptor {
+        async fn init(&mut self) -> Result<()> {
+            tracing::info!("Initializing WinDivert interceptor with filter: {}", self.filter);
+            
+            #[cfg(windows)]
+            {
+                let windivert = nettrap_windivert::WinDivert::new();
+                let handle = windivert.open(&self.filter, 0, 0, 0)
+                    .map_err(|e| Error::Interception(format!("Failed to open WinDivert: {}", e)))?;
+                
+                *self.handle.write() = Some(handle as isize);
+                *self.running.write() = true;
+                
+                tracing::info!("WinDivert interceptor initialized successfully");
+                Ok(())
+            }
+            
+            #[cfg(not(windows))]
+            {
+                Err(Error::NotSupported("WinDivert only available on Windows".into()))
+            }
+        }
+        
+        async fn recv_packet(&self) -> Result<Packet> {
+            #[cfg(windows)]
+            {
+                use tokio::task::spawn_blocking;
+                
+                let handle = self.handle.read()
+                    .ok_or_else(|| Error::InvalidState("WinDivert not initialized".into()))?;
+                
+                spawn_blocking(move || {
+                    Err(Error::NotImplemented("Packet receiving not yet implemented".into()))
+                }).await
+                    .map_err(|e| Error::Interception(format!("Join error: {}", e)))?
+            }
+            
+            #[cfg(not(windows))]
+            {
+                Err(Error::NotSupported("WinDivert only available on Windows".into()))
+            }
+        }
+        
+        async fn send_packet(&self, _packet: Packet) -> Result<()> {
+            Ok(())
+        }
+        
+        async fn shutdown(&mut self) -> Result<()> {
+            tracing::info!("Shutting down WinDivert interceptor");
+            *self.running.write() = false;
+            *self.handle.write() = None;
+            tracing::info!("WinDivert interceptor shut down");
+            Ok(())
+        }
+        
+        fn name(&self) -> &'static str {
+            "windivert"
+        }
+        
+        fn is_running(&self) -> bool {
+            *self.running.read()
+        }
     }
 }
 

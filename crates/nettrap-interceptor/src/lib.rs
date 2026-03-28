@@ -5,6 +5,9 @@ pub mod pcap;
 pub use intercept::*;
 pub use platform::*;
 
+#[cfg(target_os = "linux")]
+pub mod nfqueue;
+
 pub mod error {
     pub use nettrap_core::error::*;
 }

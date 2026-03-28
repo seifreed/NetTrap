@@ -1,0 +1,31 @@
+[package]
+name = "nettrap-windivert"
+description = "WinDivert-based packet interception for NetTrap on Windows"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+nettrap-core.workspace = true
+nettrap-flow.workspace = true
+nettrap-events.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+parking_lot.workspace = true
+bytes.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+widestring = "1.0"
+libloading = "0.8"
+bitflags = "2.4"
+
+[target.'cfg(windows)'.build-dependencies]
+bindgen = "0.69"
+
+[features]
+default = []
+bundled = []

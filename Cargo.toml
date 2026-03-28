@@ -25,6 +25,7 @@ members = [
     "crates/nettrap-cli",
     "crates/nettrap-tui",
     "crates/nettrap-api",
+    "crates/nettrap-windivert",
 ]
 
 [workspace.package]
@@ -105,6 +106,7 @@ nettrap-ioc = { path = "crates/nettrap-ioc" }
 nettrap-pcap = { path = "crates/nettrap-pcap" }
 nettrap-report = { path = "crates/nettrap-report" }
 nettrap-storage = { path = "crates/nettrap-storage" }
+nettrap-windivert = { path = "crates/nettrap-windivert" }
 
 [profile.release]
 lto = "thin"
