@@ -366,12 +366,26 @@ nettrap/
 
 ## Platform Support
 
-| Platform | Status | Notes |
-|----------|--------|-------|
-| Linux | ✅ Full | PCAP, NFQUEUE, eBPF |
-| macOS | ✅ Full | PCAP support |
-| Windows | ⚠️ Partial | WFP requires kernel driver, PCAP fallback |
-| BSD | ✅ Basic | PCAP support |
+| Platform | Architecture | Interceptor | Status |
+|----------|-------------|-------------|--------|
+| **Linux** | x86_64 | NFQUEUE, PCAP | ✅ Full |
+| **Linux** | i686 | NFQUEUE, PCAP | ✅ Full |
+| **Linux** | ARM64 | NFQUEUE, PCAP | ✅ Full |
+| **Linux** | ARM | PCAP | ✅ Full |
+| **macOS** | x86_64 (Intel) | PCAP | ✅ Full |
+| **macOS** | ARM64 (Apple Silicon) | PCAP | ✅ Full |
+| **Windows** | x86_64 | WinDivert | ✅ Full |
+| **Windows** | i686 | WinDivert | ✅ Full |
+| **Windows** | ARM64 | WinDivert (x64 emulation) | ⚠️ Experimental |
+| **Windows** | ARM64EC | WinDivert (x64 emulation) | ⚠️ Experimental |
+
+### Interceptor Details
+
+| Interceptor | Platform | Mode | Features |
+|-------------|----------|------|----------|
+| **WinDivert** | Windows | Kernel | Packet modification, PID tracking, filtering |
+| **NFQUEUE** | Linux | Kernel | Packet modification, PID tracking |
+| **PCAP** | Cross-platform | Userspace | Packet capture only (no modification) |
 
 ---
 

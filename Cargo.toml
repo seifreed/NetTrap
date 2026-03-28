@@ -34,7 +34,11 @@ edition = "2024"
 rust-version = "1.85"
 authors = ["NetTrap Team"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/nettrap/nettrap"
+repository = "https://github.com/seifreed/NetTrap"
+description = "Network Interception, Emulation & Deception Engine"
+keywords = ["network", "security", "honeypot", " interception", "malware"]
+categories = ["network-programming", "security"]
+readme = "README.md"
 
 [workspace.dependencies]
 tokio = { version = "1.44", features = ["full"] }

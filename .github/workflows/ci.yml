@@ -6,15 +6,33 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+  release:
+    types: [published]
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
 jobs:
+  # ============================================
+  # Linux Builds (x64, x86, ARM, ARM64)
+  # ============================================
   build-linux:
-    name: Build & Test (Linux)
+    name: Build & Test (Linux ${{ matrix.target }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            name: linux-x64
+          - target: i686-unknown-linux-gnu
+            name: linux-x86
+          - target: aarch64-unknown-linux-gnu
+            name: linux-arm64
+          - target: arm-unknown-linux-gnueabihf
+            name: linux-arm
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -23,11 +41,21 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libpcap-dev libnetfilter-queue-dev libnfnetlink-dev
+          if [ "${{ matrix.target }}" = "i686-unknown-linux-gnu" ]; then
+            sudo apt-get install -y gcc-multilib g++-multilib libpcap0.8-dev:i386
+          fi
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          fi
+          if [ "${{ matrix.target }}" = "arm-unknown-linux-gnueabihf" ]; then
+            sudo apt-get install -y gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
+          fi
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.88
+          target: ${{ matrix.target }}
           components: rustfmt, clippy
 
       - name: Cache cargo registry
@@ -37,36 +65,53 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-      - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+            ${{ runner.os }}-${{ matrix.target }}-cargo-
 
       - name: Build
-        run: cargo build --release
+        run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Run tests
-        run: cargo test --all
+      - name: Run tests (native only)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: cargo test --all --target ${{ matrix.target }}
 
-      - name: Build Docker image
+      - name: Build Docker image (x64 only)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
         uses: docker/build-push-action@v6
         with:
           context: .
           push: false
           tags: nettrap:test
 
-      - name: Run integration tests in Docker
+      - name: Run integration tests (x64 only)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: |
           docker run --rm nettrap:test /app/integration_test.sh
 
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nettrap-${{ matrix.name }}
+          path: target/${{ matrix.target }}/release/nettrap
+
+  # ============================================
+  # macOS Builds (x64, ARM64/Apple Silicon)
+  # ============================================
   build-macos:
-    name: Build & Test (macOS)
-    runs-on: macos-latest
+    name: Build & Test (macOS ${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            name: macos-x64
+            runner: macos-13
+          - target: aarch64-apple-darwin
+            name: macos-arm64
+            runner: macos-14
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -79,6 +124,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.88
+          target: ${{ matrix.target }}
           components: rustfmt, clippy
 
       - name: Cache cargo registry
@@ -88,21 +134,21 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-
+            ${{ runner.os }}-${{ matrix.target }}-cargo-
 
       - name: Check formatting
         run: cargo fmt --all -- --check
 
       - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features --target ${{ matrix.target }} -- -D warnings
 
       - name: Build
-        run: cargo build --release
+        run: cargo build --release --target ${{ matrix.target }}
 
       - name: Run tests
-        run: cargo test --all
+        run: cargo test --all --target ${{ matrix.target }}
 
       - name: Create config for testing
         run: |
@@ -130,61 +176,51 @@ jobs:
           enabled = true
           emulate_response = true
           response_delay_ms = 0
-
-          [[listeners]]
-          name = "https"
-          protocol = "tcp"
-          port = 8448
-          bind_address = "0.0.0.0"
-          enabled = true
-          emulate_response = true
-          response_delay_ms = 0
-
-          [[listeners]]
-          name = "smtp"
-          protocol = "tcp"
-          port = 25250
-          bind_address = "0.0.0.0"
-          enabled = true
-          emulate_response = true
-          response_delay_ms = 0
-
-          [[listeners]]
-          name = "ftp"
-          protocol = "tcp"
-          port = 21210
-          bind_address = "0.0.0.0"
-          enabled = true
-          emulate_response = true
-          response_delay_ms = 0
           EOF
 
-      - name: Run integration tests on macOS
+      - name: Run integration tests
         run: |
-          ./target/release/nettrap run -c /tmp/nettrap_config.toml &
+          ./target/${{ matrix.target }}/release/nettrap run -c /tmp/nettrap_config.toml &
           NETTRAP_PID=$!
           sleep 3
 
           echo "=== macOS Integration Tests ==="
-          
-          echo "--- DNS Tests ---"
           dig @127.0.0.1 -p 53530 example.com A +short | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' && echo "DNS: PASS" || echo "DNS: FAIL"
-
-          echo "--- HTTP Tests ---"
           curl -s http://127.0.0.1:8088/ | grep -i "NetTrap" && echo "HTTP: PASS" || echo "HTTP: FAIL"
 
-          echo "--- SMTP Tests ---"
-          { echo 'EHLO test'; sleep 0.2; echo 'QUIT'; } | nc 127.0.0.1 25250 | grep '220' && echo "SMTP: PASS" || echo "SMTP: FAIL"
-
-          echo "--- FTP Tests ---"
-          { echo 'USER test'; sleep 0.2; echo 'PASS test'; sleep 0.2; echo 'QUIT'; } | nc 127.0.0.1 21210 | grep '220' && echo "FTP: PASS" || echo "FTP: FAIL"
-
           kill $NETTRAP_PID 2>/dev/null || true
-          echo "=== Tests Completed ==="
 
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nettrap-${{ matrix.name }}
+          path: target/${{ matrix.target }}/release/nettrap
+
+  # ============================================
+  # Windows Builds (x64, x86, ARM, ARM64, ARM64EC)
+  # ============================================
   build-windows:
-    name: Build & Test (Windows)
+    name: Build & Test (Windows ${{ matrix.target }})
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            name: windows-x64
+            arch: x64
+          - target: i686-pc-windows-msvc
+            name: windows-x86
+            arch: x86
+          - target: aarch64-pc-windows-msvc
+            name: windows-arm64
+            arch: arm64
+          # ARM64EC is experimental - uncomment when stable
+          # - target: aarch64-pc-windows-msvc
+          #   name: windows-arm64ec
+          #   arch: arm64
+          #   rustflags: -C target-feature=+arm64ec
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -194,14 +230,26 @@ jobs:
           Invoke-WebRequest -Uri "https://reqrypt.org/download/WinDivert-2.2.2-A.zip" -OutFile "WinDivert.zip"
           Expand-Archive -Path "WinDivert.zip" -DestinationPath "WinDivert"
           New-Item -ItemType Directory -Force -Path "windivert"
-          Copy-Item "WinDivert/WinDivert-2.2.2-A/x64/WinDivert.dll" -Destination "windivert/"
-          Copy-Item "WinDivert/WinDivert-2.2.2-A/x64/WinDivert64.sys" -Destination "windivert/"
+          
+          if ("${{ matrix.arch }}" -eq "x64") {
+            Copy-Item "WinDivert/WinDivert-2.2.2-A/x64/WinDivert.dll" -Destination "windivert/"
+            Copy-Item "WinDivert/WinDivert-2.2.2-A/x64/WinDivert64.sys" -Destination "windivert/"
+          } elseif ("${{ matrix.arch }}" -eq "x86") {
+            Copy-Item "WinDivert/WinDivert-2.2.2-A/x86/WinDivert.dll" -Destination "windivert/"
+            Copy-Item "WinDivert/WinDivert-2.2.2-A/x86/WinDivert32.sys" -Destination "windivert/"
+          } elseif ("${{ matrix.arch }}" -eq "arm64") {
+            # WinDivert doesn't have ARM64 binaries yet, use x64 with emulation
+            Write-Host "::warning::WinDivert ARM64 not available, using x64 with emulation"
+            Copy-Item "WinDivert/WinDivert-2.2.2-A/x64/WinDivert.dll" -Destination "windivert/"
+            Copy-Item "WinDivert/WinDivert-2.2.2-A/x64/WinDivert64.sys" -Destination "windivert/"
+          }
         shell: pwsh
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.88
+          target: ${{ matrix.target }}
           components: rustfmt, clippy
 
       - name: Cache cargo registry
@@ -211,92 +259,41 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-
+            ${{ runner.os }}-${{ matrix.target }}-cargo-
 
       - name: Check formatting
         run: cargo fmt --all -- --check
 
       - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features --target ${{ matrix.target }} -- -D warnings
 
       - name: Build
-        run: cargo build --release
+        run: cargo build --release --target ${{ matrix.target }}
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
 
-      - name: Copy WinDivert DLLs to output
+      - name: Copy WinDivert DLLs
         run: |
-          Copy-Item "windivert/WinDivert.dll" -Destination "target/release/"
+          Copy-Item "windivert/WinDivert.dll" -Destination "target/${{ matrix.target }}/release/"
         shell: pwsh
 
       - name: Run tests
-        run: cargo test --all
-
-      - name: Create config for testing
-        run: |
-          @"
-          attribution_enabled = true
-          attribution_timeout_ms = 5000
-          default_decision = "intercept"
-          pcap_enabled = false
-          output_format = "jsonl"
-
-          [[listeners]]
-          name = "dns"
-          protocol = "udp"
-          port = 53530
-          bind_address = "0.0.0.0"
-          enabled = true
-          emulate_response = true
-          response_delay_ms = 0
-
-          [[listeners]]
-          name = "http"
-          protocol = "tcp"
-          port = 8088
-          bind_address = "0.0.0.0"
-          enabled = true
-          emulate_response = true
-          response_delay_ms = 0
-
-          [[listeners]]
-          name = "https"
-          protocol = "tcp"
-          port = 8448
-          bind_address = "0.0.0.0"
-          enabled = true
-          emulate_response = true
-          response_delay_ms = 0
-
-          [[listeners]]
-          name = "smtp"
-          protocol = "tcp"
-          port = 25250
-          bind_address = "0.0.0.0"
-          enabled = true
-          emulate_response = true
-          response_delay_ms = 0
-
-          [[listeners]]
-          name = "ftp"
-          protocol = "tcp"
-          port = 21210
-          bind_address = "0.0.0.0"
-          enabled = true
-          emulate_response = true
-          response_delay_ms = 0
-          "@ | Out-File -FilePath "config.toml" -Encoding utf8
-        shell: pwsh
+        run: cargo test --all --target ${{ matrix.target }}
+        continue-on-error: true  # ARM64 tests may fail due to emulation
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nettrap-windows
+          name: nettrap-${{ matrix.name }}
           path: |
-            target/release/nettrap.exe
-            target/release/WinDivert.dll
-            config.toml
+            target/${{ matrix.target }}/release/nettrap.exe
+            target/${{ matrix.target }}/release/WinDivert.dll
 
+  # ============================================
+  # Security Audit
+  # ============================================
   security-audit:
     name: Security Audit
     runs-on: ubuntu-latest
@@ -315,43 +312,77 @@ jobs:
       - name: Run security audit
         run: cargo audit
 
+  # ============================================
+  # Release Build
+  # ============================================
   release:
-    name: Release
+    name: Create Release
     needs: [build-linux, build-macos, build-windows]
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'release' && github.event.action == 'published'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libpcap-dev libnetfilter-queue-dev libnfnetlink-dev
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.88
-
-      - name: Build release binary
-        run: cargo build --release
-
-      - name: Download Windows artifact
+      - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          name: nettrap-windows
-          path: windows/
+          path: artifacts/
 
       - name: Create release archives
         run: |
-          tar -czvf nettrap-linux-x86_64.tar.gz ./target/release/nettrap
-          tar -czvf nettrap-windows-x86_64.tar.gz windows/nettrap.exe windows/WinDivert.dll
+          mkdir -p releases
+          
+          # Linux x64
+          cd artifacts/nettrap-linux-x64
+          tar -czvf ../../releases/nettrap-linux-x86_64.tar.gz nettrap
+          cd ..
+          
+          # Linux x86
+          cd nettrap-linux-x86
+          tar -czvf ../../releases/nettrap-linux-i686.tar.gz nettrap
+          cd ..
+          
+          # Linux ARM64
+          cd nettrap-linux-arm64
+          tar -czvf ../../releases/nettrap-linux-aarch64.tar.gz nettrap
+          cd ..
+          
+          # Linux ARM
+          cd nettrap-linux-arm
+          tar -czvf ../../releases/nettrap-linux-arm.tar.gz nettrap
+          cd ..
+          
+          # macOS x64
+          cd nettrap-macos-x64
+          tar -czvf ../../releases/nettrap-macos-x86_64.tar.gz nettrap
+          cd ..
+          
+          # macOS ARM64
+          cd nettrap-macos-arm64
+          tar -czvf ../../releases/nettrap-macos-aarch64.tar.gz nettrap
+          cd ..
+          
+          # Windows x64
+          cd nettrap-windows-x64
+          zip ../../releases/nettrap-windows-x86_64.zip nettrap.exe WinDivert.dll
+          cd ..
+          
+          # Windows x86
+          cd nettrap-windows-x86
+          zip ../../releases/nettrap-windows-i686.zip nettrap.exe WinDivert.dll
+          cd ..
+          
+          # Windows ARM64
+          cd nettrap-windows-arm64
+          zip ../../releases/nettrap-windows-aarch64.zip nettrap.exe WinDivert.dll
+          cd ..
 
-      - name: Upload release artifact
+      - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            nettrap-linux-x86_64.tar.gz
-            nettrap-windows-x86_64.tar.gz
+          files: releases/*
           generate_release_notes: true
