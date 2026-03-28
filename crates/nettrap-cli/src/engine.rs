@@ -164,6 +164,11 @@ impl Engine {
 
         let mut handles: Vec<JoinHandle<crate::Result<()>>> = Vec::new();
 
+        let output_path: Option<PathBuf> = self
+            .output_override
+            .clone()
+            .or_else(|| self.config.output_path.clone().map(PathBuf::from));
+
         if self.intercept_enabled {
             if let Some(handle) = self.spawn_interceptor_task()? {
                 handles.push(handle);
@@ -189,16 +194,17 @@ impl Engine {
                 .bind_address
                 .parse()
                 .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+            let out = output_path.clone();
 
             match protocol {
                 nettrap_core::prelude::Protocol::Udp => {
                     let handle =
-                        tokio::spawn(async move { run_udp_listener(&name, port, bind_addr).await });
+                        tokio::spawn(async move { run_udp_listener(&name, port, bind_addr, out.as_deref()).await });
                     handles.push(handle);
                 }
                 nettrap_core::prelude::Protocol::Tcp => {
                     let handle =
-                        tokio::spawn(async move { run_tcp_listener(&name, port, bind_addr).await });
+                        tokio::spawn(async move { run_tcp_listener(&name, port, bind_addr, out.as_deref()).await });
                     handles.push(handle);
                 }
                 _ => {
@@ -335,6 +341,7 @@ async fn run_udp_listener(
     name: &str,
     port: u16,
     bind_addr: std::net::IpAddr,
+    output_path: Option<&std::path::Path>,
 ) -> crate::Result<()> {
     use nettrap_proto_dns::handler::DnsHandlerTrait;
     use tokio::net::UdpSocket;
@@ -367,6 +374,7 @@ async fn run_udp_listener(
                                 src
                             );
                         }
+                        log_event(output_path, name, &src, "dns_query", &format!("{} bytes", len)).await;
                     }
                     Err(e) => {
                         tracing::warn!("UDP handler error from {}: {}", src, e);
@@ -384,6 +392,7 @@ async fn run_tcp_listener(
     name: &str,
     port: u16,
     bind_addr: std::net::IpAddr,
+    output_path: Option<&std::path::Path>,
 ) -> crate::Result<()> {
     use tokio::net::TcpListener;
 
@@ -398,8 +407,9 @@ async fn run_tcp_listener(
                 tracing::debug!("TCP listener '{}' accepted connection from {}", name, peer);
 
                 let name_owned = name.to_string();
+                let out = output_path.map(|p| p.to_path_buf());
                 tokio::spawn(async move {
-                    if let Err(e) = handle_tcp_connection(&name_owned, stream, peer).await {
+                    if let Err(e) = handle_tcp_connection(&name_owned, stream, peer, out.as_deref()).await {
                         tracing::debug!("TCP connection error from {}: {}", peer, e);
                     }
                 });
@@ -415,14 +425,19 @@ async fn handle_tcp_connection(
     name: &str,
     mut stream: tokio::net::TcpStream,
     peer: std::net::SocketAddr,
+    output_path: Option<&std::path::Path>,
 ) -> crate::Result<()> {
     use nettrap_proto_smtp::SmtpHandlerTrait;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     tracing::debug!("TCP listener '{}' handling connection from {}", name, peer);
+    log_event(output_path, name, &peer, "connect", "").await;
 
     let smtp_handler = nettrap_proto_smtp::SmtpHandler::new();
     let ftp_handler = nettrap_proto_ftp::FtpHandler::new();
+
+    let mut smtp_data_mode = false;
+    let mut smtp_data_buf: Vec<u8> = Vec::new();
 
     if name == "smtp" {
         stream
@@ -449,16 +464,40 @@ async fn handle_tcp_connection(
                 let first_bytes = &data[..len.min(20)];
 
                 let response = if name == "smtp" {
-                    let command = std::str::from_utf8(data).unwrap_or("").trim();
-                    tracing::debug!("SMTP command from {}: {}", peer, command);
-                    let result = smtp_handler.handle(command).await;
-                    match result {
-                        Ok(resp) => format!("{} {}\r\n", resp.code, resp.message).into_bytes(),
-                        Err(_) => b"500 Error\r\n".to_vec(),
+                    if smtp_data_mode {
+                        smtp_data_buf.extend_from_slice(data);
+                        let has_terminator = smtp_data_buf.windows(5).any(|w| w == b"\r\n.\r\n")
+                            || smtp_data_buf.windows(3).any(|w| w == b"\n.\n");
+                        if has_terminator {
+                            let body_size = smtp_data_buf.len();
+                            tracing::debug!("SMTP DATA complete from {}: {} bytes", peer, body_size);
+                            log_event(output_path, name, &peer, "smtp_data", &format!("{} bytes", body_size)).await;
+                            smtp_data_mode = false;
+                            smtp_data_buf.clear();
+                            format!("250 OK Queued as {}\r\n", uuid::Uuid::new_v4()).into_bytes()
+                        } else {
+                            continue;
+                        }
+                    } else {
+                        let command = std::str::from_utf8(data).unwrap_or("").trim();
+                        tracing::debug!("SMTP command from {}: {}", peer, command);
+                        log_event(output_path, name, &peer, "smtp_command", command).await;
+                        let result = smtp_handler.handle(command).await;
+                        match result {
+                            Ok(resp) => {
+                                if resp.code == 354 {
+                                    smtp_data_mode = true;
+                                    smtp_data_buf.clear();
+                                }
+                                format!("{} {}\r\n", resp.code, resp.message).into_bytes()
+                            }
+                            Err(_) => b"500 Error\r\n".to_vec(),
+                        }
                     }
                 } else if name == "ftp" {
                     let command = std::str::from_utf8(data).unwrap_or("").trim();
                     tracing::debug!("FTP command from {}: {}", peer, command);
+                    log_event(output_path, name, &peer, "ftp_command", command).await;
                     ftp_handler.handle(command).to_bytes()
                 } else {
                     let is_tls =
@@ -469,12 +508,16 @@ async fn handle_tcp_connection(
 
                     if is_http {
                         tracing::debug!("Detected HTTP protocol from {}", peer);
+                        let detail = std::str::from_utf8(first_bytes).unwrap_or("").trim().to_string();
+                        log_event(output_path, name, &peer, "http_request", &detail).await;
                         build_http_response()
                     } else if is_tls {
                         tracing::debug!("Detected TLS protocol from {}", peer);
+                        log_event(output_path, name, &peer, "tls_handshake", "").await;
                         build_tls_response()
                     } else {
                         tracing::debug!("Unknown protocol from {}, sending generic response", peer);
+                        log_event(output_path, name, &peer, "unknown", &format!("{} bytes", len)).await;
                         b"OK\n".to_vec()
                     }
                 };
@@ -486,6 +529,35 @@ async fn handle_tcp_connection(
                 tracing::debug!("TCP read error from {}: {}", peer, e);
                 return Ok(());
             }
+        }
+    }
+}
+
+async fn log_event(
+    output_path: Option<&std::path::Path>,
+    listener: &str,
+    peer: &std::net::SocketAddr,
+    event: &str,
+    detail: &str,
+) {
+    if let Some(path) = output_path {
+        let line = serde_json::json!({
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "listener": listener,
+            "src_ip": peer.ip().to_string(),
+            "src_port": peer.port(),
+            "event": event,
+            "detail": detail,
+        });
+        if let Ok(mut file) = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .await
+        {
+            use tokio::io::AsyncWriteExt;
+            let _ = file.write_all(line.to_string().as_bytes()).await;
+            let _ = file.write_all(b"\n").await;
         }
     }
 }
