@@ -211,7 +211,7 @@ pub mod windivert {
                 return Ok(None);
             }
 
-            let direction = match addr.direction {
+            let direction = match addr.direction() {
                 WINDIVERT_DIRECTION_OUT => PacketDirection::Outbound,
                 WINDIVERT_DIRECTION_IN => PacketDirection::Inbound,
                 _ => PacketDirection::Unknown,
@@ -293,7 +293,7 @@ pub mod windivert {
             tokio::task::spawn_blocking(move || {
                 let handle = handle as HANDLE;
                 let mut addr = WindivertAddress::default();
-                addr.direction = direction;
+                addr.set_direction(direction);
 
                 let guard = windivert.lock();
                 let api = guard

@@ -2,29 +2,58 @@
 //!
 //! Raw bindings to the WinDivert library for Windows packet interception.
 
-use std::os::raw::c_void;
+use std::os::raw::{c_char, c_void};
 
 pub type HANDLE = *mut c_void;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
+pub struct WindivertDataNetwork {
+    pub if_idx: u32,
+    pub sub_if_idx: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
 pub struct WindivertAddress {
-    pub if_index: u32,
-    pub sub_if_index: u32,
-    pub direction: u8,
-    pub loopback: u8,
-    pub impostor: u8,
-    pub checksum_failed: u8,
-    pub checksum_v4: u8,
-    pub checksum_v6: u8,
-    pub reserved0: u8,
-    pub reserved1: u8,
-    pub reserved2: u8,
-    pub reserved3: u8,
-    pub reserved4: u8,
-    pub reserved5: u8,
-    pub reserved6: u8,
-    pub reserved7: u8,
+    pub timestamp: i64,
+    pub flags: u32,
+    pub reserved2: u32,
+    pub data: [u8; 64],
+}
+
+impl Default for WindivertAddress {
+    fn default() -> Self {
+        Self {
+            timestamp: 0,
+            flags: 0,
+            reserved2: 0,
+            data: [0u8; 64],
+        }
+    }
+}
+
+impl WindivertAddress {
+    const OUTBOUND_BIT: u32 = 1 << 17;
+
+    pub fn direction(&self) -> u8 {
+        if (self.flags & Self::OUTBOUND_BIT) != 0 {
+            WINDIVERT_DIRECTION_OUT
+        } else {
+            WINDIVERT_DIRECTION_IN
+        }
+    }
+
+    pub fn set_direction(&mut self, direction: u8) {
+        match direction {
+            WINDIVERT_DIRECTION_OUT => self.flags |= Self::OUTBOUND_BIT,
+            _ => self.flags &= !Self::OUTBOUND_BIT,
+        }
+    }
+
+    pub fn network(&self) -> WindivertDataNetwork {
+        unsafe { std::ptr::read_unaligned(self.data.as_ptr() as *const WindivertDataNetwork) }
+    }
 }
 
 #[repr(C)]
@@ -150,8 +179,6 @@ impl WinDivert {
         layer: WindivertLayer,
         flags: u64,
     ) -> Result<HANDLE, String> {
-        use widestring::U16CString;
-
         let dll_path = crate::find_windivert_dll()
             .ok_or_else(|| "Failed to resolve WinDivert DLL path".to_string())?;
         let lib = unsafe {
@@ -159,20 +186,23 @@ impl WinDivert {
                 .map_err(|e| format!("Failed to load {}: {}", dll_path.display(), e))?
         };
 
-        let filter_wide =
-            U16CString::from_str(filter).map_err(|e| format!("Invalid filter string: {}", e))?;
+        let filter_cstr =
+            std::ffi::CString::new(filter).map_err(|e| format!("Invalid filter string: {}", e))?;
 
         let open: libloading::Symbol<
-            unsafe extern "system" fn(*const u16, WindivertLayer, i16, u64) -> HANDLE,
+            unsafe extern "system" fn(*const c_char, WindivertLayer, i16, u64) -> HANDLE,
         > = unsafe {
             lib.get(b"WinDivertOpen\0")
                 .map_err(|e| format!("Failed to get WinDivertOpen: {}", e))?
         };
 
-        let handle = unsafe { open(filter_wide.as_ptr(), layer, priority, flags) };
+        let handle = unsafe { open(filter_cstr.as_ptr(), layer, priority, flags) };
 
         if handle.is_null() {
-            return Err("WinDivertOpen returned NULL".to_string());
+            return Err(format!(
+                "WinDivertOpen returned NULL (GetLastError={})",
+                last_error()
+            ));
         }
 
         self.handle = Some(lib);
@@ -213,7 +243,7 @@ impl WinDivert {
         };
 
         if result == 0 {
-            Err("WinDivertRecv failed".to_string())
+            Err(format!("WinDivertRecv failed (GetLastError={})", last_error()))
         } else {
             Ok(len)
         }
@@ -223,23 +253,31 @@ impl WinDivert {
         let lib = self.handle.as_ref().ok_or("Library not loaded")?;
 
         let send: libloading::Symbol<
-            unsafe extern "system" fn(HANDLE, *const c_void, u32, *const WindivertAddress) -> i32,
+            unsafe extern "system" fn(
+                HANDLE,
+                *const c_void,
+                u32,
+                *mut u32,
+                *const WindivertAddress,
+            ) -> i32,
         > = unsafe {
             lib.get(b"WinDivertSend\0")
                 .map_err(|e| format!("Failed to get WinDivertSend: {}", e))?
         };
 
+        let mut send_len: u32 = 0;
         let result = unsafe {
             send(
                 handle,
                 buf.as_ptr() as *const c_void,
                 buf.len() as u32,
+                &mut send_len,
                 addr,
             )
         };
 
         if result == 0 {
-            Err("WinDivertSend failed".to_string())
+            Err(format!("WinDivertSend failed (GetLastError={})", last_error()))
         } else {
             Ok(())
         }
@@ -258,6 +296,11 @@ impl WinDivert {
         self.handle = None;
         Ok(())
     }
+}
+
+#[cfg(windows)]
+fn last_error() -> i32 {
+    std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
 }
 
 #[cfg(not(windows))]

@@ -38,13 +38,19 @@ pub mod windivert_dll {
 
         // Current directory
         if let Ok(cwd) = std::env::current_dir() {
-            paths.push(cwd);
+            paths.push(cwd.clone());
+            paths.push(cwd.join("windivert"));
         }
 
         // Executable directory
         if let Ok(exe_path) = std::env::current_exe() {
             if let Some(parent) = exe_path.parent() {
-                paths.push(parent.to_path_buf());
+                let parent = parent.to_path_buf();
+                paths.push(parent.clone());
+                paths.push(parent.join("windivert"));
+                if let Some(target_dir) = parent.parent() {
+                    paths.push(target_dir.join("windivert"));
+                }
             }
         }
 

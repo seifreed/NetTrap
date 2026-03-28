@@ -231,7 +231,7 @@ impl Interceptor for WinDivertInterceptor {
             .ok_or_else(|| Error::InvalidState("WinDivert not initialized".into()))?;
         
         let mut addr = WindivertAddress::default();
-        addr.direction = WINDIVERT_DIRECTION_OUT;
+        addr.set_direction(WINDIVERT_DIRECTION_OUT);
         
         // Reconstruct packet from FiveTuple
         // This is simplified - full implementation would rebuild the entire packet
