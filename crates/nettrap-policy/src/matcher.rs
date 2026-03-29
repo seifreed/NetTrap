@@ -100,7 +100,8 @@ impl FlowMatcher {
     }
 
     pub fn port_range(mut self, start: u16, end: u16) -> Self {
-        self.port_matchers.push(PortMatcher::Range(start, end));
+        let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+        self.port_matchers.push(PortMatcher::Range(lo, hi));
         self
     }
 
@@ -142,7 +143,7 @@ impl FlowMatcher {
         } else {
             self.port_matchers
                 .iter()
-                .any(|m| m.matches(flow.five_tuple.src_port) || m.matches(flow.five_tuple.dst_port))
+                .any(|m| m.matches(flow.five_tuple.dst_port))
         };
 
         let ip_matches = if self.ip_matchers.is_empty() {
@@ -150,7 +151,7 @@ impl FlowMatcher {
         } else {
             self.ip_matchers
                 .iter()
-                .any(|m| m.matches(&flow.five_tuple.src_ip) || m.matches(&flow.five_tuple.dst_ip))
+                .any(|m| m.matches(&flow.five_tuple.dst_ip))
         };
 
         let protocol_matches = if self.protocol_matchers.is_empty() {

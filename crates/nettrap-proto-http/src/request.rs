@@ -1,3 +1,5 @@
+const MAX_HEADER_SIZE: usize = 64 * 1024; // 64KB max headers
+const MAX_TOTAL_SIZE: usize = 10 * 1024 * 1024; // 10MB max total request
 
 #[derive(Debug, Clone)]
 pub struct HttpRequest {
@@ -10,7 +12,19 @@ pub struct HttpRequest {
 
 impl HttpRequest {
     pub fn parse(data: &[u8]) -> Option<Self> {
+        // Reject oversized requests to prevent DoS
+        if data.len() > MAX_TOTAL_SIZE {
+            return None;
+        }
+
+        // Find header end with size limit
         let header_end = data.windows(4).position(|w| w == b"\r\n\r\n")?;
+
+        // Limit header size
+        if header_end > MAX_HEADER_SIZE {
+            return None;
+        }
+
         let header_str = std::str::from_utf8(&data[..header_end]).ok()?;
 
         let mut lines = header_str.lines();
@@ -36,6 +50,17 @@ impl HttpRequest {
 
         let body_start = header_end + 4;
         let body = if body_start < data.len() {
+            // Limit body size based on Content-Length if present
+            let content_length: Option<usize> = headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("Content-Length"))
+                .and_then(|(_, v)| v.parse().ok());
+
+            if let Some(cl) = content_length {
+                if cl > MAX_TOTAL_SIZE - body_start {
+                    return None; // Body too large
+                }
+            }
             Some(data[body_start..].to_vec())
         } else {
             None

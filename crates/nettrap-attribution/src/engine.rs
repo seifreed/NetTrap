@@ -70,9 +70,11 @@ impl AttributionEngine {
     }
 
     fn perform_attribution(&self, five_tuple: &FiveTuple) -> Attribution {
+        // Try source socket first — for outbound flows from local processes,
+        // the source is the local endpoint, giving higher confidence.
         let result = crate::process::get_process_for_socket(
-            five_tuple.dst_ip,
-            five_tuple.dst_port,
+            five_tuple.src_ip,
+            five_tuple.src_port,
             five_tuple.protocol,
         );
 
@@ -83,9 +85,11 @@ impl AttributionEngine {
                 AttributionMethod::ConnectionTable,
             ),
             None => {
+                // Fallback to destination socket (e.g. for inbound connections
+                // to a local listening process).
                 let result = crate::process::get_process_for_socket(
-                    five_tuple.src_ip,
-                    five_tuple.src_port,
+                    five_tuple.dst_ip,
+                    five_tuple.dst_port,
                     five_tuple.protocol,
                 );
 

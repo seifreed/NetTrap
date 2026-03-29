@@ -163,10 +163,21 @@ impl PcapInterceptor {
             return Ok(None);
         }
 
-        let ethertype = u16::from_be_bytes([data[12], data[13]]);
+        let mut ethertype = u16::from_be_bytes([data[12], data[13]]);
+        let mut ip_offset = 14;
+
+        // Handle 802.1Q VLAN tagging (and stacked QinQ)
+        while ethertype == 0x8100 || ethertype == 0x88A8 {
+            if len < ip_offset + 4 {
+                return Ok(None);
+            }
+            ethertype = u16::from_be_bytes([data[ip_offset + 2], data[ip_offset + 3]]);
+            ip_offset += 4;
+        }
+
         match ethertype {
-            0x0800 => Self::parse_ipv4(data, len, 14, interface),
-            0x86DD => Self::parse_ipv6(data, len, 14, interface),
+            0x0800 => Self::parse_ipv4(data, len, ip_offset, interface),
+            0x86DD => Self::parse_ipv6(data, len, ip_offset, interface),
             _ => Ok(None),
         }
     }
@@ -276,6 +287,31 @@ impl PcapInterceptor {
         Self::parse_transport(data, len, ip_offset + 40, protocol_num, src_ip, dst_ip, interface)
     }
 
+    /// Infer packet direction based on IP addresses.
+    /// Local/private source with public destination = Outbound, and vice versa.
+    fn infer_direction(src_ip: &IpAddr, dst_ip: &IpAddr) -> PacketDirection {
+        let src_local = src_ip.is_loopback() || match src_ip {
+            IpAddr::V4(v4) => v4.is_private() || v4.is_link_local(),
+            IpAddr::V6(v6) => {
+                let o = v6.octets();
+                (o[0] & 0xFE) == 0xFC || (o[0] == 0xFE && (o[1] & 0xC0) == 0x80)
+            }
+        };
+        let dst_local = dst_ip.is_loopback() || match dst_ip {
+            IpAddr::V4(v4) => v4.is_private() || v4.is_link_local(),
+            IpAddr::V6(v6) => {
+                let o = v6.octets();
+                (o[0] & 0xFE) == 0xFC || (o[0] == 0xFE && (o[1] & 0xC0) == 0x80)
+            }
+        };
+
+        match (src_local, dst_local) {
+            (true, false) => PacketDirection::Outbound,
+            (false, true) => PacketDirection::Inbound,
+            _ => PacketDirection::Unknown,
+        }
+    }
+
     fn parse_transport(
         data: &[u8],
         len: usize,
@@ -288,6 +324,8 @@ impl PcapInterceptor {
         if len < transport_offset {
             return Ok(None);
         }
+
+        let direction = Self::infer_direction(&src_ip, &dst_ip);
 
         match protocol {
             6 => {
@@ -309,7 +347,7 @@ impl PcapInterceptor {
 
                 let mut packet = Packet::new(
                     FiveTuple::new(src_ip, dst_ip, src_port, dst_port, Protocol::Tcp),
-                    PacketDirection::Unknown,
+                    direction,
                     bytes::Bytes::copy_from_slice(&data[payload_start..len]),
                 )
                 .with_tcp_flags(flags)
@@ -330,7 +368,7 @@ impl PcapInterceptor {
 
                 let mut packet = Packet::new(
                     FiveTuple::new(src_ip, dst_ip, src_port, dst_port, Protocol::Udp),
-                    PacketDirection::Unknown,
+                    direction,
                     bytes::Bytes::copy_from_slice(&data[payload_start..len]),
                 )
                 .with_interface(interface.to_string());
@@ -341,7 +379,7 @@ impl PcapInterceptor {
                 let payload_start = (transport_offset + 8).min(len);
                 let mut packet = Packet::new(
                     FiveTuple::new(src_ip, dst_ip, 0, 0, Protocol::Icmp),
-                    PacketDirection::Unknown,
+                    direction,
                     bytes::Bytes::copy_from_slice(&data[payload_start..len]),
                 )
                 .with_interface(interface.to_string());

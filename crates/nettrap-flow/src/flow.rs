@@ -129,21 +129,97 @@ pub enum TcpState {
 }
 
 impl TcpState {
+    /// Infer initial state from flags alone (for first packet of a flow)
     pub fn from_flags(flags: TcpFlags) -> Option<Self> {
-        if flags.contains(TcpFlags::SYN) && !flags.contains(TcpFlags::ACK) {
+        if flags.contains(TcpFlags::RST) {
+            Some(TcpState::Closed)
+        } else if flags.contains(TcpFlags::SYN) && !flags.contains(TcpFlags::ACK) {
             Some(TcpState::SynSent)
         } else if flags.contains(TcpFlags::SYN) && flags.contains(TcpFlags::ACK) {
             Some(TcpState::SynReceived)
-        } else if flags.contains(TcpFlags::FIN) && !flags.contains(TcpFlags::ACK) {
+        } else if flags.contains(TcpFlags::FIN) {
             Some(TcpState::FinWait1)
-        } else if flags.contains(TcpFlags::FIN) && flags.contains(TcpFlags::ACK) {
-            Some(TcpState::Closing)
         } else if flags.contains(TcpFlags::ACK) {
             Some(TcpState::Established)
-        } else if flags.contains(TcpFlags::RST) {
-            Some(TcpState::Closed)
         } else {
             None
+        }
+    }
+
+    /// Transition from current state given observed flags
+    pub fn transition(&self, flags: TcpFlags) -> TcpState {
+        if flags.contains(TcpFlags::RST) {
+            return TcpState::Closed;
+        }
+        match self {
+            TcpState::Closed | TcpState::Listen => {
+                if flags.contains(TcpFlags::SYN) && !flags.contains(TcpFlags::ACK) {
+                    TcpState::SynSent
+                } else {
+                    *self
+                }
+            }
+            TcpState::SynSent => {
+                if flags.contains(TcpFlags::SYN) && flags.contains(TcpFlags::ACK) {
+                    TcpState::SynReceived
+                } else {
+                    *self
+                }
+            }
+            TcpState::SynReceived => {
+                if flags.contains(TcpFlags::ACK) && !flags.contains(TcpFlags::FIN) {
+                    TcpState::Established
+                } else {
+                    *self
+                }
+            }
+            TcpState::Established => {
+                if flags.contains(TcpFlags::FIN) {
+                    TcpState::FinWait1
+                } else {
+                    *self
+                }
+            }
+            TcpState::FinWait1 => {
+                if flags.contains(TcpFlags::FIN) && flags.contains(TcpFlags::ACK) {
+                    TcpState::Closing
+                } else if flags.contains(TcpFlags::ACK) {
+                    TcpState::FinWait2
+                } else if flags.contains(TcpFlags::FIN) {
+                    TcpState::Closing
+                } else {
+                    *self
+                }
+            }
+            TcpState::FinWait2 => {
+                if flags.contains(TcpFlags::FIN) {
+                    TcpState::TimeWait
+                } else {
+                    *self
+                }
+            }
+            TcpState::CloseWait => {
+                if flags.contains(TcpFlags::FIN) {
+                    TcpState::LastAck
+                } else {
+                    *self
+                }
+            }
+            TcpState::Closing => {
+                if flags.contains(TcpFlags::ACK) {
+                    TcpState::TimeWait
+                } else {
+                    *self
+                }
+            }
+            TcpState::LastAck => {
+                if flags.contains(TcpFlags::ACK) {
+                    TcpState::Closed
+                } else {
+                    *self
+                }
+            }
+            TcpState::TimeWait => TcpState::Closed,
         }
     }
 }

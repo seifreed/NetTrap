@@ -181,11 +181,10 @@ impl RuleMatcher {
     pub fn matches(&self, ctx: &PolicyContext) -> bool {
         match self {
             RuleMatcher::Port(port) => {
-                ctx.flow.five_tuple.dst_port == *port || ctx.flow.five_tuple.src_port == *port
+                ctx.flow.five_tuple.dst_port == *port
             }
             RuleMatcher::Ports(ports) => {
                 ports.contains(&ctx.flow.five_tuple.dst_port)
-                    || ports.contains(&ctx.flow.five_tuple.src_port)
             }
             RuleMatcher::Protocol(proto) => ctx.flow.five_tuple.protocol == *proto,
             RuleMatcher::SrcIp(cidr) => cidr.contains(&ctx.flow.five_tuple.src_ip),

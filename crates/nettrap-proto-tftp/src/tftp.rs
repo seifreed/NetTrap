@@ -17,42 +17,58 @@ pub enum TftpPacket {
 
 impl TftpPacket {
     pub fn parse(data: &[u8]) -> Option<Self> {
-        if data.len() < 2 {
+        if data.len() < 4 {
             return None;
         }
         let opcode = u16::from_be_bytes([data[0], data[1]]);
         match opcode {
             TFTP_OPCODE_RRQ | TFTP_OPCODE_WRQ => {
                 let payload = &data[2..];
+                // Find null-terminated strings
                 let parts: Vec<&[u8]> = payload.split(|&b| b == 0).collect();
-                if parts.len() >= 2 {
-                    let filename = String::from_utf8_lossy(parts[0]).to_string();
-                    let mode = String::from_utf8_lossy(parts[1]).to_string();
-                    if opcode == TFTP_OPCODE_RRQ {
-                        Some(TftpPacket::ReadRequest { filename, mode })
-                    } else {
-                        Some(TftpPacket::WriteRequest { filename, mode })
-                    }
+                if parts.len() < 2 || parts[0].is_empty() {
+                    return None;
+                }
+                let filename = String::from_utf8_lossy(parts[0]).to_string();
+                // Reject path traversal attempts
+                if filename.contains("..") || filename.contains('\\') || filename.starts_with('/') {
+                    return None;
+                }
+                let mode = String::from_utf8_lossy(parts[1]).to_string();
+                if opcode == TFTP_OPCODE_RRQ {
+                    Some(TftpPacket::ReadRequest { filename, mode })
                 } else {
-                    None
+                    Some(TftpPacket::WriteRequest { filename, mode })
                 }
             }
             TFTP_OPCODE_DATA => {
-                if data.len() < 4 { return None; }
+                if data.len() < 4 {
+                    return None;
+                }
                 let block = u16::from_be_bytes([data[2], data[3]]);
                 let payload = data[4..].to_vec();
-                Some(TftpPacket::Data { block, data: payload })
+                Some(TftpPacket::Data {
+                    block,
+                    data: payload,
+                })
             }
             TFTP_OPCODE_ACK => {
-                if data.len() < 4 { return None; }
+                if data.len() < 4 {
+                    return None;
+                }
                 let block = u16::from_be_bytes([data[2], data[3]]);
                 Some(TftpPacket::Ack { block })
             }
             TFTP_OPCODE_ERROR => {
-                if data.len() < 4 { return None; }
+                if data.len() < 4 {
+                    return None;
+                }
                 let code = u16::from_be_bytes([data[2], data[3]]);
                 let msg_bytes = &data[4..];
-                let end = msg_bytes.iter().position(|&b| b == 0).unwrap_or(msg_bytes.len());
+                let end = msg_bytes
+                    .iter()
+                    .position(|&b| b == 0)
+                    .unwrap_or(msg_bytes.len());
                 let message = String::from_utf8_lossy(&msg_bytes[..end]).to_string();
                 Some(TftpPacket::Error { code, message })
             }

@@ -38,7 +38,7 @@ pub struct HttpTaste;
 impl ProtocolTaste for HttpTaste {
     fn taste(&self, data: &[u8], dst_port: u16) -> TasteScore {
         if data.len() >= 4 {
-            let methods = [b"GET " as &[u8], b"POST", b"PUT ", b"HEAD", b"DELE", b"OPTI", b"PATC", b"CONN"];
+            let methods = [b"GET " as &[u8], b"POST ", b"PUT ", b"HEAD ", b"DELETE ", b"OPTIONS ", b"PATCH ", b"CONNECT "];
             for method in &methods {
                 if data.starts_with(method) {
                     return 95;
@@ -240,8 +240,25 @@ pub struct LdapTaste;
 impl ProtocolTaste for LdapTaste {
     fn taste(&self, data: &[u8], dst_port: u16) -> TasteScore {
         if dst_port == 389 || dst_port == 636 { return 90; }
-        // LDAP starts with SEQUENCE tag 0x30
-        if data.len() >= 5 && data[0] == 0x30 { return 40; }
+        // LDAP: SEQUENCE(0x30) + length + INTEGER(0x02) for message ID
+        // This distinguishes from SNMP which has SEQUENCE + length + INTEGER(version)
+        // followed by OCTET STRING (0x04), while LDAP has INTEGER followed by APPLICATION tag (0x60-0x7F)
+        if data.len() >= 7 && data[0] == 0x30 {
+            // Skip SEQUENCE length (1 or 2 bytes)
+            let (_, len_bytes) = if data[1] & 0x80 == 0 { (data[1] as usize, 1) } else { (0, 1 + (data[1] & 0x7F) as usize) };
+            let msg_id_pos = 1 + len_bytes;
+            if msg_id_pos < data.len() && data[msg_id_pos] == 0x02 {
+                // After message ID INTEGER, check for LDAP APPLICATION tags (0x60-0x7F)
+                let id_len_pos = msg_id_pos + 1;
+                if id_len_pos < data.len() {
+                    let id_len = data[id_len_pos] as usize;
+                    let app_tag_pos = id_len_pos + 1 + id_len;
+                    if app_tag_pos < data.len() && (data[app_tag_pos] & 0xE0) == 0x60 {
+                        return 55; // LDAP APPLICATION tag found
+                    }
+                }
+            }
+        }
         0
     }
     fn protocol_name(&self) -> &'static str { "ldap" }
@@ -251,10 +268,19 @@ pub struct MqttTaste;
 impl ProtocolTaste for MqttTaste {
     fn taste(&self, data: &[u8], dst_port: u16) -> TasteScore {
         if dst_port == 1883 || dst_port == 8883 { return 90; }
-        // MQTT CONNECT packet: type 1, remaining length, "MQTT" protocol name
+        // MQTT CONNECT packet: fixed header type 1, then variable-length remaining length (1-4 bytes)
         if data.len() >= 7 && (data[0] >> 4) == 1 {
-            let remaining_start = if data[1] & 0x80 == 0 { 2 } else { 3 };
-            if remaining_start + 6 <= data.len() && &data[remaining_start + 2..remaining_start + 6] == b"MQTT" {
+            // Decode variable-length remaining length to find where payload starts
+            let mut remaining_start = 1;
+            while remaining_start < 5 && remaining_start < data.len() {
+                let has_continuation = data[remaining_start] & 0x80 != 0;
+                remaining_start += 1;
+                if !has_continuation { break; }
+            }
+            // After remaining length: protocol name length (2 bytes) + "MQTT"
+            if remaining_start + 6 <= data.len()
+                && &data[remaining_start + 2..remaining_start + 6] == b"MQTT"
+            {
                 return 95;
             }
         }
@@ -353,6 +379,89 @@ impl ProtocolTaste for NknTaste {
         0
     }
     fn protocol_name(&self) -> &'static str { "nkn" }
+}
+
+pub struct FingerTaste;
+impl ProtocolTaste for FingerTaste {
+    fn taste(&self, _data: &[u8], dst_port: u16) -> TasteScore {
+        if dst_port == 79 { return 90; }
+        0
+    }
+    fn protocol_name(&self) -> &'static str { "finger" }
+}
+
+pub struct IdentTaste;
+impl ProtocolTaste for IdentTaste {
+    fn taste(&self, data: &[u8], dst_port: u16) -> TasteScore {
+        if dst_port == 113 { return 90; }
+        // Ident queries look like "port , port\r\n"
+        if let Ok(text) = std::str::from_utf8(data) {
+            if text.contains(',') && text.trim().split(',').count() == 2 {
+                if text.trim().split(',').all(|p| p.trim().parse::<u16>().is_ok()) {
+                    return 75;
+                }
+            }
+        }
+        0
+    }
+    fn protocol_name(&self) -> &'static str { "ident" }
+}
+
+pub struct DaytimeTaste;
+impl ProtocolTaste for DaytimeTaste {
+    fn taste(&self, _data: &[u8], dst_port: u16) -> TasteScore {
+        if dst_port == 13 { return 90; }
+        0
+    }
+    fn protocol_name(&self) -> &'static str { "daytime" }
+}
+
+pub struct TimeTaste;
+impl ProtocolTaste for TimeTaste {
+    fn taste(&self, _data: &[u8], dst_port: u16) -> TasteScore {
+        if dst_port == 37 { return 90; }
+        0
+    }
+    fn protocol_name(&self) -> &'static str { "time" }
+}
+
+pub struct ChargenTaste;
+impl ProtocolTaste for ChargenTaste {
+    fn taste(&self, _data: &[u8], dst_port: u16) -> TasteScore {
+        if dst_port == 19 { return 90; }
+        0
+    }
+    fn protocol_name(&self) -> &'static str { "chargen" }
+}
+
+pub struct QuotdTaste;
+impl ProtocolTaste for QuotdTaste {
+    fn taste(&self, _data: &[u8], dst_port: u16) -> TasteScore {
+        if dst_port == 17 { return 90; }
+        0
+    }
+    fn protocol_name(&self) -> &'static str { "quotd" }
+}
+
+pub struct SyslogRecvTaste;
+impl ProtocolTaste for SyslogRecvTaste {
+    fn taste(&self, data: &[u8], dst_port: u16) -> TasteScore {
+        if dst_port == 514 { return 90; }
+        // Syslog messages start with <PRI>
+        if data.len() >= 3 && data[0] == b'<' && data.iter().take(6).any(|&b| b == b'>') {
+            return 75;
+        }
+        0
+    }
+    fn protocol_name(&self) -> &'static str { "syslogrecv" }
+}
+
+pub struct DummyTaste;
+impl ProtocolTaste for DummyTaste {
+    fn taste(&self, _data: &[u8], _dst_port: u16) -> TasteScore {
+        2 // Just above raw fallback, configurable catch-all
+    }
+    fn protocol_name(&self) -> &'static str { "dummy" }
 }
 
 pub struct RawTaste;

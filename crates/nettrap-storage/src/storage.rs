@@ -43,9 +43,13 @@ impl std::fmt::Display for StorageFormat {
     }
 }
 
-pub fn create_storage(config: StorageConfig) -> Box<dyn Storage> {
+pub fn create_storage(config: StorageConfig) -> Result<Box<dyn Storage>> {
     match config.format {
-        StorageFormat::Jsonl => Box::new(JsonlStorage::new(config.path)),
-        StorageFormat::Json | StorageFormat::Csv => Box::new(JsonlStorage::new(config.path)),
+        StorageFormat::Jsonl => Ok(Box::new(JsonlStorage::new(config.path))),
+        StorageFormat::Json => {
+            tracing::warn!("JSON storage format not yet implemented, using JSONL");
+            Ok(Box::new(JsonlStorage::new(config.path)))
+        }
+        StorageFormat::Csv => Ok(Box::new(CsvStorage::new(config.path)))
     }
 }

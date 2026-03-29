@@ -48,6 +48,14 @@ members = [
     "crates/nettrap-proto-upnp",
     "crates/nettrap-proto-ntp",
     "crates/nettrap-proto-coap",
+    "crates/nettrap-proto-finger",
+    "crates/nettrap-proto-ident",
+    "crates/nettrap-proto-daytime",
+    "crates/nettrap-proto-time",
+    "crates/nettrap-proto-chargen",
+    "crates/nettrap-proto-quotd",
+    "crates/nettrap-proto-syslogrecv",
+    "crates/nettrap-proto-dummy",
 ]
 
 [workspace.package]
@@ -159,6 +167,14 @@ nettrap-proto-sip = { path = "crates/nettrap-proto-sip" }
 nettrap-proto-upnp = { path = "crates/nettrap-proto-upnp" }
 nettrap-proto-ntp = { path = "crates/nettrap-proto-ntp" }
 nettrap-proto-coap = { path = "crates/nettrap-proto-coap" }
+nettrap-proto-finger = { path = "crates/nettrap-proto-finger" }
+nettrap-proto-ident = { path = "crates/nettrap-proto-ident" }
+nettrap-proto-daytime = { path = "crates/nettrap-proto-daytime" }
+nettrap-proto-time = { path = "crates/nettrap-proto-time" }
+nettrap-proto-chargen = { path = "crates/nettrap-proto-chargen" }
+nettrap-proto-quotd = { path = "crates/nettrap-proto-quotd" }
+nettrap-proto-syslogrecv = { path = "crates/nettrap-proto-syslogrecv" }
+nettrap-proto-dummy = { path = "crates/nettrap-proto-dummy" }
 
 [profile.release]
 lto = "thin"

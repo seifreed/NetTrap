@@ -29,6 +29,9 @@ impl PostgresHandler {
         match data[0] {
             b'Q' => {
                 // Simple query
+                if data.len() < 6 {
+                    return Vec::new();
+                }
                 let query = String::from_utf8_lossy(&data[5..]);
                 tracing::warn!("POSTGRES QUERY: {}", query);
                 // CommandComplete + ReadyForQuery
@@ -44,16 +47,6 @@ impl PostgresHandler {
                 resp
             }
             b'X' => Vec::new(), // Terminate
-            0 => {
-                // Startup message
-                let len = if data.len() >= 4 {
-                    u32::from_be_bytes([data[0], data[1], data[2], data[3]])
-                } else {
-                    0
-                };
-                tracing::info!("POSTGRES startup message, len={}", len);
-                self.get_handshake_response()
-            }
             _ if data.len() >= 4 => {
                 // Startup message (no type byte, starts with length)
                 let len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);

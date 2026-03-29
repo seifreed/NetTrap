@@ -23,6 +23,7 @@ pub struct NfqueueInterceptor {
     listener_ports: Vec<(u16, bool)>, // (port, is_tcp)
     flush_on_start: bool,
     saved_rules: RwLock<Option<String>>,
+    saved_ip_forward: RwLock<Option<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -51,6 +52,7 @@ impl NfqueueInterceptor {
             listener_ports: Vec::new(),
             flush_on_start: false,
             saved_rules: RwLock::new(None),
+            saved_ip_forward: RwLock::new(None),
         })
     }
 
@@ -198,8 +200,11 @@ impl NfqueueInterceptor {
             tracing::debug!("Installed iptables REDIRECT rule for {} port {}", proto, port);
         }
 
-        // Enable IP forwarding for MultiHost mode
+        // Enable IP forwarding for MultiHost mode, saving original state
         if self.mode == NetworkMode::MultiHost {
+            if let Ok(original) = std::fs::read_to_string("/proc/sys/net/ipv4/ip_forward") {
+                *self.saved_ip_forward.write() = Some(original.trim().to_string());
+            }
             let _ = std::fs::write("/proc/sys/net/ipv4/ip_forward", "1");
             tracing::info!("Enabled IPv4 forwarding for MultiHost mode");
         }
@@ -317,10 +322,11 @@ impl Interceptor for NfqueueInterceptor {
         // Optionally restore saved rules
         let _ = self.restore_iptables_rules();
 
-        // Disable IP forwarding if we enabled it
+        // Restore original IP forwarding state
         if self.mode == NetworkMode::MultiHost {
-            let _ = std::fs::write("/proc/sys/net/ipv4/ip_forward", "0");
-            tracing::info!("Disabled IPv4 forwarding");
+            let original = self.saved_ip_forward.read().clone().unwrap_or_else(|| "0".to_string());
+            let _ = std::fs::write("/proc/sys/net/ipv4/ip_forward", &original);
+            tracing::info!("Restored IPv4 forwarding to '{}'", original);
         }
 
         tracing::info!("NFQUEUE interceptor shut down cleanly");

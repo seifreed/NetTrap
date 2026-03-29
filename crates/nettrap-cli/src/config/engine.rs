@@ -2,6 +2,39 @@ use serde::{Deserialize, Serialize};
 
 use super::ListenerConfig;
 
+// ─── FakeTime Configuration ──────────────────────────────────────────────────
+
+/// FakeTime mode configuration — shifts all service timestamps to trigger time-bombs
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FakeTimeConfig {
+    /// Enable fake-time mode
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Initial time delta in seconds (positive = future, negative = past)
+    #[serde(default)]
+    pub init_delta: i64,
+
+    /// Seconds between auto-increment ticks (0 = disabled)
+    #[serde(default)]
+    pub auto_delay_secs: u64,
+
+    /// Seconds to add each tick
+    #[serde(default)]
+    pub auto_increment_secs: i64,
+}
+
+impl Default for FakeTimeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            init_delta: 0,
+            auto_delay_secs: 0,
+            auto_increment_secs: 0,
+        }
+    }
+}
+
 // ─── Distributed Deployment Config (all optional for standalone) ─────────────
 
 /// Distributed deployment configuration
@@ -55,7 +88,9 @@ pub struct EventSinkConfig {
     pub batch_size: usize,
 }
 
-fn default_batch_size() -> usize { 100 }
+fn default_batch_size() -> usize {
+    100
+}
 
 // ─── Database Storage Config ─────────────────────────────────────────────────
 
@@ -84,7 +119,9 @@ pub struct DatabaseConfig {
     pub node_id: Option<String>,
 }
 
-fn default_pool_size() -> u32 { 5 }
+fn default_pool_size() -> u32 {
+    5
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -95,7 +132,9 @@ pub enum NetworkMode {
 }
 
 impl Default for NetworkMode {
-    fn default() -> Self { NetworkMode::Auto }
+    fn default() -> Self {
+        NetworkMode::Auto
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -152,6 +191,9 @@ pub struct EngineConfig {
     // HTTP POST dumping directory
     #[serde(default)]
     pub http_post_dump_dir: Option<String>,
+    // SMTP email storage directory
+    #[serde(default)]
+    pub smtp_dir: Option<String>,
     // Hexdump in logs
     #[serde(default)]
     pub log_hexdump: bool,
@@ -164,6 +206,16 @@ pub struct EngineConfig {
     /// Database storage configuration (optional)
     #[serde(default)]
     pub database: DatabaseConfig,
+    /// FakeTime mode configuration (optional)
+    #[serde(default)]
+    pub faketime: FakeTimeConfig,
+    /// Language code for NBI report generation (ISO 639-1, e.g. "en", "es", "de")
+    #[serde(default = "default_report_language")]
+    pub report_language: String,
+}
+
+fn default_report_language() -> String {
+    "en".to_string()
 }
 
 impl Default for EngineConfig {
@@ -195,10 +247,13 @@ impl Default for EngineConfig {
             modify_local_dns: false,
             dns_flush_command: None,
             http_post_dump_dir: None,
+            smtp_dir: None,
             log_hexdump: false,
             pcap_prefix: None,
             distributed: DistributedConfig::default(),
             database: DatabaseConfig::default(),
+            faketime: FakeTimeConfig::default(),
+            report_language: default_report_language(),
         }
     }
 }
@@ -220,7 +275,8 @@ impl EngineConfig {
 
     /// Expand all listeners with port ranges into individual listeners
     pub fn expand_listeners(&mut self) {
-        let expanded: Vec<ListenerConfig> = self.listeners
+        let expanded: Vec<ListenerConfig> = self
+            .listeners
             .iter()
             .flat_map(|l| l.expand_port_range())
             .collect();
@@ -238,7 +294,9 @@ impl EngineConfig {
 
     /// Check if a debug flag is enabled
     pub fn has_debug_flag(&self, flag: &str) -> bool {
-        self.debug_flags.iter().any(|f| f.eq_ignore_ascii_case(flag))
+        self.debug_flags
+            .iter()
+            .any(|f| f.eq_ignore_ascii_case(flag))
     }
 
     /// Resolve effective network mode based on OS

@@ -1,4 +1,6 @@
 use async_trait::async_trait;
+use base64::Engine as Base64Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use crate::prelude::*;
 
 pub struct Pop3Handler {
@@ -147,8 +149,52 @@ impl Pop3HandlerTrait for Pop3Handler {
                 response.push_str(".\r\n");
                 Ok(Pop3Response { positive: true, message: response })
             }
+        } else if upper.starts_with("AUTH") {
+            // AUTH command — capture credentials
+            if parts.len() > 1 {
+                let mechanism = parts[1].to_uppercase();
+                match mechanism.as_str() {
+                    "PLAIN" => {
+                        // AUTH PLAIN <base64> or AUTH PLAIN then continuation
+                        if let Some(data) = parts.get(2) {
+                            if let Ok(decoded) = BASE64.decode(data.as_bytes()) {
+                                let cred_parts: Vec<&[u8]> = decoded.split(|&b| b == 0).collect();
+                                if cred_parts.len() >= 3 {
+                                    // RFC 4616: \0authcid\0passwd (with optional authzid prefix)
+                                    let user = String::from_utf8_lossy(cred_parts[1]);
+                                    let pass = String::from_utf8_lossy(cred_parts[2]);
+                                    tracing::info!("POP3 AUTH PLAIN — user: {} pass: {}", user, pass);
+                                } else if cred_parts.len() == 2 {
+                                    // 2-part format: authcid\0passwd (no authzid)
+                                    let user = String::from_utf8_lossy(cred_parts[0]);
+                                    let pass = String::from_utf8_lossy(cred_parts[1]);
+                                    tracing::info!("POP3 AUTH PLAIN — user: {} pass: {}", user, pass);
+                                }
+                            }
+                            Ok(Pop3Response::ok("Authentication successful"))
+                        } else {
+                            // Send continuation prompt
+                            Ok(Pop3Response { positive: true, message: "+\r\n".to_string() })
+                        }
+                    }
+                    _ => {
+                        tracing::info!("POP3 AUTH {} attempted", mechanism);
+                        Ok(Pop3Response::ok("Authentication successful"))
+                    }
+                }
+            } else {
+                // AUTH with no args — list mechanisms
+                let response = "+OK\r\nPLAIN\r\nLOGIN\r\n.\r\n".to_string();
+                Ok(Pop3Response { positive: true, message: response })
+            }
+        } else if upper.starts_with("APOP") {
+            // APOP <user> <digest>
+            let user = parts.get(1).unwrap_or(&"unknown");
+            let digest = parts.get(2).unwrap_or(&"");
+            tracing::info!("POP3 APOP — user: {} digest: {}", user, digest);
+            Ok(Pop3Response::ok("Authentication successful"))
         } else if upper.starts_with("CAPA") {
-            let response = "+OK Capability list follows\r\nUSER\r\nTOP\r\nUIDL\r\nSTLS\r\n.\r\n".to_string();
+            let response = "+OK Capability list follows\r\nUSER\r\nTOP\r\nUIDL\r\nSTLS\r\nSASL PLAIN LOGIN\r\n.\r\n".to_string();
             Ok(Pop3Response { positive: true, message: response })
         } else if upper.starts_with("STLS") {
             Ok(Pop3Response::ok("Begin TLS negotiation"))

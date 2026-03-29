@@ -90,6 +90,13 @@ impl SmbHandler {
         }
     }
 
+    /// Encode NetBIOS session header length (3 bytes: bits 16-0)
+    fn set_netbios_length(resp: &mut Vec<u8>, payload_len: u32) {
+        resp[1] = ((payload_len >> 16) & 0x01) as u8; // bit 16 (max 131071 bytes)
+        resp[2] = ((payload_len >> 8) & 0xFF) as u8;
+        resp[3] = (payload_len & 0xFF) as u8;
+    }
+
     fn build_smb2_negotiate_response(&self) -> Vec<u8> {
         let mut resp = Vec::new();
         // NetBIOS header (placeholder, fix length after)
@@ -125,8 +132,7 @@ impl SmbHandler {
         resp.extend_from_slice(&[0; 4]); // Reserved
         // Fix NetBIOS length
         let smb_len = (resp.len() - 4) as u32;
-        resp[2] = ((smb_len >> 8) & 0xFF) as u8;
-        resp[3] = (smb_len & 0xFF) as u8;
+        Self::set_netbios_length(&mut resp, smb_len);
         resp
     }
 
@@ -146,8 +152,7 @@ impl SmbHandler {
         resp.extend_from_slice(&[0; 4]); // Flags (response)
         resp.extend_from_slice(&[0; 60]); // Rest of header + minimal body
         let smb_len = (resp.len() - 4) as u32;
-        resp[2] = ((smb_len >> 8) & 0xFF) as u8;
-        resp[3] = (smb_len & 0xFF) as u8;
+        Self::set_netbios_length(&mut resp, smb_len);
         resp
     }
 
@@ -159,21 +164,55 @@ impl SmbHandler {
         resp.extend_from_slice(&status.to_le_bytes());
         resp.extend_from_slice(&[0; 27]); // Rest of SMB1 header
         let smb_len = (resp.len() - 4) as u32;
-        resp[2] = ((smb_len >> 8) & 0xFF) as u8;
-        resp[3] = (smb_len & 0xFF) as u8;
+        Self::set_netbios_length(&mut resp, smb_len);
         resp
     }
 
+    /// Parse NTLM Type 3 (AUTHENTICATE) message to extract domain, username, and workstation.
+    /// NTLM Type 3 layout (offsets from NTLMSSP signature):
+    ///   0-7:  "NTLMSSP\0"
+    ///   8-11: MessageType (3)
+    ///  12-19: LmChallengeResponseFields
+    ///  20-27: NtChallengeResponseFields
+    ///  28-35: DomainNameFields (len u16, maxlen u16, offset u32)
+    ///  36-43: UserNameFields   (len u16, maxlen u16, offset u32)
+    ///  44-51: WorkstationFields(len u16, maxlen u16, offset u32)
     fn extract_ntlm_info(data: &[u8]) -> Option<(String, String, String)> {
-        // Look for NTLMSSP signature
         let ntlm_sig = b"NTLMSSP\x00";
-        let pos = data.windows(8).position(|w| w == ntlm_sig)?;
-        let ntlm = &data[pos..];
-        if ntlm.len() < 12 { return None; }
+        let base = data.windows(8).position(|w| w == ntlm_sig)?;
+        let ntlm = &data[base..];
+
+        // Need at least 52 bytes for Type 3 header through WorkstationFields
+        if ntlm.len() < 52 { return None; }
+
         let msg_type = u32::from_le_bytes([ntlm[8], ntlm[9], ntlm[10], ntlm[11]]);
-        if msg_type != 3 { return None; } // Type 3 = AUTHENTICATE
-        // Simplified: just return placeholders, real parsing is complex
-        Some(("DOMAIN".to_string(), "USER".to_string(), "WORKSTATION".to_string()))
+        if msg_type != 3 { return None; }
+
+        let read_field = |offset: usize| -> Option<String> {
+            if offset + 8 > ntlm.len() { return None; }
+            let len = u16::from_le_bytes([ntlm[offset], ntlm[offset + 1]]) as usize;
+            let field_offset = u32::from_le_bytes([
+                ntlm[offset + 4], ntlm[offset + 5], ntlm[offset + 6], ntlm[offset + 7],
+            ]) as usize;
+            if len == 0 { return Some(String::new()); }
+            if field_offset + len > ntlm.len() { return None; }
+            let raw = &ntlm[field_offset..field_offset + len];
+            // NTLM uses UTF-16LE for strings in Type 3
+            if len >= 2 && len % 2 == 0 {
+                let utf16: Vec<u16> = raw.chunks_exact(2)
+                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                    .collect();
+                Some(String::from_utf16_lossy(&utf16))
+            } else {
+                Some(String::from_utf8_lossy(raw).to_string())
+            }
+        };
+
+        let domain = read_field(28).unwrap_or_default();
+        let user = read_field(36).unwrap_or_default();
+        let workstation = read_field(44).unwrap_or_default();
+
+        Some((domain, user, workstation))
     }
 }
 

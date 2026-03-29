@@ -116,7 +116,9 @@ impl EventBus {
         let handlers = self.handlers.read();
         for handler in handlers.values() {
             if handler.handles_event_type(event.event_type()) {
-                handler.handle(event)?;
+                if let Err(e) = handler.handle(event) {
+                    tracing::warn!("Event handler '{}' failed: {}", handler.name(), e);
+                }
             }
         }
         Ok(())

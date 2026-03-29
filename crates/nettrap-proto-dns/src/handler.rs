@@ -136,11 +136,17 @@ impl DnsHandlerTrait for DnsHandler {
             return Ok(response_bytes);
         }
 
-        // NXDomains cycling: return NXDOMAIN until threshold is reached
+        // NXDomains cycling: return NXDOMAIN for the first N queries per cycle,
+        // then one normal response, then repeat.
         if self.nxdomains_threshold > 0 {
             let mut count = self.nxdomains_count.write();
-            if *count < self.nxdomains_threshold {
-                *count += 1;
+            let should_nxdomain = *count < self.nxdomains_threshold;
+            *count += 1;
+            // Reset after threshold + 1 (N NXDOMAINs + 1 normal = cycle)
+            if *count > self.nxdomains_threshold {
+                *count = 0;
+            }
+            if should_nxdomain {
                 let mut response = trust_dns_proto::op::Message::new();
                 response.set_message_type(trust_dns_proto::op::MessageType::Response);
                 response.set_op_code(trust_dns_proto::op::OpCode::Query);

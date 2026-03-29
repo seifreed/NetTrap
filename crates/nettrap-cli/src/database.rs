@@ -157,7 +157,7 @@ impl MysqlStorage {
         let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_nbi_src_ip ON nbi_events (src_ip)")
             .execute(&pool).await;
 
-        tracing::info!("MariaDB/MySQL connected to {} (pool_size={})", url.split('@').last().unwrap_or(url), pool_size);
+        tracing::info!("MariaDB/MySQL connected (pool_size={})", pool_size);
 
         Ok(Self {
             pool,

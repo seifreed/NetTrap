@@ -93,6 +93,10 @@ pub mod windivert {
                     let src_port = u16::from_be(tcp_header.src_port);
                     let dst_port = u16::from_be(tcp_header.dst_port);
                     let tcp_header_len = ((tcp_header.flags0 >> 4) as usize) * 4;
+                    // Validate TCP header length (RFC 793: min 20, max 60 bytes)
+                    if tcp_header_len < 20 || tcp_header_len > 60 {
+                        return Ok(None);
+                    }
                     let payload_start = ihl + tcp_header_len;
                     if len < payload_start {
                         return Ok(None);
@@ -162,6 +166,10 @@ pub mod windivert {
                     let src_port = u16::from_be(tcp_header.src_port);
                     let dst_port = u16::from_be(tcp_header.dst_port);
                     let tcp_header_len = ((tcp_header.flags0 >> 4) as usize) * 4;
+                    // Validate TCP header length (RFC 793: min 20, max 60 bytes)
+                    if tcp_header_len < 20 || tcp_header_len > 60 {
+                        return Ok(None);
+                    }
                     let payload_start = IPV6_HEADER_LEN + tcp_header_len;
                     if len < payload_start {
                         return Ok(None);

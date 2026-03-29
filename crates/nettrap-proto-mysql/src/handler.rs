@@ -50,13 +50,22 @@ impl MysqlHandler {
     }
 
     fn handle_login(&self, data: &[u8], seq: u8) -> Vec<u8> {
-        // Extract username from handshake response
-        if data.len() > 32 {
-            let username_start = 32;
-            let username_end = data[username_start..].iter().position(|&b| b == 0)
-                .map(|p| username_start + p).unwrap_or(data.len());
-            let username = String::from_utf8_lossy(&data[username_start..username_end]);
-            tracing::warn!("MySQL LOGIN attempt: user={}", username);
+        // MySQL HandshakeResponse41 layout:
+        //   capability_flags(4) + max_packet_size(4) + charset(1) + reserved(23) = 32 bytes
+        //   Then: username (null-terminated)
+        // HandshakeResponse320 (older):
+        //   capability_flags(2) + max_packet_size(3) = 5 bytes
+        //   Then: username (null-terminated)
+        if data.len() > 4 {
+            let cap_flags = u16::from_le_bytes([data[0], data[1]]);
+            let is_41 = cap_flags & 0x0200 != 0; // CLIENT_PROTOCOL_41
+            let username_start = if is_41 && data.len() > 32 { 32 } else if data.len() > 5 { 5 } else { data.len() };
+            if username_start < data.len() {
+                let username_end = data[username_start..].iter().position(|&b| b == 0)
+                    .map(|p| username_start + p).unwrap_or(data.len());
+                let username = String::from_utf8_lossy(&data[username_start..username_end]);
+                tracing::warn!("MySQL LOGIN attempt: user={}", username);
+            }
         }
         // Return OK packet (let them "in" to capture more commands)
         Self::build_ok_packet(seq + 1)

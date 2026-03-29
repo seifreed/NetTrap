@@ -10,26 +10,24 @@ use crate::config::EngineConfig;
 
 /// Deduplicates log events within a time window
 struct ConnectionDedup {
-    seen: Mutex<HashSet<String>>,
-    last_cleanup: Mutex<std::time::Instant>,
+    data: Mutex<(HashSet<String>, std::time::Instant)>,
 }
 
 impl ConnectionDedup {
     fn new() -> Self {
         Self {
-            seen: Mutex::new(HashSet::new()),
-            last_cleanup: Mutex::new(std::time::Instant::now()),
+            data: Mutex::new((HashSet::new(), std::time::Instant::now())),
         }
     }
 
     fn should_log(&self, key: &str) -> bool {
-        let mut seen = self.seen.lock();
-        let mut last = self.last_cleanup.lock();
+        let mut data = self.data.lock();
+        let (seen, last_cleanup) = &mut *data;
 
         // Cleanup every 60 seconds
-        if last.elapsed() > std::time::Duration::from_secs(60) {
+        if last_cleanup.elapsed() > std::time::Duration::from_secs(60) {
             seen.clear();
-            *last = std::time::Instant::now();
+            *last_cleanup = std::time::Instant::now();
         }
 
         seen.insert(key.to_string())
@@ -168,7 +166,9 @@ fn handle_config(
 ) -> crate::Result<()> {
     if args.defaults {
         let config = EngineConfig::default();
-        println!("{}", toml::to_string_pretty(&config).unwrap());
+        let toml_str = toml::to_string_pretty(&config)
+            .map_err(|e| crate::Error::Config(format!("Failed to serialize config: {}", e)))?;
+        println!("{}", toml_str);
         return Ok(());
     }
 
@@ -196,7 +196,9 @@ fn handle_config(
         config.to_file(&output.to_string_lossy())?;
         println!("Config written to {}", output.display());
     } else {
-        println!("{}", toml::to_string_pretty(&config).unwrap());
+        let toml_str = toml::to_string_pretty(&config)
+            .map_err(|e| crate::Error::Config(format!("Failed to serialize config: {}", e)))?;
+        println!("{}", toml_str);
     }
 
     Ok(())
@@ -325,6 +327,8 @@ impl Engine {
             TelnetTaste, SshTaste, SmbTaste, RdpTaste, RedisTaste, MysqlTaste,
             LdapTaste, MqttTaste, SnmpTaste, SocksTaste, MemcachedTaste,
             NknTaste, PostgresTaste, SipTaste, UpnpTaste, NtpTaste, CoapTaste,
+            FingerTaste, IdentTaste, DaytimeTaste, TimeTaste, ChargenTaste,
+            QuotdTaste, SyslogRecvTaste, DummyTaste,
         };
 
         let router = Arc::new(
@@ -358,6 +362,14 @@ impl Engine {
         router.register("upnp", Box::new(UpnpTaste), false);
         router.register("ntp", Box::new(NtpTaste), false);
         router.register("coap", Box::new(CoapTaste), false);
+        router.register("finger", Box::new(FingerTaste), false);
+        router.register("ident", Box::new(IdentTaste), false);
+        router.register("daytime", Box::new(DaytimeTaste), false);
+        router.register("time", Box::new(TimeTaste), false);
+        router.register("chargen", Box::new(ChargenTaste), false);
+        router.register("quotd", Box::new(QuotdTaste), false);
+        router.register("syslogrecv", Box::new(SyslogRecvTaste), false);
+        router.register("dummy", Box::new(DummyTaste), false);
         router.register("raw", Box::new(RawTaste), false);
 
         tracing::debug!("Protocol router initialised with {} handlers", router.handler_count());
@@ -515,8 +527,6 @@ impl Engine {
             let dump_prefix = listener.dump_http_posts_prefix.clone()
                 .or_else(|| http_post_dump_dir.clone());
             let timeout_ms = listener.timeout_ms;
-            let process_whitelist = listener.process_whitelist.clone();
-            let process_blacklist = listener.process_blacklist.clone();
             let host_whitelist = listener.host_whitelist.clone();
             let host_blacklist = listener.host_blacklist.clone();
             let ca_clone = ca.clone();
@@ -535,6 +545,14 @@ impl Engine {
             let dns_response_mx = listener.dns_response_mx.clone();
             let dns_response_txt = listener.dns_response_txt.clone();
             let dns_nxdomains = listener.dns_nxdomains;
+            let smtp_dir = self.config.smtp_dir.as_ref().map(|s| PathBuf::from(s));
+
+            let process_filter = crate::process_filter::ProcessFilter::build(
+                global_process_whitelist.clone(),
+                global_process_blacklist.clone(),
+                listener.process_whitelist.clone(),
+                listener.process_blacklist.clone(),
+            );
 
             let listener_ctx = ListenerContext {
                 name: name.clone(),
@@ -549,8 +567,7 @@ impl Engine {
                 dump_prefix,
                 timeout_ms,
                 log_hexdump,
-                process_whitelist,
-                process_blacklist,
+                process_filter,
                 host_whitelist,
                 host_blacklist,
                 ca: ca_clone,
@@ -560,8 +577,6 @@ impl Engine {
                 pcap_writer: pcap_writer.clone(),
                 response_delay_ms,
                 custom_response,
-                global_process_whitelist: global_process_whitelist.clone(),
-                global_process_blacklist: global_process_blacklist.clone(),
                 nbi_collector: nbi_collector_clone,
                 session_tracker: Arc::clone(&session_tracker),
                 custom_response_config,
@@ -574,6 +589,9 @@ impl Engine {
                 pasv_ports,
                 connection_dedup: Arc::new(ConnectionDedup::new()),
                 port_forward_table: Arc::clone(&port_forward_table),
+                max_connections: listener.max_connections,
+                banner_delay_ms: listener.banner_delay_ms,
+                smtp_dir,
             };
 
             match protocol {
@@ -607,6 +625,16 @@ impl Engine {
                 // The NFQUEUE/iptables handles actual redirection
                 // The taste router handles protocol detection for arriving traffic
             }
+        }
+
+        // ── Wire FakeTime mode ───────────────────────────────────────────
+        if self.config.faketime.enabled {
+            crate::faketime::set_delta(self.config.faketime.init_delta);
+            tracing::info!("FakeTime mode enabled — initial delta: {} seconds", self.config.faketime.init_delta);
+            let ft_config = self.config.faketime.clone();
+            tokio::spawn(async move {
+                crate::faketime::run_auto_increment(ft_config).await;
+            });
         }
 
         tracing::info!("Engine running with {} tasks", handles.len());
@@ -649,7 +677,7 @@ impl Engine {
         // Generate NBI HTML report on shutdown
         if let Some(ref nbi_path) = nbi_path_for_report {
             let html_path = nbi_path.with_extension("html");
-            match crate::nbi::NbiCollector::generate_html_report(nbi_path, &html_path) {
+            match crate::nbi::NbiCollector::generate_html_report(nbi_path, &html_path, &self.config.report_language) {
                 Ok(()) => tracing::info!("NBI HTML report generated: {}", html_path.display()),
                 Err(e) => tracing::warn!("Failed to generate NBI report: {}", e),
             }
@@ -941,8 +969,7 @@ struct ListenerContext {
     dump_prefix: Option<String>,
     timeout_ms: u64,
     log_hexdump: bool,
-    process_whitelist: Vec<String>,
-    process_blacklist: Vec<String>,
+    process_filter: crate::process_filter::ProcessFilter,
     host_whitelist: Vec<String>,
     host_blacklist: Vec<String>,
     ca: Option<Arc<nettrap_tls_mitm::CertificateAuthority>>,
@@ -952,8 +979,6 @@ struct ListenerContext {
     pcap_writer: Option<Arc<nettrap_pcap::PcapWriter>>,
     response_delay_ms: u64,
     custom_response: Option<String>,
-    global_process_whitelist: Vec<String>,
-    global_process_blacklist: Vec<String>,
     nbi_collector: Arc<crate::nbi::NbiCollector>,
     session_tracker: Arc<crate::session::SessionTracker>,
     custom_response_config: Option<crate::custom_response::CustomResponseConfig>,
@@ -972,6 +997,12 @@ struct ListenerContext {
     connection_dedup: Arc<ConnectionDedup>,
     // Port forwarding table
     port_forward_table: Arc<crate::session::PortForwardTable>,
+    // Max concurrent connections (throttling)
+    max_connections: Option<u32>,
+    // Banner delay in milliseconds
+    banner_delay_ms: u64,
+    // SMTP email storage directory (overrides global config)
+    smtp_dir: Option<PathBuf>,
 }
 
 impl ListenerContext {
@@ -989,41 +1020,9 @@ impl ListenerContext {
         true
     }
 
-    /// Check if a process name is allowed by global + per-listener filters (change #4)
+    /// Check if a process name is allowed by global + per-listener filters
     fn is_process_allowed(&self, process_name: &str) -> bool {
-        // Check global filters first
-        if !self.global_process_whitelist.is_empty() {
-            let matched = self.global_process_whitelist.iter().any(|p| {
-                regex::Regex::new(p).map(|r| r.is_match(process_name)).unwrap_or_else(|_| {
-                    process_name.to_lowercase().contains(&p.to_lowercase())
-                })
-            });
-            if !matched { return false; }
-        }
-        if !self.global_process_blacklist.is_empty() {
-            let matched = self.global_process_blacklist.iter().any(|p| {
-                regex::Regex::new(p).map(|r| r.is_match(process_name)).unwrap_or_else(|_| {
-                    process_name.to_lowercase().contains(&p.to_lowercase())
-                })
-            });
-            if matched { return false; }
-        }
-        // Per-listener
-        if !self.process_whitelist.is_empty() {
-            return self.process_whitelist.iter().any(|p| {
-                regex::Regex::new(p).map(|r| r.is_match(process_name)).unwrap_or_else(|_| {
-                    process_name.to_lowercase().contains(&p.to_lowercase())
-                })
-            });
-        }
-        if !self.process_blacklist.is_empty() {
-            return !self.process_blacklist.iter().any(|p| {
-                regex::Regex::new(p).map(|r| r.is_match(process_name)).unwrap_or_else(|_| {
-                    process_name.to_lowercase().contains(&p.to_lowercase())
-                })
-            });
-        }
-        true
+        self.process_filter.is_process_allowed(process_name)
     }
 
     fn fire_execute_cmd(&self, peer: &std::net::SocketAddr) {
@@ -1343,6 +1342,7 @@ async fn run_udp_listener(
                                     ctx.apply_response_delay().await;
                                     ctx.write_pcap_response_udp(&response, &src);
                                     let _ = socket.send_to(&response, src).await;
+                                    ctx.session_tracker.update_bytes(&src, "UDP", len as u64, response.len() as u64);
                                     log_event(output_path, &ctx.name, &src, "snmp_request", &format!("{} bytes", len)).await;
                                     let nbi = crate::nbi::raw_nbi(&ctx.name, &src.ip().to_string(), src.port(), ctx.port, len, "snmp");
                                     ctx.nbi_collector.record(&nbi).await;
@@ -1353,6 +1353,7 @@ async fn run_udp_listener(
                                     ctx.apply_response_delay().await;
                                     ctx.write_pcap_response_udp(&response, &src);
                                     let _ = socket.send_to(&response, src).await;
+                                    ctx.session_tracker.update_bytes(&src, "UDP", len as u64, response.len() as u64);
                                     log_event(output_path, &ctx.name, &src, "sip_request", &format!("{} bytes", len)).await;
                                     let nbi = crate::nbi::raw_nbi(&ctx.name, &src.ip().to_string(), src.port(), ctx.port, len, "sip");
                                     ctx.nbi_collector.record(&nbi).await;
@@ -1363,6 +1364,7 @@ async fn run_udp_listener(
                                     ctx.apply_response_delay().await;
                                     ctx.write_pcap_response_udp(&response, &src);
                                     let _ = socket.send_to(&response, src).await;
+                                    ctx.session_tracker.update_bytes(&src, "UDP", len as u64, response.len() as u64);
                                     log_event(output_path, &ctx.name, &src, "upnp_request", &format!("{} bytes", len)).await;
                                     let nbi = crate::nbi::raw_nbi(&ctx.name, &src.ip().to_string(), src.port(), ctx.port, len, "upnp");
                                     ctx.nbi_collector.record(&nbi).await;
@@ -1373,6 +1375,7 @@ async fn run_udp_listener(
                                     ctx.apply_response_delay().await;
                                     ctx.write_pcap_response_udp(&response, &src);
                                     let _ = socket.send_to(&response, src).await;
+                                    ctx.session_tracker.update_bytes(&src, "UDP", len as u64, response.len() as u64);
                                     log_event(output_path, &ctx.name, &src, "ntp_request", &format!("{} bytes", len)).await;
                                     let nbi = crate::nbi::raw_nbi(&ctx.name, &src.ip().to_string(), src.port(), ctx.port, len, "ntp");
                                     ctx.nbi_collector.record(&nbi).await;
@@ -1383,6 +1386,7 @@ async fn run_udp_listener(
                                     ctx.apply_response_delay().await;
                                     ctx.write_pcap_response_udp(&response, &src);
                                     let _ = socket.send_to(&response, src).await;
+                                    ctx.session_tracker.update_bytes(&src, "UDP", len as u64, response.len() as u64);
                                     log_event(output_path, &ctx.name, &src, "coap_request", &format!("{} bytes", len)).await;
                                     let nbi = crate::nbi::raw_nbi(&ctx.name, &src.ip().to_string(), src.port(), ctx.port, len, "coap");
                                     ctx.nbi_collector.record(&nbi).await;
@@ -1393,6 +1397,7 @@ async fn run_udp_listener(
                                     ctx.apply_response_delay().await;
                                     ctx.write_pcap_response_udp(&response, &src);
                                     let _ = socket.send_to(&response, src).await;
+                                    ctx.session_tracker.update_bytes(&src, "UDP", len as u64, response.len() as u64);
                                     log_event(output_path, &ctx.name, &src, "mqtt_request", &format!("{} bytes", len)).await;
                                     let nbi = crate::nbi::raw_nbi(&ctx.name, &src.ip().to_string(), src.port(), ctx.port, len, "mqtt");
                                     ctx.nbi_collector.record(&nbi).await;
@@ -1408,22 +1413,12 @@ async fn run_udp_listener(
                             }
                         }
                         _ => {
-                            // Fallback: treat as DNS (default for UDP)
-                            match dns_handler.handle_query(&query_data, src).await {
-                                Ok(response) => {
-                                    ctx.apply_response_delay().await;
-                                    ctx.write_pcap_response_udp(&response, &src);
-                                    if let Err(e) = socket.send_to(&response, src).await {
-                                        tracing::warn!("Failed to send UDP response to {}: {}", src, e);
-                                    }
-                                    log_event(output_path, &ctx.name, &src, "dns_query", &format!("{} bytes", len)).await;
-                                    let nbi = crate::nbi::dns_nbi(&ctx.name, &src.ip().to_string(), src.port(), ctx.port, "", "query");
-                                    ctx.nbi_collector.record(&nbi).await;
-                                }
-                                Err(e) => {
-                                    tracing::warn!("UDP handler error from {}: {}", src, e);
-                                }
-                            }
+                            // Fallback: log unclassified UDP and echo back a short ack
+                            tracing::debug!("UDP '{}' unclassified {} bytes from {} (no protocol match)", ctx.name, len, src);
+                            log_event(output_path, &ctx.name, &src, "udp_unclassified", &format!("{} bytes", len)).await;
+                            let nbi = crate::nbi::raw_nbi(&ctx.name, &src.ip().to_string(), src.port(), ctx.port, len, "unknown");
+                            ctx.nbi_collector.record(&nbi).await;
+                            ctx.session_tracker.update_bytes(&src, "UDP", len as u64, 0);
                         }
                     }
                 }
@@ -1445,24 +1440,43 @@ async fn run_tcp_listener(
     output_path: Option<&std::path::Path>,
 ) -> crate::Result<()> {
     use tokio::net::TcpListener;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     let addr = std::net::SocketAddr::new(bind_addr, ctx.port);
     let listener = TcpListener::bind(addr).await?;
+    let active_connections = Arc::new(AtomicU32::new(0));
 
     tracing::info!("TCP listener '{}' listening on {}", ctx.name, addr);
 
     loop {
         match listener.accept().await {
             Ok((stream, peer)) => {
+                // Throttle: reject if max_connections exceeded
+                if let Some(max) = ctx.max_connections {
+                    let current = active_connections.load(Ordering::Relaxed);
+                    if current >= max {
+                        tracing::warn!("TCP '{}' max connections ({}) reached, rejecting {}", ctx.name, max, peer);
+                        drop(stream);
+                        continue;
+                    }
+                }
+
+                // Increment connection counter early to prevent race condition.
+                // If we reject the connection later, we decrement before continue.
+                // Use AcqRel ordering for proper cross-thread synchronization.
+                let conn_counter = Arc::clone(&active_connections);
+                conn_counter.fetch_add(1, Ordering::AcqRel);
+
                 if !ctx.is_host_allowed(&peer.ip().to_string()) {
                     tracing::debug!("Host {} blocked by filter on {}", peer.ip(), ctx.name);
+                    conn_counter.fetch_sub(1, Ordering::AcqRel);
                     continue;
                 }
 
                 tracing::debug!("TCP '{}' accepted connection from {}", ctx.name, peer);
 
-                // ── Wire attribution + process filtering (change #4) ─────
-                if let Some(ref attr_engine) = ctx.attribution {
+                // ── Wire attribution + process filtering (with timeout to avoid blocking accept) ─────
+                let process_allowed = if let Some(ref attr_engine) = ctx.attribution {
                     let five_tuple = nettrap_core::prelude::FiveTuple::new(
                         peer.ip(),
                         std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
@@ -1470,23 +1484,37 @@ async fn run_tcp_listener(
                         ctx.port,
                         nettrap_core::prelude::Protocol::Tcp,
                     );
-                    let attr = attr_engine.attribute_flow(&five_tuple);
-                    if attr.confidence != nettrap_core::prelude::AttributionConfidence::None {
-                        let proc_name = &attr.process.name;
-                        tracing::debug!(
-                            "Attribution: {} -> {} (pid={})",
-                            peer,
-                            proc_name,
-                            attr.process.pid,
-                        );
-                        // Check process filtering
-                        if !ctx.is_process_allowed(proc_name) {
-                            tracing::debug!("Process {} blocked by filter", proc_name);
-                            continue;
+                    // Attribution with timeout to prevent accept loop blocking
+                    match tokio::task::spawn_blocking({
+                        let attr_engine = Arc::clone(attr_engine);
+                        move || attr_engine.attribute_flow(&five_tuple)
+                    }).await {
+                        Ok(attr) if attr.confidence != nettrap_core::prelude::AttributionConfidence::None => {
+                            let proc_name = &attr.process.name;
+                            tracing::debug!(
+                                "Attribution: {} -> {} (pid={})",
+                                peer,
+                                proc_name,
+                                attr.process.pid,
+                            );
+                            // Register process in session tracker
+                            ctx.session_tracker.set_process(&peer, "TCP", Some(proc_name.to_string()), Some(attr.process.pid));
+                            ctx.is_process_allowed(proc_name)
                         }
-                        // Register process in session tracker
-                        ctx.session_tracker.set_process(&peer, "TCP", Some(proc_name.to_string()), Some(attr.process.pid));
+                        Ok(_) => true, // No attribution, allow connection
+                        Err(e) => {
+                            tracing::warn!("Attribution timeout/error for {}: {}", peer, e);
+                            true // Allow connection on attribution error
+                        }
                     }
+                } else {
+                    true
+                };
+
+                if !process_allowed {
+                    tracing::debug!("Process blocked by filter on {}", ctx.name);
+                    conn_counter.fetch_sub(1, Ordering::AcqRel);
+                    continue;
                 }
 
                 // Register TCP session
@@ -1498,6 +1526,7 @@ async fn run_tcp_listener(
                     if let Err(e) = handle_tcp_connection(ctx_clone, stream, peer, out.as_deref()).await {
                         tracing::debug!("TCP connection error from {}: {}", peer, e);
                     }
+                    conn_counter.fetch_sub(1, Ordering::AcqRel);
                 });
             }
             Err(e) => {
@@ -1543,7 +1572,8 @@ async fn handle_tcp_connection(
     if let Some(ref pasv) = ctx.pasv_ports {
         if let Some((start_s, end_s)) = pasv.split_once('-') {
             if let (Ok(start), Ok(end)) = (start_s.trim().parse::<u16>(), end_s.trim().parse::<u16>()) {
-                ftp_handler = ftp_handler.with_pasv_ports(start, end);
+                let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+                ftp_handler = ftp_handler.with_pasv_ports(lo, hi);
             }
         }
     }
@@ -1568,7 +1598,7 @@ async fn handle_tcp_connection(
     let mut smtp_data_buf: Vec<u8> = Vec::new();
     let mut irc_nick = "unknown".to_string();
 
-    // Protocol-specific banners
+    // Protocol-specific banners (sent immediately on connect)
     let name = ctx.name.as_str();
     if name == "smtp" || name.starts_with("smtp") {
         stream
@@ -1600,6 +1630,11 @@ async fn handle_tcp_connection(
         let handler = nettrap_proto_mysql::MysqlHandler::new();
         stream.write_all(&handler.get_handshake()).await?;
         stream.flush().await?;
+    }
+
+    // Apply banner delay AFTER banner was sent (delays command processing, not banner delivery)
+    if ctx.banner_delay_ms > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(ctx.banner_delay_ms)).await;
     }
 
     // If SSL is enabled and we have a CA, try to wrap with TLS
@@ -1729,7 +1764,7 @@ async fn handle_tcp_connection(
                     ctx.nbi_collector.record(&nbi).await;
                     handle_smtp_data(
                         data, &smtp_handler, &mut smtp_data_mode, &mut smtp_data_buf,
-                        output_path, &ctx.name, &peer,
+                        output_path, &ctx.name, &peer, ctx.smtp_dir.as_deref(),
                     ).await
                 } else if name == "ftp" || name.starts_with("ftp") {
                     let command = std::str::from_utf8(data).unwrap_or("").trim();
@@ -1750,9 +1785,18 @@ async fn handle_tcp_connection(
                     }
                 } else if name == "irc" || name.starts_with("irc") {
                     let command = std::str::from_utf8(data).unwrap_or("").trim();
-                    // Track NICK changes
+                    // Track NICK changes — sanitize to prevent log injection
                     if command.to_uppercase().starts_with("NICK ") {
-                        irc_nick = command[5..].trim().to_string();
+                        let raw_nick = command[5..].trim();
+                        // Strict sanitization: only alphanumeric, underscore, hyphen
+                        // This prevents log injection and XSS while remaining usable
+                        irc_nick = raw_nick.chars()
+                            .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+                            .take(30) // max reasonable nick length
+                            .collect();
+                        if irc_nick.is_empty() {
+                            irc_nick = "unknown".to_string();
+                        }
                     }
                     tracing::debug!("IRC command from {} ({}): {}", peer, irc_nick, command);
                     log_event(output_path, &ctx.name, &peer, "irc_command", command).await;
@@ -1841,19 +1885,40 @@ async fn handle_tcp_connection(
                                         dump_http_post(data, &ctx.dump_prefix, &peer).await;
                                     }
 
-                                    // Try custom response before webroot
-                                    if let Some(ref crc) = ctx.custom_response_config {
+                                    // DynDNS checkip emulation
+                                    if host.contains("checkip.dyndns") || host.contains("checkip") {
+                                        let src_ip = peer.ip().to_string();
+                                        let body = format!("Current IP Address: {}", src_ip);
+                                        let date = crate::faketime::fake_now().format("%a, %d %b %Y %H:%M:%S GMT");
+                                        tracing::info!("DynDNS checkip response for {}", src_ip);
+                                        format!(
+                                            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nDate: {}\r\nServer: DynDNS-CheckIP/1.0\r\n\r\n{}",
+                                            body.len(), date, body
+                                        ).into_bytes()
+                                    }
+                                    // WPAD / proxy.pac
+                                    else if path == "/wpad.dat" || path == "/proxy.pac" {
+                                        let pac = "function FindProxyForURL(url, host) { return \"DIRECT\"; }";
+                                        let date = crate::faketime::fake_now().format("%a, %d %b %Y %H:%M:%S GMT");
+                                        tracing::info!("WPAD/PAC response for {}", peer);
+                                        format!(
+                                            "HTTP/1.1 200 OK\r\nContent-Type: application/x-ns-proxy-autoconfig\r\nContent-Length: {}\r\nDate: {}\r\n\r\n{}",
+                                            pac.len(), date, pac
+                                        ).into_bytes()
+                                    }
+                                    // Try custom response before webroot, then fake file fallback
+                                    else if let Some(ref crc) = ctx.custom_response_config {
                                         if let Some(resp) = crc.build_response(&host, &path) {
                                             resp
                                         } else if let Some(ref ws) = webroot_server {
                                             ws.build_http_response(&path)
                                         } else {
-                                            build_http_response_with_version(ctx.server_version.as_deref().unwrap_or("NetTrap"))
+                                            build_http_response_with_fakefile(&path, ctx.server_version.as_deref().unwrap_or("NetTrap"))
                                         }
                                     } else if let Some(ref ws) = webroot_server {
                                         ws.build_http_response(&path)
                                     } else {
-                                        build_http_response_with_version(ctx.server_version.as_deref().unwrap_or("NetTrap"))
+                                        build_http_response_with_fakefile(&path, ctx.server_version.as_deref().unwrap_or("NetTrap"))
                                     }
                                 }
                                 "tls" => {
@@ -1887,7 +1952,7 @@ async fn handle_tcp_connection(
                                     ctx.nbi_collector.record(&nbi).await;
                                     handle_smtp_data(
                                         data, &smtp_handler, &mut smtp_data_mode, &mut smtp_data_buf,
-                                        output_path, &ctx.name, &peer,
+                                        output_path, &ctx.name, &peer, ctx.smtp_dir.as_deref(),
                                     ).await
                                 }
                                 "ftp" => {
@@ -1912,7 +1977,15 @@ async fn handle_tcp_connection(
                                 "irc" => {
                                     let command = std::str::from_utf8(data).unwrap_or("").trim();
                                     if command.to_uppercase().starts_with("NICK ") {
-                                        irc_nick = command[5..].trim().to_string();
+                                        let raw_nick = command[5..].trim();
+                                        // Strict sanitization: only alphanumeric, underscore, hyphen
+                                        irc_nick = raw_nick.chars()
+                                            .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+                                            .take(30)
+                                            .collect();
+                                        if irc_nick.is_empty() {
+                                            irc_nick = "unknown".to_string();
+                                        }
                                     }
                                     tracing::debug!("Detected IRC from {} ({}): {}", peer, irc_nick, command);
                                     log_event(output_path, &ctx.name, &peer, "irc_command", command).await;
@@ -2092,7 +2165,7 @@ async fn handle_wrapped_connection(
                     ctx.nbi_collector.record(&nbi).await;
                     handle_smtp_data(
                         data, smtp_handler, &mut smtp_data_mode, &mut smtp_data_buf,
-                        output_path, &ctx.name, &peer,
+                        output_path, &ctx.name, &peer, ctx.smtp_dir.as_deref(),
                     ).await
                 } else if name == "pop3" || name.starts_with("pop3") {
                     let command = std::str::from_utf8(data).unwrap_or("").trim();
@@ -2106,7 +2179,15 @@ async fn handle_wrapped_connection(
                 } else if name == "irc" || name.starts_with("irc") {
                     let command = std::str::from_utf8(data).unwrap_or("").trim();
                     if command.to_uppercase().starts_with("NICK ") {
-                        irc_nick = command[5..].trim().to_string();
+                        let raw_nick = command[5..].trim();
+                        // Strict sanitization: only alphanumeric, underscore, hyphen
+                        irc_nick = raw_nick.chars()
+                            .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+                            .take(30)
+                            .collect();
+                        if irc_nick.is_empty() {
+                            irc_nick = "unknown".to_string();
+                        }
                     }
                     log_event(output_path, &ctx.name, &peer, "irc_command", command).await;
                     let nbi = crate::nbi::irc_nbi(&ctx.name, &peer.ip().to_string(), peer.port(), ctx.port, &irc_nick, command, "");
@@ -2129,19 +2210,40 @@ async fn handle_wrapped_connection(
                         dump_http_post(data, &ctx.dump_prefix, &peer).await;
                     }
 
-                    // Try custom response before webroot
-                    if let Some(ref crc) = ctx.custom_response_config {
+                    // DynDNS checkip emulation (HTTPS)
+                    if host.contains("checkip.dyndns") || host.contains("checkip") {
+                        let src_ip = peer.ip().to_string();
+                        let body = format!("Current IP Address: {}", src_ip);
+                        let date = crate::faketime::fake_now().format("%a, %d %b %Y %H:%M:%S GMT");
+                        tracing::info!("DynDNS checkip response for {} (HTTPS)", src_ip);
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nDate: {}\r\nServer: DynDNS-CheckIP/1.0\r\n\r\n{}",
+                            body.len(), date, body
+                        ).into_bytes()
+                    }
+                    // WPAD / proxy.pac (HTTPS)
+                    else if path == "/wpad.dat" || path == "/proxy.pac" {
+                        let pac = "function FindProxyForURL(url, host) { return \"DIRECT\"; }";
+                        let date = crate::faketime::fake_now().format("%a, %d %b %Y %H:%M:%S GMT");
+                        tracing::info!("WPAD/PAC response for {} (HTTPS)", peer);
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/x-ns-proxy-autoconfig\r\nContent-Length: {}\r\nDate: {}\r\n\r\n{}",
+                            pac.len(), date, pac
+                        ).into_bytes()
+                    }
+                    // Try custom response before webroot, then fake file fallback
+                    else if let Some(ref crc) = ctx.custom_response_config {
                         if let Some(resp) = crc.build_response(&host, &path) {
                             resp
                         } else if let Some(ws) = webroot_server {
                             ws.build_http_response(&path)
                         } else {
-                            build_http_response_with_version(ctx.server_version.as_deref().unwrap_or("NetTrap"))
+                            build_http_response_with_fakefile(&path, ctx.server_version.as_deref().unwrap_or("NetTrap"))
                         }
                     } else if let Some(ws) = webroot_server {
                         ws.build_http_response(&path)
                     } else {
-                        build_http_response_with_version(ctx.server_version.as_deref().unwrap_or("NetTrap"))
+                        build_http_response_with_fakefile(&path, ctx.server_version.as_deref().unwrap_or("NetTrap"))
                     }
                 };
 
@@ -2172,10 +2274,19 @@ async fn handle_smtp_data(
     output_path: Option<&std::path::Path>,
     listener_name: &str,
     peer: &std::net::SocketAddr,
+    smtp_dir: Option<&std::path::Path>,
 ) -> Vec<u8> {
     use nettrap_proto_smtp::SmtpHandlerTrait;
 
+    const MAX_SMTP_DATA_SIZE: usize = 50 * 1024 * 1024; // 50 MB limit
+
     if *smtp_data_mode {
+        if smtp_data_buf.len() + data.len() > MAX_SMTP_DATA_SIZE {
+            tracing::warn!("SMTP DATA buffer exceeded limit from {} ({} bytes), discarding", peer, smtp_data_buf.len() + data.len());
+            *smtp_data_mode = false;
+            smtp_data_buf.clear();
+            return b"552 Message too large\r\n".to_vec();
+        }
         smtp_data_buf.extend_from_slice(data);
         let has_terminator = smtp_data_buf.windows(5).any(|w| w == b"\r\n.\r\n")
             || smtp_data_buf.windows(3).any(|w| w == b"\n.\n");
@@ -2183,11 +2294,20 @@ async fn handle_smtp_data(
             let body_size = smtp_data_buf.len();
             tracing::debug!("SMTP DATA complete from {}: {} bytes", peer, body_size);
             log_event(output_path, listener_name, peer, "smtp_data", &format!("{} bytes", body_size)).await;
+
+            let mbox_dir = smtp_dir
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| std::path::PathBuf::from("/var/log/nettrap/smtp"));
+            let _ = tokio::fs::create_dir_all(&mbox_dir).await;
+            let filename = format!("{}/{}.eml", mbox_dir.display(), uuid::Uuid::new_v4());
+            let _ = tokio::fs::write(&filename, &*smtp_data_buf).await;
+            tracing::info!("SMTP email saved to {}", filename);
+
             *smtp_data_mode = false;
             smtp_data_buf.clear();
             format!("250 OK Queued as {}\r\n", uuid::Uuid::new_v4()).into_bytes()
         } else {
-            Vec::new() // Need more data
+            Vec::new()
         }
     } else {
         let command = std::str::from_utf8(data).unwrap_or("").trim();
@@ -2298,6 +2418,29 @@ fn build_http_response_with_version(server: &str) -> Vec<u8> {
     .into_iter()
     .chain(body.iter().copied())
     .collect()
+}
+
+/// Build HTTP response trying fake file by extension first, then default HTML
+fn build_http_response_with_fakefile(path: &str, server: &str) -> Vec<u8> {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    if let Some((content, mime)) = crate::webroot::fake_file_for_extension(&ext) {
+        let date = chrono::Utc::now().format("%a, %d %b %Y %H:%M:%S GMT");
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nDate: {}\r\nServer: {}\r\n\r\n",
+            mime, content.len(), date, server
+        )
+        .into_bytes()
+        .into_iter()
+        .chain(content)
+        .collect()
+    } else {
+        build_http_response_with_version(server)
+    }
 }
 
 fn build_tls_response() -> Vec<u8> {

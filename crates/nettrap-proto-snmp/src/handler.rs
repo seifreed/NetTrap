@@ -104,6 +104,17 @@ impl SnmpHandler {
         }
     }
 
+    /// Encode BER length in short or long form
+    fn ber_encode_length(len: usize) -> Vec<u8> {
+        if len < 128 {
+            vec![len as u8]
+        } else if len <= 0xFF {
+            vec![0x81, len as u8]
+        } else {
+            vec![0x82, (len >> 8) as u8, (len & 0xFF) as u8]
+        }
+    }
+
     fn build_get_response(&self, community: &str, request_id: Vec<u8>) -> Vec<u8> {
         // Minimal GetResponse with sysDescr
         let sys_descr = b"NetTrap SNMP Honeypot";
@@ -115,41 +126,41 @@ impl SnmpHandler {
         let mut varbind = Vec::new();
         varbind.extend_from_slice(oid);
         varbind.push(0x04); // OCTET STRING
-        varbind.push(sys_descr.len() as u8);
+        varbind.extend_from_slice(&Self::ber_encode_length(sys_descr.len()));
         varbind.extend_from_slice(sys_descr);
 
         let mut varbind_seq = vec![0x30];
-        varbind_seq.push(varbind.len() as u8);
+        varbind_seq.extend_from_slice(&Self::ber_encode_length(varbind.len()));
         varbind_seq.extend_from_slice(&varbind);
 
         // VarBindList
         let mut varbind_list = vec![0x30];
-        varbind_list.push(varbind_seq.len() as u8);
+        varbind_list.extend_from_slice(&Self::ber_encode_length(varbind_seq.len()));
         varbind_list.extend_from_slice(&varbind_seq);
 
         // PDU (GetResponse = 0xA2)
         let mut pdu = Vec::new();
         pdu.push(0x02); // Request ID
-        pdu.push(request_id.len() as u8);
+        pdu.extend_from_slice(&Self::ber_encode_length(request_id.len()));
         pdu.extend_from_slice(&request_id);
         pdu.extend_from_slice(&[0x02, 0x01, 0x00]); // Error status: noError
         pdu.extend_from_slice(&[0x02, 0x01, 0x00]); // Error index: 0
         pdu.extend_from_slice(&varbind_list);
 
         let mut pdu_wrapped = vec![0xA2]; // GetResponse
-        pdu_wrapped.push(pdu.len() as u8);
+        pdu_wrapped.extend_from_slice(&Self::ber_encode_length(pdu.len()));
         pdu_wrapped.extend_from_slice(&pdu);
 
         // Full SNMP message
         let mut msg = Vec::new();
         msg.extend_from_slice(&[0x02, 0x01, 0x01]); // Version: v2c
         msg.push(0x04); // Community
-        msg.push(community.len() as u8);
+        msg.extend_from_slice(&Self::ber_encode_length(community.len()));
         msg.extend_from_slice(community.as_bytes());
         msg.extend_from_slice(&pdu_wrapped);
 
         let mut packet = vec![0x30];
-        packet.push(msg.len() as u8);
+        packet.extend_from_slice(&Self::ber_encode_length(msg.len()));
         packet.extend_from_slice(&msg);
         packet
     }

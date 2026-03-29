@@ -1,6 +1,14 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
 /// Network Behavior Indicator - structured per-protocol telemetry
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkBehaviorIndicator {
@@ -196,7 +204,8 @@ impl NbiCollector {
     }
 
     /// Generate an HTML report from the NBI JSONL file
-    pub fn generate_html_report(nbi_jsonl_path: &std::path::Path, output_path: &std::path::Path) -> std::io::Result<()> {
+    pub fn generate_html_report(nbi_jsonl_path: &std::path::Path, output_path: &std::path::Path, lang: &str) -> std::io::Result<()> {
+        use crate::i18n::t;
         let content = std::fs::read_to_string(nbi_jsonl_path)?;
         let mut nbis: Vec<NetworkBehaviorIndicator> = Vec::new();
 
@@ -206,31 +215,33 @@ impl NbiCollector {
             }
         }
 
-        let mut html = String::from(r#"<!DOCTYPE html>
+        let title = t("report_title", lang);
+        let title_escaped = html_escape(&title);
+        let mut html = format!(r#"<!DOCTYPE html>
 <html><head>
-<title>NetTrap - Network Behavior Indicators Report</title>
+<title>{}</title>
 <style>
-body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 20px; background: #f5f5f5; }
-h1 { color: #d35400; border-bottom: 2px solid #d35400; padding-bottom: 10px; }
-h2 { color: #2c3e50; margin-top: 30px; }
-table { border-collapse: collapse; width: 100%; margin-bottom: 20px; background: white; box-shadow: 0 1px 3px rgba(0,0,0,0.12); }
-th { background: #2c3e50; color: white; padding: 10px 15px; text-align: left; }
-td { padding: 8px 15px; border-bottom: 1px solid #ecf0f1; }
-tr:hover { background: #f8f9fa; }
-.summary { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 20px; }
-.card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.12); min-width: 150px; }
-.card h3 { margin: 0 0 10px 0; color: #7f8c8d; font-size: 14px; }
-.card .value { font-size: 28px; font-weight: bold; color: #2c3e50; }
-.protocol-dns { color: #2980b9; } .protocol-http { color: #27ae60; }
-.protocol-smtp { color: #8e44ad; } .protocol-ftp { color: #d35400; }
-.protocol-pop3 { color: #c0392b; } .protocol-irc { color: #16a085; }
-.protocol-tls { color: #f39c12; } .protocol-raw { color: #7f8c8d; }
-.protocol-tftp { color: #2c3e50; }
-.indicators { font-family: monospace; font-size: 12px; }
+body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 20px; background: #f5f5f5; }}
+h1 {{ color: #d35400; border-bottom: 2px solid #d35400; padding-bottom: 10px; }}
+h2 {{ color: #2c3e50; margin-top: 30px; }}
+table {{ border-collapse: collapse; width: 100%; margin-bottom: 20px; background: white; box-shadow: 0 1px 3px rgba(0,0,0,0.12); }}
+th {{ background: #2c3e50; color: white; padding: 10px 15px; text-align: left; }}
+td {{ padding: 8px 15px; border-bottom: 1px solid #ecf0f1; }}
+tr:hover {{ background: #f8f9fa; }}
+.summary {{ display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 20px; }}
+.card {{ background: white; padding: 20px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.12); min-width: 150px; }}
+.card h3 {{ margin: 0 0 10px 0; color: #7f8c8d; font-size: 14px; }}
+.card .value {{ font-size: 28px; font-weight: bold; color: #2c3e50; }}
+.protocol-dns {{ color: #2980b9; }} .protocol-http {{ color: #27ae60; }}
+.protocol-smtp {{ color: #8e44ad; }} .protocol-ftp {{ color: #d35400; }}
+.protocol-pop3 {{ color: #c0392b; }} .protocol-irc {{ color: #16a085; }}
+.protocol-tls {{ color: #f39c12; }} .protocol-raw {{ color: #7f8c8d; }}
+.protocol-tftp {{ color: #2c3e50; }}
+.indicators {{ font-family: monospace; font-size: 12px; }}
 </style>
 </head><body>
-<h1>NetTrap - Network Behavior Indicators</h1>
-"#);
+<h1>{}</h1>
+"#, title_escaped, title_escaped);
 
         // Summary cards
         let total = nbis.len();
@@ -242,13 +253,14 @@ tr:hover { background: #f8f9fa; }
         }
 
         html.push_str("<div class=\"summary\">");
-        html.push_str(&format!("<div class=\"card\"><h3>Total Events</h3><div class=\"value\">{}</div></div>", total));
-        html.push_str(&format!("<div class=\"card\"><h3>Unique Sources</h3><div class=\"value\">{}</div></div>", unique_ips.len()));
-        html.push_str(&format!("<div class=\"card\"><h3>Protocols</h3><div class=\"value\">{}</div></div>", protocol_counts.len()));
+        html.push_str(&format!("<div class=\"card\"><h3>{}</h3><div class=\"value\">{}</div></div>", t("total_events", lang), total));
+        html.push_str(&format!("<div class=\"card\"><h3>{}</h3><div class=\"value\">{}</div></div>", t("unique_sources", lang), unique_ips.len()));
+        html.push_str(&format!("<div class=\"card\"><h3>{}</h3><div class=\"value\">{}</div></div>", t("protocols", lang), protocol_counts.len()));
         html.push_str("</div>");
 
         // Protocol breakdown
-        html.push_str("<h2>Protocol Summary</h2><table><tr><th>Protocol</th><th>Events</th></tr>");
+        html.push_str(&format!("<h2>{}</h2><table><tr><th>{}</th><th>{}</th></tr>",
+            t("protocol_summary", lang), t("protocol", lang), t("events", lang)));
         let mut sorted_protos: Vec<_> = protocol_counts.iter().collect();
         sorted_protos.sort_by(|a, b| b.1.cmp(a.1));
         for (proto, count) in &sorted_protos {
@@ -258,7 +270,9 @@ tr:hover { background: #f8f9fa; }
         html.push_str("</table>");
 
         // Full event table
-        html.push_str("<h2>All Events</h2><table><tr><th>Time</th><th>Protocol</th><th>Listener</th><th>Source</th><th>Port</th><th>Indicators</th><th>Process</th></tr>");
+        html.push_str(&format!("<h2>{}</h2><table><tr><th>{}</th><th>{}</th><th>{}</th><th>{}</th><th>{}</th><th>{}</th><th>{}</th></tr>",
+            t("all_events", lang), t("time", lang), t("protocol", lang), t("listener", lang),
+            t("source", lang), t("port", lang), t("indicators", lang), t("process", lang)));
         for nbi in &nbis {
             let indicators_str: String = nbi.indicators.iter()
                 .map(|(k, v)| format!("{}={}", k, v))
@@ -271,13 +285,13 @@ tr:hover { background: #f8f9fa; }
             };
             html.push_str(&format!(
                 "<tr><td>{}</td><td class=\"protocol-{}\">{}</td><td>{}</td><td>{}</td><td>{}</td><td class=\"indicators\">{}</td><td>{}</td></tr>",
-                &nbi.timestamp[..19], nbi.protocol.to_lowercase(), nbi.protocol, nbi.listener,
+                if nbi.timestamp.len() >= 19 { &nbi.timestamp[..19] } else { &nbi.timestamp }, nbi.protocol.to_lowercase(), nbi.protocol, nbi.listener,
                 nbi.src_ip, nbi.dst_port, indicators_str, process_str
             ));
         }
         html.push_str("</table>");
 
-        html.push_str(&format!("<p><em>Report generated by NetTrap at {}</em></p>", chrono::Utc::now().to_rfc3339()));
+        html.push_str(&format!("<p><em>{} - {}</em></p>", t("generated_by", lang), chrono::Utc::now().to_rfc3339()));
         html.push_str("</body></html>");
 
         std::fs::write(output_path, html)?;
@@ -294,15 +308,24 @@ tr:hover { background: #f8f9fa; }
 
         // Write to file if configured
         if let Some(ref path) = self.path {
-            if let Ok(mut file) = tokio::fs::OpenOptions::new()
+            match tokio::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(path)
                 .await
             {
-                use tokio::io::AsyncWriteExt;
-                let _ = file.write_all(nbi.to_json().as_bytes()).await;
-                let _ = file.write_all(b"\n").await;
+                Ok(mut file) => {
+                    use tokio::io::AsyncWriteExt;
+                    if let Err(e) = file.write_all(nbi.to_json().as_bytes()).await {
+                        tracing::warn!("Failed to write NBI event to file: {}", e);
+                    }
+                    if let Err(e) = file.write_all(b"\n").await {
+                        tracing::warn!("Failed to write NBI newline to file: {}", e);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to open NBI file {}: {}", path.display(), e);
+                }
             }
         }
 

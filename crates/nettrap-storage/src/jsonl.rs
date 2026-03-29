@@ -43,34 +43,34 @@ impl JsonlStorage {
 impl Storage for JsonlStorage {
     async fn store_flow(&self, flow: &Flow) -> Result<()> {
         let mut writer = self.writer.write();
-        if let Some(ref mut w) = *writer {
-            let json = serde_json::to_string(flow)
-                .map_err(|e| Error::Storage(e.to_string()))?;
-            writeln!(w, "{}", json)
-                .map_err(|e| Error::Storage(e.to_string()))?;
-        }
+        let w = writer.as_mut()
+            .ok_or_else(|| Error::Storage("Storage not opened — call open() first".to_string()))?;
+        let json = serde_json::to_string(flow)
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        writeln!(w, "{}", json)
+            .map_err(|e| Error::Storage(e.to_string()))?;
         Ok(())
     }
-    
+
     async fn store_packet(&self, packet: &Packet) -> Result<()> {
         let mut writer = self.writer.write();
-        if let Some(ref mut w) = *writer {
-            let json = serde_json::to_string(packet)
-                .map_err(|e| Error::Storage(e.to_string()))?;
-            writeln!(w, "{}", json)
-                .map_err(|e| Error::Storage(e.to_string()))?;
-        }
+        let w = writer.as_mut()
+            .ok_or_else(|| Error::Storage("Storage not opened — call open() first".to_string()))?;
+        let json = serde_json::to_string(packet)
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        writeln!(w, "{}", json)
+            .map_err(|e| Error::Storage(e.to_string()))?;
         Ok(())
     }
-    
+
     async fn store_event(&self, event: &nettrap_events::Event) -> Result<()> {
         let mut writer = self.writer.write();
-        if let Some(ref mut w) = *writer {
-            let json = serde_json::to_string(event)
-                .map_err(|e| Error::Storage(e.to_string()))?;
-            writeln!(w, "{}", json)
-                .map_err(|e| Error::Storage(e.to_string()))?;
-        }
+        let w = writer.as_mut()
+            .ok_or_else(|| Error::Storage("Storage not opened — call open() first".to_string()))?;
+        let json = serde_json::to_string(event)
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        writeln!(w, "{}", json)
+            .map_err(|e| Error::Storage(e.to_string()))?;
         Ok(())
     }
     

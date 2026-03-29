@@ -100,7 +100,8 @@ impl TelnetHandler {
             "pwd" => "/root\n",
             "cd" => "", // silent
             "echo" => {
-                let echo_output = format!("{}\n", cmd.get(5..).unwrap_or(""));
+                let arg = cmd.strip_prefix("echo ").unwrap_or("");
+                let echo_output = format!("{}\n", arg);
                 return self.build_response(&echo_output, cmd);
             }
             "wget" | "curl" | "tftp" | "ftpget" => {

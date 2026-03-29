@@ -24,7 +24,7 @@ impl SocksHandler {
         let cmd = data[1];
         let port = u16::from_be_bytes([data[2], data[3]]);
         let ip = format!("{}.{}.{}.{}", data[4], data[5], data[6], data[7]);
-        let user_end = data[8..].iter().position(|&b| b == 0).unwrap_or(0);
+        let user_end = data[8..].iter().position(|&b| b == 0).unwrap_or(data.len() - 8);
         let user = String::from_utf8_lossy(&data[8..8 + user_end]);
 
         tracing::warn!(

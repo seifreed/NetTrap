@@ -5,13 +5,17 @@ pub mod database;
 pub mod distributed;
 pub mod engine;
 pub mod execute;
+pub mod faketime;
 pub mod hexdump;
+pub mod i18n;
 pub mod mkcert;
 pub mod nbi;
 pub mod output;
+pub mod process_filter;
 pub mod session;
 pub mod startup;
 pub mod template;
+pub mod vfs;
 pub mod webroot;
 pub mod windows_setup;
 

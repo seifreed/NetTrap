@@ -41,7 +41,13 @@ impl IpAddress {
     pub fn is_private(&self) -> bool {
         match self.0 {
             std::net::IpAddr::V4(v4) => v4.is_private(),
-            std::net::IpAddr::V6(_v6) => false,
+            std::net::IpAddr::V6(v6) => {
+                let octets = v6.octets();
+                // fc00::/7 — Unique Local Addresses (ULA)
+                (octets[0] & 0xFE) == 0xFC
+                // fe80::/10 — Link-Local
+                || (octets[0] == 0xFE && (octets[1] & 0xC0) == 0x80)
+            }
         }
     }
 

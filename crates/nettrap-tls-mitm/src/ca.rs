@@ -1,10 +1,48 @@
-use std::path::{Path, PathBuf};
+use chrono::Datelike;
+use nettrap_core::error::{Error, Result};
 use parking_lot::RwLock;
 use rcgen::{CertificateParams, KeyPair, PKCS_ECDSA_P256_SHA256};
-use nettrap_core::error::{Error, Result};
+use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 
 #[allow(unused_imports)]
 use std::sync::Arc;
+
+const MAX_CACHE_SIZE: usize = 1000; // Maximum cached certificates
+
+/// LRU cache for certificates
+struct CertCache {
+    certs: std::collections::HashMap<String, CachedCert>,
+    order: VecDeque<String>,
+}
+
+impl CertCache {
+    fn new() -> Self {
+        Self {
+            certs: std::collections::HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    fn get(&self, hostname: &str) -> Option<&CachedCert> {
+        self.certs.get(hostname)
+    }
+
+    fn insert(&mut self, hostname: String, cert: CachedCert) {
+        // Evict oldest entries if cache is full
+        while self.certs.len() >= MAX_CACHE_SIZE {
+            if let Some(evict_key) = self.order.pop_front() {
+                self.certs.remove(&evict_key);
+                tracing::debug!("Evicted TLS cert from cache: {}", evict_key);
+            } else {
+                break;
+            }
+        }
+
+        self.certs.insert(hostname.clone(), cert);
+        self.order.push_back(hostname);
+    }
+}
 
 /// NetTrap Certificate Authority for dynamic cert generation
 pub struct CertificateAuthority {
@@ -13,7 +51,7 @@ pub struct CertificateAuthority {
     ca_cert_pem: String,
     ca_key_pem: String,
     cert_dir: Option<PathBuf>,
-    cache: RwLock<std::collections::HashMap<String, CachedCert>>,
+    cache: RwLock<CertCache>,
 }
 
 struct CachedCert {
@@ -27,8 +65,12 @@ impl CertificateAuthority {
         let mut params = CertificateParams::new(Vec::<String>::new())
             .map_err(|e| Error::Tls(format!("Failed to create CA params: {}", e)))?;
         params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-        params.distinguished_name.push(rcgen::DnType::CommonName, "NetTrap CA");
-        params.distinguished_name.push(rcgen::DnType::OrganizationName, "NetTrap");
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "NetTrap CA");
+        params
+            .distinguished_name
+            .push(rcgen::DnType::OrganizationName, "NetTrap");
         params.not_before = rcgen::date_time_ymd(2024, 1, 1);
         params.not_after = rcgen::date_time_ymd(2034, 12, 31);
 
@@ -36,7 +78,8 @@ impl CertificateAuthority {
             .map_err(|e| Error::Tls(format!("Failed to generate CA key: {}", e)))?;
         let ca_key_pem = key_pair.serialize_pem();
 
-        let ca_cert = params.self_signed(&key_pair)
+        let ca_cert = params
+            .self_signed(&key_pair)
             .map_err(|e| Error::Tls(format!("Failed to self-sign CA: {}", e)))?;
         let ca_cert_pem = ca_cert.pem();
 
@@ -46,7 +89,7 @@ impl CertificateAuthority {
             ca_cert_pem,
             ca_key_pem,
             cert_dir: None,
-            cache: RwLock::new(std::collections::HashMap::new()),
+            cache: RwLock::new(CertCache::new()),
         })
     }
 
@@ -66,12 +109,17 @@ impl CertificateAuthority {
         let mut params = CertificateParams::new(Vec::<String>::new())
             .map_err(|e| Error::Tls(format!("Failed to create CA params: {}", e)))?;
         params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-        params.distinguished_name.push(rcgen::DnType::CommonName, "NetTrap CA");
-        params.distinguished_name.push(rcgen::DnType::OrganizationName, "NetTrap");
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "NetTrap CA");
+        params
+            .distinguished_name
+            .push(rcgen::DnType::OrganizationName, "NetTrap");
         params.not_before = rcgen::date_time_ymd(2024, 1, 1);
         params.not_after = rcgen::date_time_ymd(2034, 12, 31);
 
-        let ca_cert = params.self_signed(&key_pair)
+        let ca_cert = params
+            .self_signed(&key_pair)
             .map_err(|e| Error::Tls(format!("Failed to recreate CA: {}", e)))?;
 
         Ok(Self {
@@ -80,7 +128,7 @@ impl CertificateAuthority {
             ca_cert_pem: cert_pem,
             ca_key_pem: key_pem,
             cert_dir: None,
-            cache: RwLock::new(std::collections::HashMap::new()),
+            cache: RwLock::new(CertCache::new()),
         })
     }
 
@@ -109,22 +157,39 @@ impl CertificateAuthority {
     /// Generate a certificate for a given hostname (cached)
     pub fn generate_cert_for_host(&self, hostname: &str) -> Result<(String, String)> {
         // Check cache
-        if let Some(cached) = self.cache.read().get(hostname) {
-            return Ok((cached.cert_pem.clone(), cached.key_pem.clone()));
+        {
+            let cache = self.cache.read();
+            if let Some(cached) = cache.get(hostname) {
+                return Ok((cached.cert_pem.clone(), cached.key_pem.clone()));
+            }
         }
 
         let san = vec![hostname.to_string()];
         let mut params = CertificateParams::new(san)
             .map_err(|e| Error::Tls(format!("Failed to create cert params: {}", e)))?;
-        params.distinguished_name.push(rcgen::DnType::CommonName, hostname);
-        params.not_before = rcgen::date_time_ymd(2024, 1, 1);
-        params.not_after = rcgen::date_time_ymd(2025, 12, 31);
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, hostname);
+        let now = chrono::Utc::now();
+        let not_before = now - chrono::Duration::days(1);
+        let not_after = now + chrono::Duration::days(730);
+        params.not_before = rcgen::date_time_ymd(
+            not_before.year(),
+            not_before.month() as u8,
+            not_before.day() as u8,
+        );
+        params.not_after = rcgen::date_time_ymd(
+            not_after.year(),
+            not_after.month() as u8,
+            not_after.day() as u8,
+        );
 
         let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)
             .map_err(|e| Error::Tls(format!("Failed to generate key: {}", e)))?;
         let key_pem = key_pair.serialize_pem();
 
-        let cert = params.signed_by(&key_pair, &self.ca_cert, &self.ca_key)
+        let cert = params
+            .signed_by(&key_pair, &self.ca_cert, &self.ca_key)
             .map_err(|e| Error::Tls(format!("Failed to sign cert: {}", e)))?;
         let cert_pem = cert.pem();
 
@@ -136,21 +201,28 @@ impl CertificateAuthority {
             let _ = std::fs::write(dir.join(format!("{}.key", safe_name)), &key_pem);
         }
 
-        // Cache
-        self.cache.write().insert(hostname.to_string(), CachedCert {
-            cert_pem: cert_pem.clone(),
-            key_pem: key_pem.clone(),
-        });
+        // Cache with LRU eviction (single lock)
+        {
+            let mut cache = self.cache.write();
+            cache.insert(
+                hostname.to_string(),
+                CachedCert {
+                    cert_pem: cert_pem.clone(),
+                    key_pem: key_pem.clone(),
+                },
+            );
+        }
 
         tracing::debug!("Generated TLS certificate for {}", hostname);
         Ok((cert_pem, key_pem))
     }
 
     pub fn cache_size(&self) -> usize {
-        self.cache.read().len()
+        self.cache.read().certs.len()
     }
 
     pub fn clear_cache(&self) {
-        self.cache.write().clear();
+        self.cache.write().certs.clear();
+        self.cache.write().order.clear();
     }
 }

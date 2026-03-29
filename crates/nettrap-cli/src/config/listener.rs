@@ -68,6 +68,12 @@ pub struct ListenerConfig {
     // Timeout
     #[serde(default = "default_timeout")]
     pub timeout_ms: u64,
+    // Maximum concurrent connections per listener (throttling)
+    #[serde(default)]
+    pub max_connections: Option<u32>,
+    // Banner delay in milliseconds (for dummy/raw handlers)
+    #[serde(default)]
+    pub banner_delay_ms: u64,
 }
 
 fn default_timeout() -> u64 { 30000 }
@@ -82,7 +88,7 @@ impl ListenerConfig {
             emulate_response: true,
             response_delay_ms: 0,
             custom_response: None,
-            protocol: if port == 53 || port == 69 {
+            protocol: if matches!(port, 53 | 67 | 68 | 69 | 123 | 137 | 138 | 161 | 162 | 514 | 1900 | 5353) {
                 nettrap_core::prelude::Protocol::Udp
             } else {
                 nettrap_core::prelude::Protocol::Tcp
@@ -109,6 +115,8 @@ impl ListenerConfig {
             server_version: None,
             pasv_ports: None,
             timeout_ms: 30000,
+            max_connections: None,
+            banner_delay_ms: 0,
         }
     }
 

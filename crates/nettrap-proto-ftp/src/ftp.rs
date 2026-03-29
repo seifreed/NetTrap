@@ -85,7 +85,10 @@ impl FtpHandler {
             let port = self.pasv_port_start;
             let p1 = port / 256;
             let p2 = port % 256;
-            FtpResponse::new(227, format!("Entering Passive Mode (127,0,0,1,{},{})", p1, p2))
+            FtpResponse::new(
+                227,
+                format!("Entering Passive Mode (127,0,0,1,{},{})", p1, p2),
+            )
         } else if upper.starts_with("LIST") {
             if let Some(ref root) = self.root_dir {
                 let entries = std::fs::read_dir(root).ok();
@@ -96,43 +99,108 @@ impl FtpHandler {
                         let name = entry.file_name().to_string_lossy().to_string();
                         let meta = entry.metadata().ok();
                         let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-                        listing.push_str(&format!("-rw-r--r--    1 ftp      ftp          {} Jan 01 00:00 {}\r\n", size, name));
+                        listing.push_str(&format!(
+                            "-rw-r--r--    1 ftp      ftp          {} Jan 01 00:00 {}\r\n",
+                            size, name
+                        ));
                         count += 1;
                     }
                     // If directory is empty, show virtual files
                     if count == 0 {
                         for (vname, vsize) in VIRTUAL_FILES {
-                            listing.push_str(&format!("-rw-r--r--    1 ftp      ftp          {} Jan 01 00:00 {}\r\n", vsize, vname));
+                            listing.push_str(&format!(
+                                "-rw-r--r--    1 ftp      ftp          {} Jan 01 00:00 {}\r\n",
+                                vsize, vname
+                            ));
                         }
                     }
                     listing.push_str("226 Directory send OK.\r\n");
-                    return FtpResponse { code: 0, message: listing }; // code 0 = raw response
+                    return FtpResponse {
+                        code: 0,
+                        message: listing,
+                    }; // code 0 = raw response
                 }
             }
             // No root dir configured: return simple response
             FtpResponse::new(150, "Opening data connection")
         } else if upper.starts_with("RETR") {
             let filename = command.get(5..).unwrap_or("").trim();
+            // Reject path traversal attempts
+            if filename.contains("..") || filename.contains('\\') || filename.starts_with('/') {
+                return FtpResponse::new(550, "Invalid path");
+            }
             if let Some(ref root) = self.root_dir {
                 let path = root.join(filename);
-                if path.starts_with(root) {
-                    if path.is_file() {
-                        if let Ok(content) = std::fs::read(&path) {
-                            let mut resp = format!("150 Opening BINARY mode data connection for {} ({} bytes).\r\n", filename, content.len()).into_bytes();
-                            resp.extend_from_slice(&content);
-                            resp.extend_from_slice(b"226 Transfer complete.\r\n");
-                            return FtpResponse { code: 0, message: String::from_utf8_lossy(&resp).to_string() };
-                        }
-                    } else {
-                        // Try extension-based fallback
-                        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                // Canonicalize root first - if it fails, reject the request
+                let canonical_root = match root.canonicalize() {
+                    Ok(p) => p,
+                    Err(_) => {
+                        tracing::warn!("FTP root directory cannot be canonicalized");
+                        return FtpResponse::new(550, "Server configuration error");
+                    }
+                };
+                // Canonicalize the requested path - if it fails, file doesn't exist
+                let canonical_path = match path.canonicalize() {
+                    Ok(p) => p,
+                    Err(_) => {
+                        // File doesn't exist, try extension-based fallback
+                        let ext = std::path::Path::new(filename)
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .unwrap_or("");
                         if let Some(content) = default_file_for_extension(ext) {
-                            let mut resp = format!("150 Opening BINARY mode data connection for {} ({} bytes).\r\n", filename, content.len()).into_bytes();
+                            let mut resp = format!(
+                                "150 Opening BINARY mode data connection for {} ({} bytes).\r\n",
+                                filename,
+                                content.len()
+                            )
+                            .into_bytes();
                             resp.extend_from_slice(content);
                             resp.extend_from_slice(b"226 Transfer complete.\r\n");
-                            return FtpResponse { code: 0, message: String::from_utf8_lossy(&resp).to_string() };
+                            return FtpResponse {
+                                code: 0,
+                                message: String::from_utf8_lossy(&resp).to_string(),
+                            };
                         }
+                        return FtpResponse::new(550, "File not found");
                     }
+                };
+                // Verify the resolved path is still under root
+                if !canonical_path.starts_with(&canonical_root) {
+                    tracing::warn!("Path traversal attempt blocked: {:?}", canonical_path);
+                    return FtpResponse::new(550, "Access denied");
+                }
+                if canonical_path.is_file() {
+                    if let Ok(content) = std::fs::read(&canonical_path) {
+                        let mut resp = format!(
+                            "150 Opening BINARY mode data connection for {} ({} bytes).\r\n",
+                            filename,
+                            content.len()
+                        )
+                        .into_bytes();
+                        resp.extend_from_slice(&content);
+                        resp.extend_from_slice(b"226 Transfer complete.\r\n");
+                        return FtpResponse {
+                            code: 0,
+                            message: String::from_utf8_lossy(&resp).to_string(),
+                        };
+                    }
+                }
+                // Try extension-based fallback
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                if let Some(content) = default_file_for_extension(ext) {
+                    let mut resp = format!(
+                        "150 Opening BINARY mode data connection for {} ({} bytes).\r\n",
+                        filename,
+                        content.len()
+                    )
+                    .into_bytes();
+                    resp.extend_from_slice(content);
+                    resp.extend_from_slice(b"226 Transfer complete.\r\n");
+                    return FtpResponse {
+                        code: 0,
+                        message: String::from_utf8_lossy(&resp).to_string(),
+                    };
                 }
                 FtpResponse::new(550, "File not found")
             } else {
@@ -145,20 +213,57 @@ impl FtpHandler {
         } else if upper.starts_with("EPRT") {
             FtpResponse::new(200, "EPRT command successful")
         } else if upper.starts_with("EPSV") {
-            FtpResponse::new(229, format!("Entering Extended Passive Mode (|||{}|)", self.pasv_port_start))
+            FtpResponse::new(
+                229,
+                format!(
+                    "Entering Extended Passive Mode (|||{}|)",
+                    self.pasv_port_start
+                ),
+            )
         } else if upper.starts_with("SYST") {
             FtpResponse::new(215, "UNIX Type: L8")
         } else if upper.starts_with("FEAT") {
-            FtpResponse { code: 0, message: "211-Features:\r\n PASV\r\n UTF8\r\n SIZE\r\n MDTM\r\n211 End\r\n".to_string() }
+            FtpResponse {
+                code: 0,
+                message: "211-Features:\r\n PASV\r\n UTF8\r\n SIZE\r\n MDTM\r\n211 End\r\n"
+                    .to_string(),
+            }
         } else if upper.starts_with("SIZE") {
             let filename = command.get(5..).unwrap_or("").trim();
+            // Reject path traversal attempts
+            if filename.contains("..") || filename.contains('\\') || filename.starts_with('/') {
+                return FtpResponse::new(550, "Invalid path");
+            }
             if let Some(ref root) = self.root_dir {
                 let path = root.join(filename);
-                if path.starts_with(root) && path.is_file() {
-                    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                let canonical_root = match root.canonicalize() {
+                    Ok(p) => p,
+                    Err(_) => return FtpResponse::new(550, "Server configuration error"),
+                };
+                let canonical_path = match path.canonicalize() {
+                    Ok(p) => p,
+                    Err(_) => {
+                        // File doesn't exist, try extension fallback
+                        let ext = std::path::Path::new(filename)
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .unwrap_or("");
+                        if let Some(content) = default_file_for_extension(ext) {
+                            return FtpResponse::new(213, content.len().to_string());
+                        }
+                        return FtpResponse::new(550, "File not found");
+                    }
+                };
+                if canonical_path.starts_with(&canonical_root) && canonical_path.is_file() {
+                    let size = std::fs::metadata(&canonical_path)
+                        .map(|m| m.len())
+                        .unwrap_or(0);
                     FtpResponse::new(213, size.to_string())
                 } else {
-                    let ext = std::path::Path::new(filename).extension().and_then(|e| e.to_str()).unwrap_or("");
+                    let ext = std::path::Path::new(filename)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("");
                     if let Some(content) = default_file_for_extension(ext) {
                         FtpResponse::new(213, content.len().to_string())
                     } else {
@@ -202,7 +307,10 @@ impl FtpHandler {
                         listing.push_str(&format!("{}\r\n", entry.file_name().to_string_lossy()));
                     }
                     listing.push_str("226 Directory send OK.\r\n");
-                    return FtpResponse { code: 0, message: listing };
+                    return FtpResponse {
+                        code: 0,
+                        message: listing,
+                    };
                 }
             }
             FtpResponse::new(150, "Opening data connection")

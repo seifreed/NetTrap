@@ -31,10 +31,12 @@ impl PolicyEngine {
 
     pub fn add_rule(&mut self, rule: PolicyRule) {
         self.rules.push(rule);
+        self.rules.sort_by(|a, b| a.priority.cmp(&b.priority));
     }
 
     pub fn add_rules(&mut self, rules: impl IntoIterator<Item = PolicyRule>) {
         self.rules.extend(rules);
+        self.rules.sort_by(|a, b| a.priority.cmp(&b.priority));
     }
 
     pub fn remove_rule(&mut self, id: &str) -> bool {
@@ -61,6 +63,7 @@ impl PolicyEngine {
             }
         }
 
+        self.increment_decision(self.default_decision);
         self.default_decision
     }
 
@@ -84,10 +87,7 @@ impl PolicyEngine {
     pub fn increment_decision(&self, decision: PolicyDecision) {
         let mut stats = self.stats.write();
         let key = decision.to_string();
-        stats.decisions.entry(key).or_insert(0);
-        if let Some(count) = stats.decisions.get_mut(&decision.to_string()) {
-            *count += 1;
-        }
+        *stats.decisions.entry(key).or_insert(0) += 1;
     }
 }
 

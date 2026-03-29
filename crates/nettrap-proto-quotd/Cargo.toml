@@ -1,0 +1,13 @@
+[package]
+name = "nettrap-proto-quotd"
+description = "Quote of the Day protocol handler for NetTrap (RFC 865)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+nettrap-core.workspace = true
+tracing.workspace = true
+rand.workspace = true
