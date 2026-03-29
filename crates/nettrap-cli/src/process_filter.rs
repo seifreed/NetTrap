@@ -1,6 +1,23 @@
 use std::sync::Arc;
 
-/// Pre-compiled process filter for whitelist/blacklist matching
+/// Process filter supporting pre-compiled regex and substring patterns.
+///
+/// Used to determine if a process should be allowed to interact with a listener.
+/// Supports both global filters (shared across all listeners) and per-listener
+/// filters (specific to a single listener configuration).
+///
+/// # Filter Evaluation Order
+///
+/// 1. If global whitelist is non-empty, process must match at least one pattern
+/// 2. If global blacklist is non-empty, process must not match any pattern
+/// 3. If per-listener whitelist is non-empty, process must match at least one pattern
+/// 4. If per-listener blacklist is non-empty, process must not match any pattern
+/// 5. Otherwise, process is allowed
+///
+/// # Security Note
+///
+/// Patterns are pre-compiled at creation time to prevent ReDoS attacks from
+/// user-supplied patterns.
 #[derive(Clone)]
 pub struct ProcessFilter {
     global_whitelist: Arc<Vec<PatternMatcher>>,
@@ -9,7 +26,11 @@ pub struct ProcessFilter {
     per_listener_blacklist: Vec<PatternMatcher>,
 }
 
-/// Compiled pattern that can match via regex or substring
+/// Compiled pattern supporting regex or substring matching.
+///
+/// If the pattern is a valid regex, it will be compiled and used for matching.
+/// If the pattern is not a valid regex, it falls back to case-insensitive
+/// substring matching.
 #[derive(Clone)]
 pub struct PatternMatcher {
     original: String,
@@ -17,6 +38,10 @@ pub struct PatternMatcher {
 }
 
 impl PatternMatcher {
+    /// Creates a new pattern matcher from a string pattern.
+    ///
+    /// If the pattern is a valid regex, it will be compiled. Otherwise,
+    /// it will use case-insensitive substring matching.
     pub fn new(pattern: &str) -> Self {
         let compiled = regex::Regex::new(pattern).ok();
         Self {
@@ -25,25 +50,28 @@ impl PatternMatcher {
         }
     }
 
-    /// Check if process name matches this pattern
+    /// Checks if a process name matches this pattern.
+    ///
+    /// Uses regex matching if pattern compiled successfully, otherwise
+    /// falls back to case-insensitive substring matching.
     pub fn matches(&self, process_name: &str) -> bool {
         if let Some(ref re) = self.compiled {
             re.is_match(process_name)
         } else {
-            // Fallback to case-insensitive substring match
             process_name
                 .to_lowercase()
                 .contains(&self.original.to_lowercase())
         }
     }
 
-    /// Get the original pattern string
+    /// Returns the original pattern string.
     pub fn pattern(&self) -> &str {
         &self.original
     }
 }
 
 impl ProcessFilter {
+    /// Creates an empty filter that allows all processes.
     pub fn new() -> Self {
         Self {
             global_whitelist: Arc::new(Vec::new()),
@@ -53,14 +81,23 @@ impl ProcessFilter {
         }
     }
 
-    /// Create a process filter with pre-compiled patterns
+    /// Builds a process filter with pre-compiled patterns.
+    ///
+    /// All patterns are compiled at creation time to prevent ReDoS attacks.
+    /// Invalid regex patterns fall back to substring matching.
+    ///
+    /// # Arguments
+    ///
+    /// * `global_whitelist` - Patterns that must match (shared across all listeners)
+    /// * `global_blacklist` - Patterns that must not match (shared across all listeners)
+    /// * `listener_whitelist` - Patterns specific to this listener
+    /// * `listener_blacklist` - Patterns specific to this listener
     pub fn build(
         global_whitelist: Vec<String>,
         global_blacklist: Vec<String>,
         listener_whitelist: Vec<String>,
         listener_blacklist: Vec<String>,
     ) -> Self {
-        // Pre-compile all patterns at creation time
         let global_wl: Vec<PatternMatcher> = global_whitelist
             .iter()
             .map(|p| PatternMatcher::new(p))
@@ -89,9 +126,11 @@ impl ProcessFilter {
         }
     }
 
-    /// Check if a process is allowed based on the filters
+    /// Checks if a process is allowed based on filter rules.
+    ///
+    /// Returns `true` if the process passes all filter checks.
+    /// See struct documentation for evaluation order.
     pub fn is_process_allowed(&self, process_name: &str) -> bool {
-        // Check global filters first
         if !self.global_whitelist.is_empty() {
             let matched = self
                 .global_whitelist
@@ -112,7 +151,6 @@ impl ProcessFilter {
             }
         }
 
-        // Check per-listener filters
         if !self.per_listener_whitelist.is_empty() {
             return self
                 .per_listener_whitelist
@@ -130,12 +168,12 @@ impl ProcessFilter {
         true
     }
 
-    /// Get global whitelist patterns (for debugging)
+    /// Returns the global whitelist pattern strings (for debugging).
     pub fn global_whitelist_patterns(&self) -> Vec<&str> {
         self.global_whitelist.iter().map(|p| p.pattern()).collect()
     }
 
-    /// Get global blacklist patterns (for debugging)
+    /// Returns the global blacklist pattern strings (for debugging).
     pub fn global_blacklist_patterns(&self) -> Vec<&str> {
         self.global_blacklist.iter().map(|p| p.pattern()).collect()
     }
@@ -147,13 +185,17 @@ impl Default for ProcessFilter {
     }
 }
 
-/// Global cache for pre-compiled patterns to avoid recompilation across listeners
+/// Cache for pre-compiled global process filters.
+///
+/// Used to share compiled patterns across all listeners, avoiding
+/// redundant compilation of the same global patterns.
 pub struct GlobalProcessFilters {
     whitelist: Arc<Vec<PatternMatcher>>,
     blacklist: Arc<Vec<PatternMatcher>>,
 }
 
 impl GlobalProcessFilters {
+    /// Creates a new global filter cache with pre-compiled patterns.
     pub fn new(whitelist: Vec<String>, blacklist: Vec<String>) -> Self {
         let wl: Vec<PatternMatcher> = whitelist.iter().map(|p| PatternMatcher::new(p)).collect();
 
@@ -165,10 +207,12 @@ impl GlobalProcessFilters {
         }
     }
 
+    /// Returns a reference to the compiled whitelist patterns.
     pub fn whitelist(&self) -> &Arc<Vec<PatternMatcher>> {
         &self.whitelist
     }
 
+    /// Returns a reference to the compiled blacklist patterns.
     pub fn blacklist(&self) -> &Arc<Vec<PatternMatcher>> {
         &self.blacklist
     }

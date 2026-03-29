@@ -41,7 +41,7 @@ impl TlsWrapper {
             .map_err(|e| Error::Tls(format!("TLS handshake failed for {}: {}", hostname, e)))?;
 
         tracing::debug!("TLS handshake completed for {}", hostname);
-        Ok((WrappedStream::Tls(tls_stream), sni))
+        Ok((WrappedStream::Tls(Box::new(tls_stream)), sni))
     }
 
     /// Force TLS wrapping with a specific hostname
@@ -62,7 +62,7 @@ impl TlsWrapper {
 /// A TCP stream that may or may not be TLS-wrapped
 pub enum WrappedStream {
     Plain(TcpStream),
-    Tls(TlsStream<TcpStream>),
+    Tls(Box<TlsStream<TcpStream>>),
 }
 
 impl WrappedStream {

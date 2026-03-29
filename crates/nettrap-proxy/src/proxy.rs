@@ -101,13 +101,8 @@ impl ProxyListener {
                                     let client_clone = Arc::clone(&client_socket);
                                     tokio::spawn(async move {
                                         let mut rbuf = vec![0u8; 65535];
-                                        loop {
-                                            match s_clone.recv(&mut rbuf).await {
-                                                Ok(n) => {
-                                                    let _ = client_clone.send_to(&rbuf[..n], src).await;
-                                                }
-                                                Err(_) => break,
-                                            }
+                                        while let Ok(n) = s_clone.recv(&mut rbuf).await {
+                                            let _ = client_clone.send_to(&rbuf[..n], src).await;
                                         }
                                     });
 

@@ -1,38 +1,12 @@
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use parking_lot::Mutex;
 use tokio::task::JoinHandle;
 
 use crate::cli::Commands;
 use crate::config::EngineConfig;
-
-/// Deduplicates log events within a time window
-struct ConnectionDedup {
-    data: Mutex<(HashSet<String>, std::time::Instant)>,
-}
-
-impl ConnectionDedup {
-    fn new() -> Self {
-        Self {
-            data: Mutex::new((HashSet::new(), std::time::Instant::now())),
-        }
-    }
-
-    fn should_log(&self, key: &str) -> bool {
-        let mut data = self.data.lock();
-        let (seen, last_cleanup) = &mut *data;
-
-        // Cleanup every 60 seconds
-        if last_cleanup.elapsed() > std::time::Duration::from_secs(60) {
-            seen.clear();
-            *last_cleanup = std::time::Instant::now();
-        }
-
-        seen.insert(key.to_string())
-    }
-}
+use crate::listener_runtime::ConnectionDedup;
+use crate::utils::{log_event, dump_http_post, extract_http_host, extract_http_method, extract_http_path, build_http_response_with_fakefile};
 
 pub async fn handle_command(
     command: Commands,
@@ -953,55 +927,96 @@ async fn watch_stop_flag(path: Option<std::path::PathBuf>) {
     }
 }
 
-/// Context passed to each listener task with all its configuration
+/// Context passed to each listener task with all its configuration and runtime state.
+///
+/// This struct is created for each listener and passed to the TCP/UDP handler functions.
+/// It contains:
+/// - Per-listener configuration (name, port, banners, timeouts)
+/// - Security settings (host/process filters)
+/// - Runtime resources (router, session tracker, NBI collector)
+///
+/// # Future Refactoring
+///
+/// This struct has grown large (~40 fields). Consider refactoring into:
+/// - `ListenerConfig`: immutable configuration from config file
+/// - `ListenerRuntime`: shared runtime resources (router, session tracker, etc.)
+/// - `ListenerSecurity`: host/process filtering rules
+///
+/// See `listener_config.rs` and `listener_runtime.rs` for the separated structures.
 #[derive(Clone)]
 #[allow(dead_code)]
 struct ListenerContext {
+    /// Listener name from config (e.g., "dns", "http")
     name: String,
+    /// Port number to listen on
     port: u16,
+    /// Optional banner string for protocol greeting
     banner: Option<String>,
+    /// Directory for HTTP file serving
     webroot: Option<String>,
+    /// Directory for FTP file serving
     ftproot: Option<String>,
+    /// Directory for TFTP file serving
     tftproot: Option<String>,
+    /// Command to execute on new connection
     execute_cmd: Option<String>,
+    /// Whether to use TLS/SSL
     use_ssl: bool,
+    /// Whether to dump HTTP POST bodies to files
     dump_http_posts: bool,
+    /// Prefix for dumped HTTP POST files
     dump_prefix: Option<String>,
+    /// Connection timeout in milliseconds
     timeout_ms: u64,
+    /// Whether to log hex dump of received data
     log_hexdump: bool,
+    /// Process name whitelist/blacklist filter
     process_filter: crate::process_filter::ProcessFilter,
+    /// Allowed hosts (empty = all allowed)
     host_whitelist: Vec<String>,
+    /// Blocked hosts
     host_blacklist: Vec<String>,
+    /// TLS certificate authority for MITM
     ca: Option<Arc<nettrap_tls_mitm::CertificateAuthority>>,
-    // ── New fields ───────────────────────────────────────────────────
+    /// Protocol router for taste detection
     router: Arc<nettrap_proxy::ProtocolRouter>,
+    /// Attribution engine for process attribution
     attribution: Option<Arc<nettrap_attribution::AttributionEngine>>,
+    /// PCAP writer for packet capture
     pcap_writer: Option<Arc<nettrap_pcap::PcapWriter>>,
+    /// Artificial response delay in milliseconds
     response_delay_ms: u64,
+    /// Custom protocol response template
     custom_response: Option<String>,
+    /// NBI collector for behavioral indicators
     nbi_collector: Arc<crate::nbi::NbiCollector>,
+    /// Session tracker for connection state
     session_tracker: Arc<crate::session::SessionTracker>,
+    /// Parsed custom response configuration
     custom_response_config: Option<crate::custom_response::CustomResponseConfig>,
-    // HTTP server version string
+    /// HTTP server version string (e.g., "Apache/2.4.41")
     server_version: Option<String>,
-    // DNS response mode
+    /// DNS response mode: "auto", "hostname", or "static"
     dns_response_mode: Option<String>,
-    // DNS per-listener config
+    /// DNS response IP override
     dns_response_ip: Option<String>,
+    /// DNS MX record response
     dns_response_mx: Option<String>,
+    /// DNS TXT record response
     dns_response_txt: Option<String>,
+    /// Number of NXDOMAIN responses before returning real IP
     dns_nxdomains: Option<u32>,
-    // FTP PASV port range
+    /// FTP PASV port range (e.g., "50000-51000")
     pasv_ports: Option<String>,
-    // Rate-limited connection logging
+    /// Rate-limited connection logging deduplication
     connection_dedup: Arc<ConnectionDedup>,
-    // Port forwarding table
+    /// Port forwarding table for dynamic redirects
     port_forward_table: Arc<crate::session::PortForwardTable>,
-    // Max concurrent connections (throttling)
+    /// Maximum concurrent connections (throttling)
     max_connections: Option<u32>,
-    // Banner delay in milliseconds
+    /// Banner delay in milliseconds
     banner_delay_ms: u64,
-    // SMTP email storage directory (overrides global config)
+    /// SMTP email storage directory
     smtp_dir: Option<PathBuf>,
 }
 
@@ -2326,123 +2341,7 @@ async fn handle_smtp_data(
     }
 }
 
-// ─── Utility functions ───────────────────────────────────────────────────────
-
-fn extract_http_host(data: &[u8]) -> String {
-    let text = std::str::from_utf8(data).unwrap_or("");
-    for line in text.lines().skip(1) {
-        if line.to_lowercase().starts_with("host:") {
-            return line[5..].trim().to_string();
-        }
-    }
-    String::new()
-}
-
-fn extract_http_method(data: &[u8]) -> String {
-    let text = std::str::from_utf8(data).unwrap_or("");
-    if let Some(first_line) = text.lines().next() {
-        let parts: Vec<&str> = first_line.split_whitespace().collect();
-        if !parts.is_empty() {
-            return parts[0].to_string();
-        }
-    }
-    "GET".to_string()
-}
-
-fn extract_http_path(data: &[u8]) -> String {
-    let text = std::str::from_utf8(data).unwrap_or("");
-    if let Some(first_line) = text.lines().next() {
-        let parts: Vec<&str> = first_line.split_whitespace().collect();
-        if parts.len() >= 2 {
-            return parts[1].to_string();
-        }
-    }
-    "/".to_string()
-}
-
-async fn dump_http_post(data: &[u8], prefix: &Option<String>, peer: &std::net::SocketAddr) {
-    let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
-    let filename = if let Some(pfx) = prefix {
-        format!("{}/{}_{}.bin", pfx, timestamp, peer.port())
-    } else {
-        format!("http_post_{}_{}.bin", timestamp, peer.port())
-    };
-
-    if let Some(parent) = std::path::Path::new(&filename).parent() {
-        let _ = tokio::fs::create_dir_all(parent).await;
-    }
-
-    match tokio::fs::write(&filename, data).await {
-        Ok(()) => tracing::info!("HTTP POST dumped to {}", filename),
-        Err(e) => tracing::warn!("Failed to dump HTTP POST: {}", e),
-    }
-}
-
-async fn log_event(
-    output_path: Option<&std::path::Path>,
-    listener: &str,
-    peer: &std::net::SocketAddr,
-    event: &str,
-    detail: &str,
-) {
-    if let Some(path) = output_path {
-        let line = serde_json::json!({
-            "timestamp": chrono::Utc::now().to_rfc3339(),
-            "listener": listener,
-            "src_ip": peer.ip().to_string(),
-            "src_port": peer.port(),
-            "event": event,
-            "detail": detail,
-        });
-        if let Ok(mut file) = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .await
-        {
-            use tokio::io::AsyncWriteExt;
-            let _ = file.write_all(line.to_string().as_bytes()).await;
-            let _ = file.write_all(b"\n").await;
-        }
-    }
-}
-
-fn build_http_response_with_version(server: &str) -> Vec<u8> {
-    let body = b"<html><body><h1>Hello NetTrap</h1></body></html>";
-    let date = chrono::Utc::now().format("%a, %d %b %Y %H:%M:%S GMT");
-    format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nDate: {}\r\nServer: {}\r\n\r\n",
-        body.len(), date, server
-    )
-    .into_bytes()
-    .into_iter()
-    .chain(body.iter().copied())
-    .collect()
-}
-
-/// Build HTTP response trying fake file by extension first, then default HTML
-fn build_http_response_with_fakefile(path: &str, server: &str) -> Vec<u8> {
-    let ext = std::path::Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-
-    if let Some((content, mime)) = crate::webroot::fake_file_for_extension(&ext) {
-        let date = chrono::Utc::now().format("%a, %d %b %Y %H:%M:%S GMT");
-        format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nDate: {}\r\nServer: {}\r\n\r\n",
-            mime, content.len(), date, server
-        )
-        .into_bytes()
-        .into_iter()
-        .chain(content)
-        .collect()
-    } else {
-        build_http_response_with_version(server)
-    }
-}
-
+/// Build TLS response (minimal TLS ServerHello)
 fn build_tls_response() -> Vec<u8> {
     let mut response = vec![22, 3, 3, 0, 2, 0, 0];
     response.push(0x01);
