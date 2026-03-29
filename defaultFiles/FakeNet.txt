@@ -1,0 +1,2 @@
+NetTrap - Network Interception, Emulation & Deception Engine
+This is a default text file served by the NetTrap honeypot.

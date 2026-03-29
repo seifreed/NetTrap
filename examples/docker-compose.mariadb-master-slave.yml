@@ -1,0 +1,147 @@
+# NetTrap + MariaDB Master-Slave Replication
+# Usage: docker compose -f examples/docker-compose.mariadb-master-slave.yml up -d
+#
+# Architecture:
+#   - MariaDB Master (writes) on port 3307
+#   - MariaDB Slave (reads, replication) on port 3308
+#   - 2 NetTrap nodes writing to master
+#
+# Access:
+#   - Master: localhost:3307
+#   - Slave:  localhost:3308
+#   - Node 1: http://localhost:9091/health
+#   - Node 2: http://localhost:9092/health
+
+services:
+  mariadb-master:
+    image: mariadb:11.2
+    container_name: nettrap-mariadb-master
+    environment:
+      MYSQL_ROOT_PASSWORD: root_password
+      MYSQL_DATABASE: nettrap
+      MYSQL_USER: nettrap
+      MYSQL_PASSWORD: nettrap_password
+    ports:
+      - "3307:3306"
+    volumes:
+      - master-data:/var/lib/mysql
+      - ./mariadb-master.cnf:/etc/mysql/conf.d/master.cnf:ro
+    networks:
+      - nettrap
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  mariadb-slave:
+    image: mariadb:11.2
+    container_name: nettrap-mariadb-slave
+    environment:
+      MYSQL_ROOT_PASSWORD: root_password
+      MYSQL_DATABASE: nettrap
+      MYSQL_USER: nettrap
+      MYSQL_PASSWORD: nettrap_password
+    ports:
+      - "3308:3306"
+    volumes:
+      - slave-data:/var/lib/mysql
+      - ./mariadb-slave.cnf:/etc/mysql/conf.d/slave.cnf:ro
+    depends_on:
+      mariadb-master:
+        condition: service_healthy
+    networks:
+      - nettrap
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Configure replication after both servers are up
+  replication-setup:
+    image: mariadb:11.2
+    container_name: nettrap-repl-setup
+    depends_on:
+      mariadb-master:
+        condition: service_healthy
+      mariadb-slave:
+        condition: service_healthy
+    entrypoint: >
+      bash -c "
+      echo 'Setting up replication...'
+      sleep 5
+      mariadb -h mariadb-master -uroot -proot_password -e \"
+        CREATE USER IF NOT EXISTS 'repl'@'%' IDENTIFIED BY 'repl_password';
+        GRANT REPLICATION SLAVE ON *.* TO 'repl'@'%';
+        FLUSH PRIVILEGES;
+      \"
+      MASTER_STATUS=$$(mariadb -h mariadb-master -uroot -proot_password -e 'SHOW MASTER STATUS\G' 2>/dev/null)
+      MASTER_FILE=$$(echo \"$$MASTER_STATUS\" | grep 'File:' | awk '{print $$2}')
+      MASTER_POS=$$(echo \"$$MASTER_STATUS\" | grep 'Position:' | awk '{print $$2}')
+      echo \"Master file: $$MASTER_FILE, position: $$MASTER_POS\"
+      mariadb -h mariadb-slave -uroot -proot_password -e \"
+        STOP SLAVE;
+        CHANGE MASTER TO
+          MASTER_HOST='mariadb-master',
+          MASTER_USER='repl',
+          MASTER_PASSWORD='repl_password',
+          MASTER_LOG_FILE='$$MASTER_FILE',
+          MASTER_LOG_POS=$$MASTER_POS;
+        START SLAVE;
+      \"
+      echo 'Replication configured!'
+      mariadb -h mariadb-slave -uroot -proot_password -e 'SHOW SLAVE STATUS\G' | grep -E 'Slave_IO_Running|Slave_SQL_Running'
+      "
+    networks:
+      - nettrap
+
+  nettrap-node1:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: nettrap-ms-node1
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    ports:
+      - "15353:5353/udp"
+      - "18080:8080"
+      - "12222:2222"
+      - "9091:9090"
+    volumes:
+      - ./config-mariadb-node1.toml:/etc/nettrap/config.toml:ro
+    depends_on:
+      replication-setup:
+        condition: service_completed_successfully
+    networks:
+      - nettrap
+
+  nettrap-node2:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: nettrap-ms-node2
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    ports:
+      - "15354:5353/udp"
+      - "18081:8080"
+      - "12223:2222"
+      - "9092:9090"
+    volumes:
+      - ./config-mariadb-node2.toml:/etc/nettrap/config.toml:ro
+    depends_on:
+      replication-setup:
+        condition: service_completed_successfully
+    networks:
+      - nettrap
+
+volumes:
+  master-data:
+  slave-data:
+
+networks:
+  nettrap:
+    driver: bridge

@@ -6,40 +6,33 @@ pub use engine::*;
 pub use listener::*;
 
 pub fn default_dns_config() -> ListenerConfig {
-    ListenerConfig {
-        name: "dns".to_string(),
-        port: 53,
-        bind_address: "0.0.0.0".to_string(),
-        enabled: true,
-        emulate_response: true,
-        response_delay_ms: 0,
-        custom_response: None,
-        protocol: nettrap_core::prelude::Protocol::Udp,
-    }
+    ListenerConfig::dns()
 }
 
 pub fn default_http_config() -> ListenerConfig {
-    ListenerConfig {
-        name: "http".to_string(),
-        port: 80,
-        bind_address: "0.0.0.0".to_string(),
-        enabled: true,
-        emulate_response: true,
-        response_delay_ms: 0,
-        custom_response: None,
-        protocol: nettrap_core::prelude::Protocol::Tcp,
-    }
+    ListenerConfig::http()
 }
 
 pub fn default_https_config() -> ListenerConfig {
-    ListenerConfig {
-        name: "https".to_string(),
-        port: 443,
-        bind_address: "0.0.0.0".to_string(),
-        enabled: true,
-        emulate_response: true,
-        response_delay_ms: 0,
-        custom_response: None,
-        protocol: nettrap_core::prelude::Protocol::Tcp,
-    }
+    ListenerConfig::https()
+}
+
+pub fn default_smtp_config() -> ListenerConfig {
+    ListenerConfig::smtp()
+}
+
+pub fn default_ftp_config() -> ListenerConfig {
+    ListenerConfig::ftp()
+}
+
+pub fn default_pop3_config() -> ListenerConfig {
+    ListenerConfig::pop3()
+}
+
+pub fn default_irc_config() -> ListenerConfig {
+    ListenerConfig::irc()
+}
+
+pub fn default_tftp_config() -> ListenerConfig {
+    ListenerConfig::tftp()
 }

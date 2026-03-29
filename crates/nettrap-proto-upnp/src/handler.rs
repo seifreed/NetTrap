@@ -1,0 +1,31 @@
+pub struct UpnpHandler;
+
+impl UpnpHandler {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn handle(&self, data: &[u8]) -> Vec<u8> {
+        let text = String::from_utf8_lossy(data);
+
+        if text.contains("M-SEARCH") {
+            tracing::warn!("SSDP M-SEARCH discovery attempt");
+            let resp = "HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=1800\r\nST: upnp:rootdevice\r\nUSN: uuid:nettrap::upnp:rootdevice\r\nLOCATION: http://192.168.1.1:49152/desc.xml\r\nSERVER: Linux/3.14 UPnP/1.1 NetTrap/1.0\r\n\r\n";
+            resp.as_bytes().to_vec()
+        } else if text.contains("AddPortMapping") || text.contains("DeletePortMapping") {
+            tracing::warn!(
+                "UPnP port mapping attempt: {}",
+                text.lines().take(3).collect::<Vec<_>>().join(" | ")
+            );
+            b"<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\"><s:Body><u:AddPortMappingResponse xmlns:u=\"urn:schemas-upnp-org:service:WANIPConnection:1\"></u:AddPortMappingResponse></s:Body></s:Envelope>".to_vec()
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+impl Default for UpnpHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}

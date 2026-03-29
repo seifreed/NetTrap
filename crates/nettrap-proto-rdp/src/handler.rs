@@ -1,0 +1,91 @@
+pub struct RdpHandler {
+    // X.224 Connection Confirm + RDP Negotiation Response
+}
+
+impl RdpHandler {
+    pub fn new() -> Self { Self {} }
+
+    pub fn handle(&self, data: &[u8]) -> Vec<u8> {
+        if data.len() < 11 { return Vec::new(); }
+
+        // TPKT header: version(1) + reserved(1) + length(2)
+        if data[0] != 0x03 { // Not TPKT
+            return Vec::new();
+        }
+
+        // X.224: length(1) + type(1)
+        let x224_type = data[5] >> 4;
+
+        match x224_type {
+            0x0E => { // Connection Request (CR)
+                tracing::info!("RDP Connection Request received");
+                // Extract cookie/username if present
+                if let Some(cookie) = Self::extract_cookie(data) {
+                    tracing::warn!("RDP login cookie: {}", cookie);
+                }
+                self.build_connection_confirm(data)
+            }
+            _ => {
+                tracing::info!("RDP X.224 type: 0x{:x}", x224_type);
+                // After CC, client sends MCS Connect Initial
+                // Log it but respond with error to capture credentials
+                self.build_mcs_disconnect()
+            }
+        }
+    }
+
+    fn extract_cookie(data: &[u8]) -> Option<String> {
+        let text = String::from_utf8_lossy(data);
+        if let Some(start) = text.find("Cookie: mstshash=") {
+            let rest = &text[start + 17..];
+            let end = rest.find('\r').unwrap_or(rest.len());
+            Some(rest[..end].to_string())
+        } else if let Some(start) = text.find("Cookie:") {
+            let rest = &text[start + 7..];
+            let end = rest.find('\r').unwrap_or(rest.len());
+            Some(rest[..end].trim().to_string())
+        } else {
+            None
+        }
+    }
+
+    /// Build X.224 Connection Confirm
+    fn build_connection_confirm(&self, _req: &[u8]) -> Vec<u8> {
+        let mut resp = Vec::new();
+        // TPKT header
+        resp.push(0x03); // Version
+        resp.push(0x00); // Reserved
+        // Length placeholder
+        resp.extend_from_slice(&[0x00, 0x00]);
+        // X.224 CC
+        resp.push(14); // Length indicator
+        resp.push(0xD0); // CC type (1101 0000)
+        resp.extend_from_slice(&[0x00, 0x00]); // Dst ref
+        resp.extend_from_slice(&[0x00, 0x00]); // Src ref
+        resp.push(0x00); // Class 0
+        // RDP Negotiation Response
+        resp.push(0x02); // TYPE_RDP_NEG_RSP
+        resp.push(0x00); // Flags
+        resp.extend_from_slice(&8u16.to_le_bytes()); // Length
+        resp.extend_from_slice(&0u32.to_le_bytes()); // Selected protocol: PROTOCOL_RDP
+        // Fix TPKT length
+        let len = resp.len() as u16;
+        resp[2] = (len >> 8) as u8;
+        resp[3] = (len & 0xFF) as u8;
+        resp
+    }
+
+    fn build_mcs_disconnect(&self) -> Vec<u8> {
+        // Send a simple TPKT with X.224 Disconnect Request
+        vec![
+            0x03, 0x00, 0x00, 0x0B, // TPKT: v3, len=11
+            0x06,                    // X.224 length
+            0x80,                    // DR type
+            0x00, 0x00,              // Dst ref
+            0x00, 0x00,              // Src ref
+            0x00,                    // Reason: not specified
+        ]
+    }
+}
+
+impl Default for RdpHandler { fn default() -> Self { Self::new() } }

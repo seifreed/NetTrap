@@ -1,0 +1,193 @@
+# NetTrap + MariaDB Galera Multi-Master Cluster (3 masters)
+# Usage: docker compose -f examples/docker-compose.mariadb-galera.yml up -d
+#
+# Architecture:
+#   - 3 MariaDB Galera nodes (all masters, synchronous replication)
+#   - 4 NetTrap nodes, each writing to a different Galera node
+#
+# ALL writes go to ALL masters simultaneously (synchronous)
+
+services:
+  galera-1:
+    image: mariadb:11.2
+    container_name: nettrap-galera-1
+    environment:
+      MYSQL_ROOT_PASSWORD: root_password
+      MYSQL_DATABASE: nettrap
+      MYSQL_USER: nettrap
+      MYSQL_PASSWORD: nettrap_password
+      MYSQL_INITDB_SKIP_TZINFO: "yes"
+    command: >
+      --wsrep-on=ON
+      --wsrep-provider=/usr/lib/galera/libgalera_smm.so
+      --wsrep-cluster-name=nettrap
+      --wsrep-cluster-address=gcomm://
+      --wsrep-node-address=galera-1
+      --wsrep-sst-method=rsync
+      --binlog-format=ROW
+      --default-storage-engine=InnoDB
+      --innodb-autoinc-lock-mode=2
+      --server-id=1
+    ports:
+      - "3307:3306"
+    volumes:
+      - galera1-data:/var/lib/mysql
+    networks:
+      - nettrap
+    healthcheck:
+      test: ["CMD", "mariadb", "-uroot", "-proot_password", "-e", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+
+  galera-2:
+    image: mariadb:11.2
+    container_name: nettrap-galera-2
+    environment:
+      MYSQL_ROOT_PASSWORD: root_password
+      MYSQL_INITDB_SKIP_TZINFO: "yes"
+    command: >
+      --wsrep-on=ON
+      --wsrep-provider=/usr/lib/galera/libgalera_smm.so
+      --wsrep-cluster-name=nettrap
+      --wsrep-cluster-address=gcomm://galera-1
+      --wsrep-node-address=galera-2
+      --wsrep-sst-method=rsync
+      --binlog-format=ROW
+      --default-storage-engine=InnoDB
+      --innodb-autoinc-lock-mode=2
+      --server-id=2
+    ports:
+      - "3308:3306"
+    volumes:
+      - galera2-data:/var/lib/mysql
+    depends_on:
+      galera-1:
+        condition: service_healthy
+    networks:
+      - nettrap
+    healthcheck:
+      test: ["CMD", "mariadb", "-uroot", "-proot_password", "-e", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
+  galera-3:
+    image: mariadb:11.2
+    container_name: nettrap-galera-3
+    environment:
+      MYSQL_ROOT_PASSWORD: root_password
+      MYSQL_INITDB_SKIP_TZINFO: "yes"
+    command: >
+      --wsrep-on=ON
+      --wsrep-provider=/usr/lib/galera/libgalera_smm.so
+      --wsrep-cluster-name=nettrap
+      --wsrep-cluster-address=gcomm://galera-1
+      --wsrep-node-address=galera-3
+      --wsrep-sst-method=rsync
+      --binlog-format=ROW
+      --default-storage-engine=InnoDB
+      --innodb-autoinc-lock-mode=2
+      --server-id=3
+    ports:
+      - "3309:3306"
+    volumes:
+      - galera3-data:/var/lib/mysql
+    depends_on:
+      galera-1:
+        condition: service_healthy
+    networks:
+      - nettrap
+    healthcheck:
+      test: ["CMD", "mariadb", "-uroot", "-proot_password", "-e", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
+  # Wait for cluster and create nettrap DB on all nodes
+  cluster-init:
+    image: mariadb:11.2
+    container_name: nettrap-cluster-init
+    depends_on:
+      galera-1:
+        condition: service_healthy
+      galera-2:
+        condition: service_healthy
+      galera-3:
+        condition: service_healthy
+    entrypoint: >
+      bash -c "
+      echo 'Waiting for Galera cluster sync...'
+      sleep 10
+      mariadb -h galera-1 -uroot -proot_password -e \"
+        CREATE DATABASE IF NOT EXISTS nettrap;
+        CREATE USER IF NOT EXISTS 'nettrap'@'%' IDENTIFIED BY 'nettrap_password';
+        GRANT ALL PRIVILEGES ON nettrap.* TO 'nettrap'@'%';
+        FLUSH PRIVILEGES;
+      \"
+      echo 'Cluster initialized!'
+      echo 'Galera status:'
+      mariadb -h galera-1 -uroot -proot_password -e \"SHOW STATUS LIKE 'wsrep_cluster_size'\"
+      mariadb -h galera-1 -uroot -proot_password -e \"SHOW STATUS LIKE 'wsrep_incoming_addresses'\"
+      "
+    networks:
+      - nettrap
+
+  # 4 NetTrap nodes, each pointing to a different Galera master
+  nettrap-node1:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: nettrap-galera-n1
+    cap_add: [NET_ADMIN, NET_RAW]
+    ports: ["15353:5353/udp", "18080:8080", "9091:9090"]
+    volumes: ["./config-galera-node1.toml:/etc/nettrap/config.toml:ro"]
+    depends_on:
+      cluster-init: { condition: service_completed_successfully }
+    networks: [nettrap]
+
+  nettrap-node2:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: nettrap-galera-n2
+    cap_add: [NET_ADMIN, NET_RAW]
+    ports: ["15354:5353/udp", "18081:8080", "9092:9090"]
+    volumes: ["./config-galera-node2.toml:/etc/nettrap/config.toml:ro"]
+    depends_on:
+      cluster-init: { condition: service_completed_successfully }
+    networks: [nettrap]
+
+  nettrap-node3:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: nettrap-galera-n3
+    cap_add: [NET_ADMIN, NET_RAW]
+    ports: ["15355:5353/udp", "18082:8080", "9093:9090"]
+    volumes: ["./config-galera-node3.toml:/etc/nettrap/config.toml:ro"]
+    depends_on:
+      cluster-init: { condition: service_completed_successfully }
+    networks: [nettrap]
+
+  nettrap-node4:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: nettrap-galera-n4
+    cap_add: [NET_ADMIN, NET_RAW]
+    ports: ["15356:5353/udp", "18083:8080", "9094:9090"]
+    volumes: ["./config-galera-node4.toml:/etc/nettrap/config.toml:ro"]
+    depends_on:
+      cluster-init: { condition: service_completed_successfully }
+    networks: [nettrap]
+
+volumes:
+  galera1-data:
+  galera2-data:
+  galera3-data:
+
+networks:
+  nettrap:
+    driver: bridge

@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
@@ -17,6 +18,22 @@ pub struct Cli {
 
     #[arg(short = 'c', long, global = true)]
     pub config: Option<std::path::PathBuf>,
+
+    /// Log to file
+    #[arg(short = 'l', long, global = true)]
+    pub log_file: Option<std::path::PathBuf>,
+
+    /// Log to syslog
+    #[arg(short = 's', long, global = true)]
+    pub log_syslog: bool,
+
+    /// Stop flag file - graceful shutdown when this file is created
+    #[arg(short = 'f', long, global = true)]
+    pub stop_flag: Option<std::path::PathBuf>,
+
+    /// Suppress console output
+    #[arg(short = 'n', long, global = true)]
+    pub no_console: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -27,6 +44,12 @@ pub enum Commands {
     Report(ReportArgs),
     Status(StatusArgs),
     Test(TestArgs),
+    /// Launch interactive TUI dashboard
+    Tui(TuiArgs),
+    /// Start REST API server
+    Api(ApiArgs),
+    /// TLS certificate management (mkcert integration)
+    Tls(TlsArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -63,6 +86,10 @@ pub struct RunArgs {
 
     #[arg(long)]
     pub json_output: bool,
+
+    /// Output format for reports: json, jsonl, sarif, toon, csv (default: jsonl)
+    #[arg(long = "report-format")]
+    pub report_format: Option<String>,
 }
 
 #[derive(Parser, Debug)]
@@ -117,4 +144,49 @@ pub struct TestArgs {
 
     #[arg(short, long)]
     pub integration: bool,
+}
+
+#[derive(Parser, Debug)]
+pub struct TuiArgs {
+    /// NBI JSONL file to display
+    #[arg(short = 'i', long)]
+    pub input: Option<std::path::PathBuf>,
+}
+
+#[derive(Parser, Debug)]
+pub struct ApiArgs {
+    /// API bind address
+    #[arg(short, long, default_value = "127.0.0.1:9090")]
+    pub bind: String,
+}
+
+#[derive(Parser, Debug)]
+pub struct TlsArgs {
+    #[command(subcommand)]
+    pub command: TlsCommands,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum TlsCommands {
+    /// Show TLS/mkcert status
+    Status,
+    /// Install mkcert binary from GitHub
+    InstallMkcert,
+    /// Install mkcert CA into system trust stores (requires mkcert)
+    Install,
+    /// Generate a certificate for specific hostnames
+    Generate(TlsGenerateArgs),
+    /// Show the CA root directory
+    Caroot,
+}
+
+#[derive(Parser, Debug)]
+pub struct TlsGenerateArgs {
+    /// Hostnames to generate certificate for
+    #[arg(required = true)]
+    pub hostnames: Vec<String>,
+
+    /// Output directory for cert/key files
+    #[arg(short = 'o', long, default_value = ".")]
+    pub output_dir: PathBuf,
 }

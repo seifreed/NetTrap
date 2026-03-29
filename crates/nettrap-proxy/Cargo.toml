@@ -1,0 +1,21 @@
+[package]
+name = "nettrap-proxy"
+description = "Content-based proxy router for NetTrap"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+nettrap-core.workspace = true
+nettrap-flow.workspace = true
+nettrap-events.workspace = true
+nettrap-tls-mitm = { path = "../nettrap-tls-mitm" }
+thiserror.workspace = true
+serde.workspace = true
+bytes.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+parking_lot.workspace = true

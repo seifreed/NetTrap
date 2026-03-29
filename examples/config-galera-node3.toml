@@ -1,0 +1,44 @@
+attribution_enabled = false
+default_decision = "intercept"
+pcap_enabled = false
+output_format = "jsonl"
+output_path = "/var/log/nettrap/events.jsonl"
+attribution_timeout_ms = 5000
+
+[[listeners]]
+name = "dns"
+protocol = "udp"
+port = 5353
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+response_delay_ms = 0
+
+[[listeners]]
+name = "http"
+protocol = "tcp"
+port = 8080
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+response_delay_ms = 0
+
+[[listeners]]
+name = "ssh"
+protocol = "tcp"
+port = 2222
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+response_delay_ms = 0
+
+[distributed]
+enabled = true
+node_region = "ap-southeast-1"
+node_tags = ["node3", "galera"]
+health_bind = "0.0.0.0:9090"
+
+[database]
+backend = "mariadb"
+mysql_url = "mysql://nettrap:nettrap_password@galera-3:3306/nettrap"
+pool_size = 3

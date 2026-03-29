@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 pub struct TlsFingerprint {
     pub ja3: String,
     pub ja3_hash: String,
+    pub ja4: String,
     pub versions: Vec<u16>,
     pub cipher_suites: Vec<u16>,
     pub extensions: Vec<u16>,
@@ -153,6 +154,7 @@ pub fn parse_tls_handshake(data: &[u8]) -> Option<TlsFingerprint> {
     let mut fingerprint = TlsFingerprint {
         ja3: String::new(),
         ja3_hash: String::new(),
+        ja4: String::new(),
         versions: vec![0x0303],
         cipher_suites: Vec::new(),
         extensions: Vec::new(),
@@ -182,5 +184,6 @@ pub fn parse_tls_handshake(data: &[u8]) -> Option<TlsFingerprint> {
     }
 
     fingerprint.compute_ja3();
+    fingerprint.ja4 = crate::ja3::ja4_from_handshake(data).unwrap_or_default();
     Some(fingerprint)
 }

@@ -26,6 +26,28 @@ members = [
     "crates/nettrap-tui",
     "crates/nettrap-api",
     "crates/nettrap-windivert",
+    "crates/nettrap-tls-mitm",
+    "crates/nettrap-proxy",
+    "crates/nettrap-proto-pop3",
+    "crates/nettrap-proto-irc",
+    "crates/nettrap-proto-tftp",
+    "crates/nettrap-proto-telnet",
+    "crates/nettrap-proto-ssh",
+    "crates/nettrap-proto-redis",
+    "crates/nettrap-proto-mqtt",
+    "crates/nettrap-proto-smb",
+    "crates/nettrap-proto-rdp",
+    "crates/nettrap-proto-mysql",
+    "crates/nettrap-proto-ldap",
+    "crates/nettrap-proto-snmp",
+    "crates/nettrap-proto-socks",
+    "crates/nettrap-proto-memcached",
+    "crates/nettrap-proto-nkn",
+    "crates/nettrap-proto-postgres",
+    "crates/nettrap-proto-sip",
+    "crates/nettrap-proto-upnp",
+    "crates/nettrap-proto-ntp",
+    "crates/nettrap-proto-coap",
 ]
 
 [workspace.package]
@@ -82,12 +104,16 @@ http = "1.3"
 http-body-util = "0.1"
 hyper = { version = "1.6", features = ["full"] }
 hyper-util = "0.1"
-tokio-rustls = "0.26"
+tokio-rustls = { version = "0.26", features = ["ring"] }
 rustls-pemfile = "2.2"
 rcgen = "0.13"
 memchr = "2.7"
 nom = "8.0"
 pcap = "2.4"
+hostname = "0.4"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+rusqlite = { version = "0.34", features = ["bundled"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "mysql"], default-features = false }
 
 nettrap-core = { path = "crates/nettrap-core" }
 nettrap-flow = { path = "crates/nettrap-flow" }
@@ -111,6 +137,28 @@ nettrap-pcap = { path = "crates/nettrap-pcap" }
 nettrap-report = { path = "crates/nettrap-report" }
 nettrap-storage = { path = "crates/nettrap-storage" }
 nettrap-windivert = { path = "crates/nettrap-windivert" }
+nettrap-tls-mitm = { path = "crates/nettrap-tls-mitm" }
+nettrap-proxy = { path = "crates/nettrap-proxy" }
+nettrap-proto-pop3 = { path = "crates/nettrap-proto-pop3" }
+nettrap-proto-irc = { path = "crates/nettrap-proto-irc" }
+nettrap-proto-tftp = { path = "crates/nettrap-proto-tftp" }
+nettrap-proto-telnet = { path = "crates/nettrap-proto-telnet" }
+nettrap-proto-ssh = { path = "crates/nettrap-proto-ssh" }
+nettrap-proto-redis = { path = "crates/nettrap-proto-redis" }
+nettrap-proto-mqtt = { path = "crates/nettrap-proto-mqtt" }
+nettrap-proto-smb = { path = "crates/nettrap-proto-smb" }
+nettrap-proto-rdp = { path = "crates/nettrap-proto-rdp" }
+nettrap-proto-mysql = { path = "crates/nettrap-proto-mysql" }
+nettrap-proto-ldap = { path = "crates/nettrap-proto-ldap" }
+nettrap-proto-snmp = { path = "crates/nettrap-proto-snmp" }
+nettrap-proto-socks = { path = "crates/nettrap-proto-socks" }
+nettrap-proto-memcached = { path = "crates/nettrap-proto-memcached" }
+nettrap-proto-nkn = { path = "crates/nettrap-proto-nkn" }
+nettrap-proto-postgres = { path = "crates/nettrap-proto-postgres" }
+nettrap-proto-sip = { path = "crates/nettrap-proto-sip" }
+nettrap-proto-upnp = { path = "crates/nettrap-proto-upnp" }
+nettrap-proto-ntp = { path = "crates/nettrap-proto-ntp" }
+nettrap-proto-coap = { path = "crates/nettrap-proto-coap" }
 
 [profile.release]
 lto = "thin"

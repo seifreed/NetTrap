@@ -1,0 +1,20 @@
+[package]
+name = "nettrap-proto-memcached"
+description = "Memcached protocol handler for NetTrap"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+nettrap-core.workspace = true
+nettrap-flow.workspace = true
+nettrap-events.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+async-trait.workspace = true

@@ -62,6 +62,8 @@ impl SmtpHandlerTrait for SmtpHandler {
             Ok(SmtpResponse::message("220 Ready to start TLS"))
         } else if upper.starts_with("AUTH") {
             Ok(SmtpResponse::error("530 Authentication required"))
+        } else if upper.starts_with("X-EXPS") || upper.starts_with("X-EXCH50") || upper.starts_with("X-LINK2STATE") {
+            Ok(SmtpResponse::ok())
         } else {
             Ok(SmtpResponse::error("500 Command not recognized"))
         }

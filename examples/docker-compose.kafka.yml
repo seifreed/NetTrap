@@ -1,0 +1,104 @@
+# NetTrap + Redpanda (Kafka-compatible) + Redpanda Console
+# Usage: docker compose -f examples/docker-compose.kafka.yml up -d
+#
+# Access:
+#   - Redpanda Console: http://localhost:8888
+#   - NetTrap health: http://localhost:9091/health
+#   - NetTrap HTTP honeypot: http://localhost:18080
+
+services:
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.1.1
+    container_name: nettrap-redpanda
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=256M
+      - --overprovisioned
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
+      - --pandaproxy-addr=internal://0.0.0.0:8082,external://0.0.0.0:18082
+      - --advertise-pandaproxy-addr=internal://redpanda:8082,external://localhost:18082
+    ports:
+      - "19092:19092"
+      - "18082:18082"
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    networks:
+      - nettrap
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  console:
+    image: docker.redpanda.com/redpandadata/console:v2.4.5
+    container_name: nettrap-console
+    environment:
+      - KAFKA_BROKERS=redpanda:9092
+    ports:
+      - "8888:8080"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    networks:
+      - nettrap
+
+  # Create the nettrap-events topic
+  topic-creator:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.1.1
+    container_name: nettrap-topic-creator
+    entrypoint: >
+      bash -c "
+      rpk topic create nettrap-events --brokers redpanda:9092 -p 3 2>/dev/null;
+      echo 'Topic nettrap-events created'; exit 0"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    networks:
+      - nettrap
+
+  # TCP-to-Kafka bridge: receives JSON lines on TCP 5044, produces to Redpanda via HTTP Proxy
+  kafka-bridge:
+    image: python:3.12-slim-bookworm
+    container_name: nettrap-kafka-bridge
+    command: ["python3", "/app/kafka-bridge.py"]
+    volumes:
+      - ./kafka-bridge.py:/app/kafka-bridge.py:ro
+    ports:
+      - "5044:5044"
+    depends_on:
+      topic-creator:
+        condition: service_completed_successfully
+    networks:
+      - nettrap
+
+  nettrap:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: nettrap-kafka-node
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    ports:
+      - "15353:5353/udp"
+      - "18080:8080"
+      - "12222:2222"
+      - "12323:2323"
+      - "9091:9090"
+    volumes:
+      - ./config-kafka.toml:/etc/nettrap/config.toml:ro
+    depends_on:
+      - kafka-bridge
+    networks:
+      - nettrap
+
+volumes:
+  redpanda-data:
+
+networks:
+  nettrap:
+    driver: bridge

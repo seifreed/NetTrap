@@ -10,7 +10,67 @@ pub struct ListenerConfig {
     pub response_delay_ms: u64,
     pub custom_response: Option<String>,
     pub protocol: nettrap_core::prelude::Protocol,
+    // SSL/TLS support
+    #[serde(default)]
+    pub use_ssl: bool,
+    // Hidden listener (accessible only via proxy)
+    #[serde(default)]
+    pub hidden: bool,
+    // Process filtering
+    #[serde(default)]
+    pub process_whitelist: Vec<String>,
+    #[serde(default)]
+    pub process_blacklist: Vec<String>,
+    // Host filtering
+    #[serde(default)]
+    pub host_whitelist: Vec<String>,
+    #[serde(default)]
+    pub host_blacklist: Vec<String>,
+    // Custom response config
+    #[serde(default)]
+    pub webroot: Option<String>,
+    #[serde(default)]
+    pub ftproot: Option<String>,
+    #[serde(default)]
+    pub tftproot: Option<String>,
+    // Banner customization
+    #[serde(default)]
+    pub banner: Option<String>,
+    // Execute command on connection
+    #[serde(default)]
+    pub execute_cmd: Option<String>,
+    // HTTP POST dumping
+    #[serde(default)]
+    pub dump_http_posts: bool,
+    #[serde(default)]
+    pub dump_http_posts_prefix: Option<String>,
+    // Port range support (alternative to single port)
+    #[serde(default)]
+    pub port_range: Option<String>,
+    // DNS-specific configuration
+    #[serde(default)]
+    pub dns_response_ip: Option<String>,
+    #[serde(default)]
+    pub dns_response_mx: Option<String>,
+    #[serde(default)]
+    pub dns_response_txt: Option<String>,
+    #[serde(default)]
+    pub dns_nxdomains: Option<u32>,
+    // DNS response mode: "static", "auto", or "hostname"
+    #[serde(default)]
+    pub dns_response_mode: Option<String>,
+    // HTTP Server version string
+    #[serde(default)]
+    pub server_version: Option<String>,
+    // FTP PASV port range (e.g. "60000-60100")
+    #[serde(default)]
+    pub pasv_ports: Option<String>,
+    // Timeout
+    #[serde(default = "default_timeout")]
+    pub timeout_ms: u64,
 }
+
+fn default_timeout() -> u64 { 30000 }
 
 impl ListenerConfig {
     pub fn new(name: impl Into<String>, port: u16) -> Self {
@@ -22,12 +82,64 @@ impl ListenerConfig {
             emulate_response: true,
             response_delay_ms: 0,
             custom_response: None,
-            protocol: if port == 53 {
+            protocol: if port == 53 || port == 69 {
                 nettrap_core::prelude::Protocol::Udp
             } else {
                 nettrap_core::prelude::Protocol::Tcp
             },
+            use_ssl: false,
+            hidden: false,
+            process_whitelist: Vec::new(),
+            process_blacklist: Vec::new(),
+            host_whitelist: Vec::new(),
+            host_blacklist: Vec::new(),
+            webroot: None,
+            ftproot: None,
+            tftproot: None,
+            banner: None,
+            execute_cmd: None,
+            dump_http_posts: false,
+            dump_http_posts_prefix: None,
+            port_range: None,
+            dns_response_ip: None,
+            dns_response_mx: None,
+            dns_response_txt: None,
+            dns_nxdomains: None,
+            dns_response_mode: None,
+            server_version: None,
+            pasv_ports: None,
+            timeout_ms: 30000,
         }
+    }
+
+    /// Expand port_range (e.g. "60000-60010") into individual ListenerConfigs
+    pub fn expand_port_range(&self) -> Vec<ListenerConfig> {
+        if let Some(ref range_str) = self.port_range {
+            let mut configs = Vec::new();
+            for part in range_str.split(',') {
+                let part = part.trim();
+                if let Some((start_s, end_s)) = part.split_once('-') {
+                    if let (Ok(start), Ok(end)) = (start_s.trim().parse::<u16>(), end_s.trim().parse::<u16>()) {
+                        for port in start..=end {
+                            let mut cfg = self.clone();
+                            cfg.port = port;
+                            cfg.port_range = None;
+                            cfg.name = format!("{}_{}", self.name, port);
+                            configs.push(cfg);
+                        }
+                    }
+                } else if let Ok(port) = part.parse::<u16>() {
+                    let mut cfg = self.clone();
+                    cfg.port = port;
+                    cfg.port_range = None;
+                    configs.push(cfg);
+                }
+            }
+            if !configs.is_empty() {
+                return configs;
+            }
+        }
+        vec![self.clone()]
     }
 
     pub fn dns() -> Self {
@@ -45,6 +157,37 @@ impl ListenerConfig {
     pub fn https() -> Self {
         let mut config = Self::new("https", 443);
         config.protocol = nettrap_core::prelude::Protocol::Tcp;
+        config.use_ssl = true;
+        config
+    }
+
+    pub fn smtp() -> Self {
+        let mut config = Self::new("smtp", 25);
+        config.protocol = nettrap_core::prelude::Protocol::Tcp;
+        config
+    }
+
+    pub fn ftp() -> Self {
+        let mut config = Self::new("ftp", 21);
+        config.protocol = nettrap_core::prelude::Protocol::Tcp;
+        config
+    }
+
+    pub fn pop3() -> Self {
+        let mut config = Self::new("pop3", 110);
+        config.protocol = nettrap_core::prelude::Protocol::Tcp;
+        config
+    }
+
+    pub fn irc() -> Self {
+        let mut config = Self::new("irc", 6667);
+        config.protocol = nettrap_core::prelude::Protocol::Tcp;
+        config
+    }
+
+    pub fn tftp() -> Self {
+        let mut config = Self::new("tftp", 69);
+        config.protocol = nettrap_core::prelude::Protocol::Udp;
         config
     }
 
@@ -66,5 +209,52 @@ impl ListenerConfig {
     pub fn with_protocol(mut self, protocol: nettrap_core::prelude::Protocol) -> Self {
         self.protocol = protocol;
         self
+    }
+
+    /// Check if a process name is allowed by this listener's filters
+    pub fn is_process_allowed(&self, process_name: &str) -> bool {
+        if !self.process_whitelist.is_empty() {
+            return self.process_whitelist.iter().any(|p| {
+                process_name.to_lowercase().contains(&p.to_lowercase())
+            });
+        }
+        if !self.process_blacklist.is_empty() {
+            return !self.process_blacklist.iter().any(|p| {
+                process_name.to_lowercase().contains(&p.to_lowercase())
+            });
+        }
+        true
+    }
+
+    /// Parse custom_response for DNS-specific domain-to-IP mappings.
+    /// Format: "domain1=ip1,ip2;domain2=ip3"
+    pub fn parse_dns_custom_responses(&self) -> Vec<(String, Vec<String>)> {
+        let mut result = Vec::new();
+        if let Some(ref custom) = self.custom_response {
+            for entry in custom.split(';') {
+                let entry = entry.trim();
+                if entry.is_empty() { continue; }
+                if let Some((domain, ips)) = entry.split_once('=') {
+                    let ip_list: Vec<String> = ips.split(',').map(|s| s.trim().to_string()).collect();
+                    result.push((domain.trim().to_string(), ip_list));
+                }
+            }
+        }
+        result
+    }
+
+    /// Check if a host IP is allowed by this listener's filters
+    pub fn is_host_allowed(&self, host: &str) -> bool {
+        // Always allow loopback
+        if host == "127.0.0.1" || host == "::1" || host.starts_with("127.") {
+            return true;
+        }
+        if !self.host_whitelist.is_empty() {
+            return self.host_whitelist.iter().any(|h| h == host);
+        }
+        if !self.host_blacklist.is_empty() {
+            return !self.host_blacklist.iter().any(|h| h == host);
+        }
+        true
     }
 }

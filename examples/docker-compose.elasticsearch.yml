@@ -1,0 +1,72 @@
+# NetTrap + Elasticsearch + Kibana
+# Usage: docker compose -f examples/docker-compose.elasticsearch.yml up -d
+#
+# Access:
+#   - Kibana dashboard: http://localhost:5601
+#   - Elasticsearch: http://localhost:9200
+#   - NetTrap health: http://localhost:9091/health
+#   - NetTrap HTTP honeypot: http://localhost:18080
+#   - NetTrap SSH honeypot: port 12222
+#   - NetTrap Telnet honeypot: port 12323
+
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.12.0
+    container_name: nettrap-es
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    networks:
+      - nettrap
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9200/_cluster/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.12.0
+    container_name: nettrap-kibana
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    ports:
+      - "5601:5601"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    networks:
+      - nettrap
+
+  nettrap:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: nettrap-es-node
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    ports:
+      - "15353:5353/udp"
+      - "18080:8080"
+      - "12222:2222"
+      - "12323:2323"
+      - "9091:9090"
+    volumes:
+      - ./config-elasticsearch.toml:/etc/nettrap/config.toml:ro
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    networks:
+      - nettrap
+
+volumes:
+  es-data:
+
+networks:
+  nettrap:
+    driver: bridge

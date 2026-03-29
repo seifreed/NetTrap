@@ -1,0 +1,32 @@
+# NetTrap + SQLite (standalone, no external dependencies)
+# Usage: docker compose -f examples/docker-compose.sqlite.yml up -d
+#
+# The SQLite database is stored at /var/lib/nettrap/nettrap.db inside the container
+# Mount a volume to persist it.
+
+services:
+  nettrap:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: nettrap-sqlite
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    ports:
+      - "15353:5353/udp"
+      - "18080:8080"
+      - "12222:2222"
+      - "9091:9090"
+    volumes:
+      - ./config-sqlite.toml:/etc/nettrap/config.toml:ro
+      - sqlite-data:/var/lib/nettrap
+    networks:
+      - nettrap
+
+volumes:
+  sqlite-data:
+
+networks:
+  nettrap:
+    driver: bridge

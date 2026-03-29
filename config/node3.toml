@@ -1,0 +1,53 @@
+attribution_enabled = false
+attribution_timeout_ms = 5000
+default_decision = "intercept"
+pcap_enabled = false
+output_format = "jsonl"
+output_path = "/var/log/nettrap/events.jsonl"
+
+[[listeners]]
+name = "dns"
+protocol = "udp"
+port = 5353
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+response_delay_ms = 0
+
+[[listeners]]
+name = "http"
+protocol = "tcp"
+port = 8080
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+response_delay_ms = 0
+
+[[listeners]]
+name = "redis"
+protocol = "tcp"
+port = 6379
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+response_delay_ms = 0
+
+[[listeners]]
+name = "mysql"
+protocol = "tcp"
+port = 3306
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+response_delay_ms = 0
+
+[distributed]
+enabled = true
+node_region = "ap-southeast-1"
+node_tags = ["node3", "cloud-honeypot"]
+health_bind = "0.0.0.0:9090"
+heartbeat_interval_secs = 0
+
+[[distributed.event_sinks]]
+type = "tcp"
+target = "collector:5044"

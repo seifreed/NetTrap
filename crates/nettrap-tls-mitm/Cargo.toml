@@ -1,0 +1,23 @@
+[package]
+name = "nettrap-tls-mitm"
+description = "TLS MITM and dynamic certificate generation for NetTrap"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+nettrap-core.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+rustls-pemfile.workspace = true
+rcgen.workspace = true
+async-trait.workspace = true
+parking_lot.workspace = true
+sha2.workspace = true
+chrono.workspace = true
+base64.workspace = true
