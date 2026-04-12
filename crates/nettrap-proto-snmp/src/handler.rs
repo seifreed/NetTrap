@@ -47,6 +47,7 @@ impl SnmpHandler {
         }
         pos += 1;
         let (_, lb) = Self::parse_len(&data[pos..]);
+        if lb == 0 { return None; }
         pos += lb;
         // Version: INTEGER
         if pos >= data.len() || data[pos] != 0x02 {
@@ -54,6 +55,7 @@ impl SnmpHandler {
         }
         pos += 1;
         let (vlen, lb) = Self::parse_len(&data[pos..]);
+        if lb == 0 { return None; }
         pos += lb + vlen;
         // Community: OCTET STRING
         if pos >= data.len() || data[pos] != 0x04 {
@@ -61,10 +63,14 @@ impl SnmpHandler {
         }
         pos += 1;
         let (clen, lb) = Self::parse_len(&data[pos..]);
+        if lb == 0 { return None; }
         pos += lb;
-        let community =
-            String::from_utf8_lossy(&data[pos..pos + clen.min(data.len() - pos)]).to_string();
-        pos += clen;
+        if pos > data.len() {
+            return None;
+        }
+        let safe_clen = clen.min(data.len().saturating_sub(pos));
+        let community = String::from_utf8_lossy(&data[pos..pos + safe_clen]).to_string();
+        pos += safe_clen;
         // PDU type
         if pos >= data.len() {
             return None;
@@ -72,13 +78,19 @@ impl SnmpHandler {
         let pdu_type = data[pos] & 0x1F;
         pos += 1;
         let (_, lb) = Self::parse_len(&data[pos..]);
+        if lb == 0 { return None; }
         pos += lb;
         // Request ID
         let request_id = if pos + 4 < data.len() && data[pos] == 0x02 {
             pos += 1;
             let (rlen, lb) = Self::parse_len(&data[pos..]);
+            if lb == 0 { return None; }
             pos += lb;
-            data[pos..pos + rlen.min(data.len() - pos)].to_vec()
+            if pos > data.len() {
+                return None;
+            }
+            let safe_rlen = rlen.min(data.len().saturating_sub(pos));
+            data[pos..pos + safe_rlen].to_vec()
         } else {
             vec![0x01]
         };
@@ -91,15 +103,21 @@ impl SnmpHandler {
             return (0, 0);
         }
         if data[0] & 0x80 == 0 {
+            // Short form: length is in the lower 7 bits
             (data[0] as usize, 1)
         } else {
+            // Long form: lower 7 bits indicate number of length bytes to follow
             let n = (data[0] & 0x7F) as usize;
+            // SNMP uses max 4 bytes for length (32-bit), reject excessive claims
+            // Also verify we have enough bytes for the claimed length encoding
+            if n == 0 || n > 4 || n + 1 > data.len() {
+                return (0, 0);
+            }
             let mut l = 0usize;
             for i in 0..n {
-                if i + 1 < data.len() {
-                    l = (l << 8) | data[i + 1] as usize;
-                }
+                l = (l << 8) | data[i + 1] as usize;
             }
+            // Return (length_value, bytes_consumed)
             (l, 1 + n)
         }
     }
@@ -118,9 +136,7 @@ impl SnmpHandler {
     fn build_get_response(&self, community: &str, request_id: Vec<u8>) -> Vec<u8> {
         // Minimal GetResponse with sysDescr
         let sys_descr = b"NetTrap SNMP Honeypot";
-        let oid = &[
-            0x06, 0x08, 0x2b, 0x06, 0x01, 0x02, 0x01, 0x01, 0x01, 0x00,
-        ]; // 1.3.6.1.2.1.1.1.0
+        let oid = &[0x06, 0x08, 0x2b, 0x06, 0x01, 0x02, 0x01, 0x01, 0x01, 0x00]; // 1.3.6.1.2.1.1.1.0
 
         // VarBind: SEQUENCE { OID, OCTET STRING }
         let mut varbind = Vec::new();

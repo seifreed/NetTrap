@@ -25,7 +25,8 @@ impl NtpHandler {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
-        let ntp_secs = (now.as_secs() + 2208988800) as u32; // NTP epoch offset from Unix epoch
+        // NTP era 0 wraps in Feb 2036 (RFC 4330); wrapping_add makes truncation explicit
+        let ntp_secs = now.as_secs().wrapping_add(2_208_988_800) as u32;
         let ts = ntp_secs.to_be_bytes();
         resp[16..20].copy_from_slice(&ts); // Reference timestamp
         resp[24..28].copy_from_slice(&data[40..44]); // Origin = client's transmit

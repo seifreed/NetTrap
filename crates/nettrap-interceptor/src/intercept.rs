@@ -51,3 +51,38 @@ impl Default for InterceptorConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_intercept_stats_default() {
+        let stats = InterceptStats::default();
+        assert_eq!(stats.packets_received, 0);
+        assert_eq!(stats.packets_sent, 0);
+        assert_eq!(stats.bytes_received, 0);
+    }
+
+    #[test]
+    fn test_interceptor_config_default() {
+        let config = InterceptorConfig::default();
+        assert!(config.interface.is_none());
+        assert_eq!(config.buffer_size, 65536);
+        assert!(config.promiscuous);
+    }
+
+    #[test]
+    fn test_intercept_stats_clone() {
+        let stats = InterceptStats {
+            packets_received: 100,
+            packets_sent: 50,
+            packets_dropped: 5,
+            bytes_received: 1024,
+            bytes_sent: 512,
+        };
+        let cloned = stats.clone();
+        assert_eq!(cloned.packets_received, 100);
+        assert_eq!(cloned.bytes_received, 1024);
+    }
+}

@@ -12,7 +12,7 @@ pub enum RawResponseMode {
     /// Return contents of a file
     RawFile(std::path::PathBuf),
     /// Return base64-decoded data
-    StaticBase64(Vec<u8>),  // already decoded
+    StaticBase64(Vec<u8>), // already decoded
     /// No response
     Silent,
 }
@@ -108,24 +108,31 @@ impl RawHandler {
                 tracing::debug!("Raw echo: {} bytes", data.len());
                 RawResponse::new(data.to_vec())
             }
-            RawResponseMode::StaticString(response) => {
-                RawResponse::new(response.clone())
-            }
+            RawResponseMode::StaticString(response) => RawResponse::new(response.clone()),
             RawResponseMode::RawFile(path) => {
-                match std::fs::read(path) {
-                    Ok(content) => RawResponse::new(content),
-                    Err(e) => {
-                        tracing::warn!("Failed to read raw file {}: {}", path.display(), e);
+                // Limit file reads to 10MB to prevent OOM
+                const MAX_RAW_FILE_SIZE: u64 = 10 * 1024 * 1024;
+                match std::fs::metadata(path) {
+                    Ok(meta) if meta.len() > MAX_RAW_FILE_SIZE => {
+                        tracing::warn!(
+                            "Raw file {} exceeds size limit ({} bytes > {})",
+                            path.display(),
+                            meta.len(),
+                            MAX_RAW_FILE_SIZE,
+                        );
                         RawResponse::new(b"ERROR\n".to_vec())
                     }
+                    _ => match std::fs::read(path) {
+                        Ok(content) => RawResponse::new(content),
+                        Err(e) => {
+                            tracing::warn!("Failed to read raw file {}: {}", path.display(), e);
+                            RawResponse::new(b"ERROR\n".to_vec())
+                        }
+                    },
                 }
             }
-            RawResponseMode::StaticBase64(decoded) => {
-                RawResponse::new(decoded.clone())
-            }
-            RawResponseMode::Silent => {
-                RawResponse::empty()
-            }
+            RawResponseMode::StaticBase64(decoded) => RawResponse::new(decoded.clone()),
+            RawResponseMode::Silent => RawResponse::empty(),
         }
     }
 
@@ -139,11 +146,15 @@ impl RawHandler {
             output.push_str(&format!("{:08x}  ", offset));
             for (i, byte) in chunk.iter().enumerate() {
                 output.push_str(&format!("{:02x} ", byte));
-                if i == 7 { output.push(' '); }
+                if i == 7 {
+                    output.push(' ');
+                }
             }
             for i in 0..(16 - chunk.len()) {
                 output.push_str("   ");
-                if chunk.len() + i == 7 { output.push(' '); }
+                if chunk.len() + i == 7 {
+                    output.push(' ');
+                }
             }
             output.push_str(" |");
             for byte in chunk {

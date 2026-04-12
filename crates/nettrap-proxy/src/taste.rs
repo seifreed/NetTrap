@@ -1,3 +1,41 @@
+//! Protocol taste detection implementations.
+//!
+//! This file is intentionally large (~750 lines) because it contains the
+//! `ProtocolTaste` trait implementation for **all supported protocols**.
+//!
+//! # Why This File Is Large
+//!
+//! This is **not a God Object** - it's a **data-driven registry** of protocol
+//! fingerprinting logic. Each protocol implementation is self-contained:
+//!
+//! ```text
+//! impl ProtocolTaste for DnsTaste { ... }    // ~30 lines
+//! impl ProtocolTaste for HttpTaste { ... }   // ~40 lines
+//! impl ProtocolTaste for SshTaste { ... }    // ~20 lines
+//! ...                                        // (35+ protocols)
+//! ```
+//!
+//! # Alternatives Considered
+//!
+//! 1. **One file per protocol**: Would require 50+ files, making navigation harder
+//! 2. **Generated code**: Possible, but hand-tuned detection logic is more accurate
+//! 3. **External DSL**: Overkill for simple byte-pattern matching
+//!
+//! # Adding a New Protocol
+//!
+//! ```ignore
+//! pub struct MyProtocolTaste;
+//! impl ProtocolTaste for MyProtocolTaste {
+//!     fn taste(&self, data: &[u8], dst_port: u16) -> TasteScore {
+//!         if dst_port == MY_PORT { return 90; }
+//!         // Check protocol-specific signatures
+//!         if data.starts_with(b"MyProtocol") { return 100; }
+//!         0
+//!     }
+//!     fn protocol_name(&self) -> &'static str { "myprotocol" }
+//! }
+//! ```
+
 /// Confidence score for protocol detection (0-100)
 pub type TasteScore = u8;
 
@@ -152,14 +190,22 @@ impl ProtocolTaste for Pop3Taste {
                 .iter()
                 .map(|b| b.to_ascii_uppercase())
                 .collect();
+            // POP3-unique commands at higher score
+            if upper.starts_with(b"STAT")
+                || upper.starts_with(b"RETR")
+                || upper.starts_with(b"DELE")
+                || upper.starts_with(b"TOP ")
+                || upper.starts_with(b"UIDL")
+            {
+                return 80;
+            }
+            // Ambiguous commands shared with FTP — lower score so FTP wins on tie
             if upper.starts_with(b"USER")
                 || upper.starts_with(b"PASS")
-                || upper.starts_with(b"STAT")
                 || upper.starts_with(b"LIST")
-                || upper.starts_with(b"RETR")
                 || upper.starts_with(b"QUIT")
             {
-                return 70;
+                return 65;
             }
         }
         0
@@ -175,11 +221,8 @@ impl ProtocolTaste for IrcTaste {
         if dst_port == 6667 || dst_port == 6697 {
             return 85;
         }
-        if data.len() >= 4 {
-            let upper: Vec<u8> = data[..5.min(data.len())]
-                .iter()
-                .map(|b| b.to_ascii_uppercase())
-                .collect();
+        if data.len() >= 5 {
+            let upper: Vec<u8> = data[..5].iter().map(|b| b.to_ascii_uppercase()).collect();
             if upper.starts_with(b"NICK ")
                 || upper.starts_with(b"USER ")
                 || upper.starts_with(b"JOIN ")
@@ -696,5 +739,59 @@ impl ProtocolTaste for RawTaste {
     }
     fn protocol_name(&self) -> &'static str {
         "raw"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_dns_taste_port() {
+        let taste = DnsTaste;
+        assert_eq!(taste.taste(&[], 53), 90);
+        assert_eq!(taste.taste(&[], 80), 0);
+    }
+
+    #[test]
+    fn test_dns_taste_data() {
+        let taste = DnsTaste;
+        let mut dns_query = vec![0u8; 12];
+        dns_query[4] = 0;
+        dns_query[5] = 1;
+        assert_eq!(taste.taste(&dns_query, 0), 70);
+    }
+
+    #[test]
+    fn test_http_taste_methods() {
+        let taste = HttpTaste;
+        assert_eq!(taste.taste(b"GET / HTTP/1.1", 80), 95);
+        assert_eq!(taste.taste(b"POST /api", 8080), 95);
+        assert_eq!(taste.taste(b"INVALID", 80), 30);
+    }
+
+    #[test]
+    fn test_tls_taste() {
+        let taste = TlsTaste;
+        assert_eq!(taste.taste(&[0x16, 0x03, 0x01], 443), 95);
+        assert_eq!(taste.taste(&[0x16, 0x03, 0x03], 0), 95);
+        assert_eq!(taste.taste(&[], 443), 40);
+    }
+
+    #[test]
+    fn test_smtp_taste() {
+        let taste = SmtpTaste;
+        assert_eq!(taste.taste(&[], 25), 85);
+        assert_eq!(taste.taste(&[], 587), 85);
+        // SMTP commands on non-standard port still detected
+        assert_eq!(taste.taste(b"HELO example.com", 8080), 90);
+        assert_eq!(taste.taste(b"EHLO test", 0), 90);
+    }
+
+    #[test]
+    fn test_raw_taste_fallback() {
+        let taste = RawTaste;
+        assert_eq!(taste.taste(&[], 0), 1);
+        assert_eq!(taste.taste(b"any data", 12345), 1);
     }
 }

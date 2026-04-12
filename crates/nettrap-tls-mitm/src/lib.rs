@@ -14,6 +14,6 @@ pub mod prelude {
     pub use crate::ca::*;
     pub use crate::cert::*;
     pub use crate::wrapper::*;
-    pub use nettrap_core::prelude::*;
     pub use nettrap_core::error::{Error, Result};
+    pub use nettrap_core::prelude::*;
 }

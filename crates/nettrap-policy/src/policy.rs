@@ -54,16 +54,20 @@ impl PolicyEngine {
     }
 
     pub fn evaluate(&self, ctx: &PolicyContext) -> PolicyDecision {
-        self.stats.write().total_evaluations += 1;
+        // Evaluate rules without holding any lock
+        let decision = self.evaluate_rules(ctx);
 
+        // Update stats with single write lock acquisition
+        self.increment_decision(decision);
+        decision
+    }
+
+    fn evaluate_rules(&self, ctx: &PolicyContext) -> PolicyDecision {
         for rule in &self.rules {
             if rule.matches(ctx) {
-                self.increment_decision(rule.decision);
                 return rule.decision;
             }
         }
-
-        self.increment_decision(self.default_decision);
         self.default_decision
     }
 
@@ -86,6 +90,7 @@ impl PolicyEngine {
 
     pub fn increment_decision(&self, decision: PolicyDecision) {
         let mut stats = self.stats.write();
+        stats.total_evaluations += 1;
         let key = decision.to_string();
         *stats.decisions.entry(key).or_insert(0) += 1;
     }

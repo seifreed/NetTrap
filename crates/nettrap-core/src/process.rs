@@ -79,8 +79,7 @@ impl ProcessInfo {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum AttributionConfidence {
     #[default]
     None = 0,
@@ -112,7 +111,6 @@ impl AttributionConfidence {
         )
     }
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Attribution {

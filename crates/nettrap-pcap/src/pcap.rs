@@ -189,7 +189,7 @@ impl PcapReader {
                 return Err(Error::Packet(format!(
                     "Invalid PCAP magic: 0x{:08x}",
                     magic
-                )))
+                )));
             }
         };
 
@@ -200,19 +200,11 @@ impl PcapReader {
                 data[offset + 2],
                 data[offset + 3],
             ]);
-            if swapped {
-                raw.swap_bytes()
-            } else {
-                raw
-            }
+            if swapped { raw.swap_bytes() } else { raw }
         };
         let read_u16 = |data: &[u8], offset: usize| -> u16 {
             let raw = u16::from_le_bytes([data[offset], data[offset + 1]]);
-            if swapped {
-                raw.swap_bytes()
-            } else {
-                raw
-            }
+            if swapped { raw.swap_bytes() } else { raw }
         };
 
         let _version_major = read_u16(&buf, 4);
@@ -259,10 +251,21 @@ impl PcapReader {
             let pkt_data = &buf[pos..pos + incl_len];
             pos += incl_len;
 
-            // Convert timestamp
-            let ts_nsec = if nano { ts_frac } else { ts_frac * 1000 };
+            // Convert timestamp (saturating multiply to prevent overflow)
+            let ts_nsec = if nano {
+                ts_frac
+            } else {
+                ts_frac.saturating_mul(1000).min(999_999_999)
+            };
             let timestamp =
-                chrono::DateTime::from_timestamp(ts_sec, ts_nsec).unwrap_or_else(chrono::Utc::now);
+                chrono::DateTime::from_timestamp(ts_sec, ts_nsec).unwrap_or_else(|| {
+                    tracing::warn!(
+                        "PCAP: invalid timestamp (sec={}, nsec={}), using epoch",
+                        ts_sec,
+                        ts_nsec,
+                    );
+                    chrono::DateTime::UNIX_EPOCH
+                });
 
             // Parse IP packet from link-layer frame
             if let Some(pkt) =
@@ -295,8 +298,11 @@ impl PcapReader {
                 }
                 let mut ethertype = u16::from_be_bytes([data[12], data[13]]);
                 let mut offset = 14;
+                const MAX_VLAN_DEPTH: usize = 8;
+                let mut vlan_depth = 0;
                 while ethertype == 0x8100 || ethertype == 0x88A8 {
-                    if data.len() < offset + 4 {
+                    vlan_depth += 1;
+                    if vlan_depth > MAX_VLAN_DEPTH || data.len() < offset + 4 {
                         return None;
                     }
                     ethertype = u16::from_be_bytes([data[offset + 2], data[offset + 3]]);

@@ -50,11 +50,17 @@ impl WebrootServer {
         let canonical_root = match self.root.canonicalize() {
             Ok(p) => p,
             Err(_) => {
-                // Root doesn't exist yet - check file existence directly without canonicalization
-                // Still safe because we already rejected ".." above
+                // Root doesn't exist yet - check file existence with symlink validation
                 let candidates = vec![file_path.clone(), file_path.join("index.html")];
                 for candidate in candidates {
                     if candidate.is_file() {
+                        // Verify the resolved path doesn't escape the root via symlinks
+                        if let Ok(canon) = candidate.canonicalize() {
+                            if !canon.starts_with(&self.root) {
+                                tracing::warn!("Symlink escape blocked: {:?} -> {:?}", candidate, canon);
+                                return None;
+                            }
+                        }
                         if let Ok(content) = std::fs::read(&candidate) {
                             let ext = candidate
                                 .extension()

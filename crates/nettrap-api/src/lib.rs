@@ -1,7 +1,9 @@
 pub mod handlers;
+pub mod health;
 pub mod server;
 
 pub use handlers::*;
+pub use health::*;
 pub use server::*;
 
 pub mod error {
@@ -10,6 +12,7 @@ pub mod error {
 
 pub mod prelude {
     pub use crate::handlers::*;
+    pub use crate::health::*;
     pub use crate::server::*;
     pub use nettrap_core::prelude::*;
 }

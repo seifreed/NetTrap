@@ -125,10 +125,15 @@ impl Default for ReportBuilder {
 
 pub fn generate_report(
     flows: &[Flow],
-    _events: &[nettrap_events::Event],
-    _iocs: &[nettrap_ioc::IoC],
+    events: &[nettrap_events::Event],
+    iocs: &[nettrap_ioc::IoC],
 ) -> Report {
-    ReportBuilder::new()
-        .add_flows(flows.iter().cloned())
-        .build()
+    let mut builder = ReportBuilder::new().add_flows(flows.iter().cloned());
+    for event in events {
+        builder = builder.add_event(event.clone());
+    }
+    for ioc in iocs {
+        builder = builder.add_ioc(ioc.clone());
+    }
+    builder.build()
 }

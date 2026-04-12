@@ -2,8 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::prelude::*;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum InterceptionMode {
     #[default]
     Userspace,
@@ -25,9 +24,7 @@ impl std::fmt::Display for InterceptionMode {
     }
 }
 
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum LogLevel {
     Trace,
     Debug,
@@ -37,9 +34,7 @@ pub enum LogLevel {
     Error,
 }
 
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum OutputFormat {
     #[default]
     Jsonl,
@@ -47,7 +42,6 @@ pub enum OutputFormat {
     Csv,
     Table,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListenerConfig {
@@ -113,12 +107,10 @@ impl Default for EngineConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
     pub engine: EngineConfig,
 }
-
 
 impl Config {
     pub fn from_file(path: &str) -> crate::Result<Self> {

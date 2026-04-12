@@ -1,5 +1,4 @@
-use sha2::{Digest, Sha256};
-
+use md5::Md5;
 
 #[derive(Debug, Clone)]
 pub struct TlsFingerprint {
@@ -20,29 +19,29 @@ impl TlsFingerprint {
     pub fn compute_ja3(&mut self) {
         let version = self.versions.first().copied().unwrap_or(0x0303);
 
-        let version_str = format!("{:04x}", version);
+        let version_str = format!("{}", version);
         let ciphers_str = self
             .cipher_suites
             .iter()
-            .map(|c| format!("{:04x}", c))
+            .map(|c| format!("{}", c))
             .collect::<Vec<_>>()
             .join("-");
         let extensions_str = self
             .extensions
             .iter()
-            .map(|e| format!("{:04x}", e))
+            .map(|e| format!("{}", e))
             .collect::<Vec<_>>()
             .join("-");
         let groups_str = self
             .supported_groups
             .iter()
-            .map(|g| format!("{:04x}", g))
+            .map(|g| format!("{}", g))
             .collect::<Vec<_>>()
             .join("-");
         let formats_str = self
             .ec_point_formats
             .iter()
-            .map(|f| format!("{:04x}", f))
+            .map(|f| format!("{}", f))
             .collect::<Vec<_>>()
             .join("-");
 
@@ -51,42 +50,62 @@ impl TlsFingerprint {
             version_str, ciphers_str, extensions_str, groups_str, formats_str
         );
 
-        let mut hasher = Sha256::new();
+        // JA3 spec mandates MD5 hash
+        use md5::Digest;
+        let mut hasher = Md5::new();
         hasher.update(self.ja3.as_bytes());
         self.ja3_hash = format!("{:x}", hasher.finalize());
     }
 }
 
+/// Compute the byte offset where TLS extensions begin in a ClientHello.
+/// Layout: record_header(5) + handshake_header(4) + client_version(2) + random(32)
+///         + session_id_len(1) + session_id(var) + cipher_suites_len(2) + cipher_suites(var)
+///         + compression_len(1) + compression(var) + extensions_len(2)
+fn find_extensions_start(data: &[u8]) -> Option<usize> {
+    if data.len() < 44 || data[0] != 0x16 || data[1] != 0x03 {
+        return None;
+    }
+    let mut pos = 43; // session_id_length byte
+    if pos >= data.len() { return None; }
+    let session_id_len = data[pos] as usize;
+    pos += 1 + session_id_len; // skip session_id_length + session_id
+
+    if pos + 2 > data.len() { return None; }
+    let cipher_suites_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+    pos += 2 + cipher_suites_len; // skip cipher_suites_length + cipher_suites
+
+    if pos >= data.len() { return None; }
+    let compression_len = data[pos] as usize;
+    pos += 1 + compression_len; // skip compression_length + compression_methods
+
+    if pos + 2 > data.len() { return None; }
+    let _extensions_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+    pos += 2; // now pos points to the first extension
+
+    Some(pos)
+}
+
 pub fn extract_sni(data: &[u8]) -> Option<String> {
-    if data.len() < 45 {
-        return None;
-    }
+    let mut pos = find_extensions_start(data)?;
 
-    if data[0] != 0x16 || data[1] != 0x03 {
-        return None;
-    }
-
-    let extensions_start = 43_usize;
-    if data.len() < extensions_start + 4 {
-        return None;
-    }
-
-    let mut pos = extensions_start;
-    while pos + 4 < data.len() {
+    while pos + 4 <= data.len() {
         let ext_type = u16::from_be_bytes([data[pos], data[pos + 1]]);
         let ext_len = u16::from_be_bytes([data[pos + 2], data[pos + 3]]) as usize;
 
         if ext_type == 0x0000 {
-            pos += 4;
-            let _sni_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
-            pos += 2;
-            let _hostname_type = data[pos];
-            pos += 1;
-            let hostname_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
-            pos += 2;
+            let inner_start = pos + 4;
+            if inner_start + 5 > data.len() {
+                return None;
+            }
+            let _sni_len = u16::from_be_bytes([data[inner_start], data[inner_start + 1]]) as usize;
+            let _hostname_type = data[inner_start + 2];
+            let hostname_len =
+                u16::from_be_bytes([data[inner_start + 3], data[inner_start + 4]]) as usize;
+            let hostname_start = inner_start + 5;
 
-            if pos + hostname_len <= data.len() {
-                return std::str::from_utf8(&data[pos..pos + hostname_len])
+            if hostname_start + hostname_len <= data.len() {
+                return std::str::from_utf8(&data[hostname_start..hostname_start + hostname_len])
                     .ok()
                     .map(|s| s.to_string());
             }
@@ -99,33 +118,24 @@ pub fn extract_sni(data: &[u8]) -> Option<String> {
 }
 
 pub fn extract_alpn(data: &[u8]) -> Option<String> {
-    if data.len() < 45 {
-        return None;
-    }
+    let mut pos = find_extensions_start(data)?;
 
-    if data[0] != 0x16 || data[1] != 0x03 {
-        return None;
-    }
-
-    let extensions_start = 43_usize;
-    if data.len() < extensions_start + 4 {
-        return None;
-    }
-
-    let mut pos = extensions_start;
-    while pos + 4 < data.len() {
+    while pos + 4 <= data.len() {
         let ext_type = u16::from_be_bytes([data[pos], data[pos + 1]]);
         let ext_len = u16::from_be_bytes([data[pos + 2], data[pos + 3]]) as usize;
 
         if ext_type == 0x0010 {
-            pos += 4;
-            let _alpn_ext_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
-            pos += 2;
-            let str_len = data[pos] as usize;
-            pos += 1;
+            let inner_start = pos + 4;
+            if inner_start + 3 > data.len() {
+                return None;
+            }
+            let _alpn_ext_len =
+                u16::from_be_bytes([data[inner_start], data[inner_start + 1]]) as usize;
+            let str_len = data[inner_start + 2] as usize;
+            let str_start = inner_start + 3;
 
-            if pos + str_len <= data.len() {
-                return std::str::from_utf8(&data[pos..pos + str_len])
+            if str_start + str_len <= data.len() {
+                return std::str::from_utf8(&data[str_start..str_start + str_len])
                     .ok()
                     .map(|s| s.to_string());
             }
@@ -180,6 +190,50 @@ pub fn parse_tls_handshake(data: &[u8]) -> Option<TlsFingerprint> {
             fingerprint
                 .cipher_suites
                 .push(u16::from_be_bytes([data[i], data[i + 1]]));
+        }
+    }
+
+    // Parse compression methods to find extensions start
+    // Use ciphers_end if valid, otherwise fall back to after cipher_suites_length field
+    let mut pos = if ciphers_end <= data.len() { ciphers_end } else { ciphers_start + 2 };
+    if pos < data.len() {
+        let comp_len = data[pos] as usize;
+        pos += 1 + comp_len;
+
+        // Parse extensions
+        if pos + 2 <= data.len() {
+            let ext_total_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+            pos += 2;
+            let ext_end = (pos + ext_total_len).min(data.len());
+
+            while pos + 4 <= ext_end {
+                let ext_type = u16::from_be_bytes([data[pos], data[pos + 1]]);
+                let ext_len = u16::from_be_bytes([data[pos + 2], data[pos + 3]]) as usize;
+                fingerprint.extensions.push(ext_type);
+
+                if ext_type == 0x000a && pos + 4 + ext_len <= data.len() {
+                    // supported_groups
+                    let list_len = u16::from_be_bytes([data[pos + 4], data[pos + 5]]) as usize;
+                    let mut gp = pos + 6;
+                    let ge = (gp + list_len).min(data.len());
+                    while gp + 2 <= ge {
+                        fingerprint.supported_groups.push(u16::from_be_bytes([data[gp], data[gp + 1]]));
+                        gp += 2;
+                    }
+                }
+
+                if ext_type == 0x000b && pos + 4 + ext_len <= data.len() {
+                    // ec_point_formats
+                    let fmt_len = data[pos + 4] as usize;
+                    for i in 0..fmt_len {
+                        if pos + 5 + i < data.len() {
+                            fingerprint.ec_point_formats.push(data[pos + 5 + i] as u16);
+                        }
+                    }
+                }
+
+                pos += 4 + ext_len;
+            }
         }
     }
 

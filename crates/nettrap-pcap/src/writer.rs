@@ -35,9 +35,10 @@ impl PacketWriter {
     pub fn write_packet(&self, packet: &Packet) -> Result<()> {
         let mut file = self.file.write();
         if let Some(ref mut f) = *file {
+            let json = serde_json::to_string(packet)
+                .map_err(|e| Error::Storage(format!("JSON serialization failed: {}", e)))?;
             use std::io::Write;
-            writeln!(f, "{}", serde_json::to_string(packet).unwrap())
-                .map_err(|e| Error::Storage(e.to_string()))?;
+            writeln!(f, "{}", json).map_err(|e| Error::Storage(e.to_string()))?;
         }
         Ok(())
     }
@@ -76,9 +77,10 @@ impl FlowWriter {
     pub fn write_flow(&self, flow: &nettrap_flow::Flow) -> Result<()> {
         let mut file = self.file.write();
         if let Some(ref mut f) = *file {
+            let json = serde_json::to_string(flow)
+                .map_err(|e| Error::Storage(format!("JSON serialization failed: {}", e)))?;
             use std::io::Write;
-            writeln!(f, "{}", serde_json::to_string(flow).unwrap())
-                .map_err(|e| Error::Storage(e.to_string()))?;
+            writeln!(f, "{}", json).map_err(|e| Error::Storage(e.to_string()))?;
         }
         Ok(())
     }

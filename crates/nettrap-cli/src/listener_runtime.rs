@@ -25,27 +25,30 @@ pub struct ListenerRuntime {
     pub nbi_collector: Arc<NbiCollector>,
     pub session_tracker: Arc<SessionTracker>,
     pub port_forward_table: Arc<PortForwardTable>,
+    pub flow_manager: Arc<nettrap_flow::FlowManager>,
     pub ca: Option<Arc<nettrap_tls_mitm::CertificateAuthority>>,
 }
 
 impl ListenerRuntime {
     pub fn new(
+        ca: Option<Arc<nettrap_tls_mitm::CertificateAuthority>>,
         router: Arc<nettrap_proxy::ProtocolRouter>,
         attribution: Option<Arc<nettrap_attribution::AttributionEngine>>,
         pcap_writer: Option<Arc<nettrap_pcap::PcapWriter>>,
         nbi_collector: Arc<NbiCollector>,
         session_tracker: Arc<SessionTracker>,
         port_forward_table: Arc<PortForwardTable>,
-        ca: Option<Arc<nettrap_tls_mitm::CertificateAuthority>>,
+        flow_manager: Arc<nettrap_flow::FlowManager>,
     ) -> Self {
         Self {
+            ca,
             router,
             attribution,
             pcap_writer,
             nbi_collector,
             session_tracker,
             port_forward_table,
-            ca,
+            flow_manager,
         }
     }
 }
@@ -72,6 +75,16 @@ impl ListenerSecurity {
             host_whitelist,
             host_blacklist,
         }
+    }
+
+    pub fn with_host_whitelist(mut self, whitelist: Vec<String>) -> Self {
+        self.host_whitelist = whitelist;
+        self
+    }
+
+    pub fn with_host_blacklist(mut self, blacklist: Vec<String>) -> Self {
+        self.host_blacklist = blacklist;
+        self
     }
 
     pub fn is_host_allowed(&self, host: &str) -> bool {

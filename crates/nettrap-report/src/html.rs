@@ -1,5 +1,12 @@
 use crate::prelude::*;
 
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
 pub fn generate_html_report(report: &Report) -> Result<String> {
     let mut html = String::new();
 
@@ -46,16 +53,16 @@ pub fn generate_html_report(report: &Report) -> Result<String> {
 
     for flow in &report.flows {
         html.push_str("      <tr>\n");
-        html.push_str(&format!("        <td>{}</td>\n", flow.flow_id));
-        html.push_str(&format!("        <td>{}</td>\n", flow.src));
-        html.push_str(&format!("        <td>{}</td>\n", flow.dst));
-        html.push_str(&format!("        <td>{}</td>\n", flow.protocol));
+        html.push_str(&format!("        <td>{}</td>\n", html_escape(&flow.flow_id)));
+        html.push_str(&format!("        <td>{}</td>\n", html_escape(&flow.src)));
+        html.push_str(&format!("        <td>{}</td>\n", html_escape(&flow.dst)));
+        html.push_str(&format!("        <td>{}</td>\n", html_escape(&flow.protocol)));
         html.push_str(&format!("        <td>{}</td>\n", flow.bytes_sent));
         html.push_str(&format!("        <td>{}</td>\n", flow.bytes_received));
         html.push_str(&format!("        <td>{}</td>\n", flow.duration_ms));
         html.push_str(&format!(
             "        <td>{}</td>\n",
-            flow.process.as_deref().unwrap_or("-")
+            html_escape(flow.process.as_deref().unwrap_or("-"))
         ));
         html.push_str("      </tr>\n");
     }
@@ -75,8 +82,8 @@ pub fn generate_html_report(report: &Report) -> Result<String> {
 
         for ioc in &report.iocs {
             html.push_str("      <tr>\n");
-            html.push_str(&format!("        <td>{}</td>\n", ioc.ioc_type));
-            html.push_str(&format!("        <td>{}</td>\n", ioc.value));
+            html.push_str(&format!("        <td>{}</td>\n", html_escape(&ioc.ioc_type)));
+            html.push_str(&format!("        <td>{}</td>\n", html_escape(&ioc.value)));
 
             let confidence_class = if ioc.confidence >= 0.8 {
                 "ioc-high"
@@ -90,7 +97,7 @@ pub fn generate_html_report(report: &Report) -> Result<String> {
                 confidence_class,
                 ioc.confidence * 100.0
             ));
-            html.push_str(&format!("        <td>{}</td>\n", ioc.source));
+            html.push_str(&format!("        <td>{}</td>\n", html_escape(&ioc.source)));
             html.push_str("      </tr>\n");
         }
 

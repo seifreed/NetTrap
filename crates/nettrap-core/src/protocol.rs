@@ -85,17 +85,18 @@ pub enum ApplicationProtocol {
 }
 
 impl ApplicationProtocol {
-    pub fn from_port(port: u16, _proto: Protocol) -> Self {
-        match port {
-            53 => ApplicationProtocol::Dns,
-            80 => ApplicationProtocol::Http,
-            443 => ApplicationProtocol::Https,
-            21 => ApplicationProtocol::Ftp,
-            25 => ApplicationProtocol::Smtp,
-            110 => ApplicationProtocol::Pop3,
-            143 => ApplicationProtocol::Imap,
-            22 => ApplicationProtocol::Ssh,
-            23 => ApplicationProtocol::Telnet,
+    pub fn from_port(port: u16, proto: Protocol) -> Self {
+        match (port, proto) {
+            (443, Protocol::Udp) => ApplicationProtocol::Quic,
+            (53, _) => ApplicationProtocol::Dns,
+            (80, _) => ApplicationProtocol::Http,
+            (443, _) => ApplicationProtocol::Https,
+            (21, _) => ApplicationProtocol::Ftp,
+            (25, _) => ApplicationProtocol::Smtp,
+            (110, _) => ApplicationProtocol::Pop3,
+            (143, _) => ApplicationProtocol::Imap,
+            (22, _) => ApplicationProtocol::Ssh,
+            (23, _) => ApplicationProtocol::Telnet,
             _ => ApplicationProtocol::Unknown(port),
         }
     }
@@ -135,6 +136,8 @@ impl ApplicationProtocol {
                 | ApplicationProtocol::Ssh
                 | ApplicationProtocol::DnsOverTls
                 | ApplicationProtocol::DnsOverHttps
+                | ApplicationProtocol::Ftps
+                | ApplicationProtocol::Smtps
         )
     }
 }

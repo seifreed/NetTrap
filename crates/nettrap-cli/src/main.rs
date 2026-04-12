@@ -14,11 +14,17 @@ fn run() -> Result<()> {
     configure_windows_arm64_runtime();
 
     let cli = Cli::parse();
-    
+
     let config_path = cli.config.clone();
     let stop_flag = cli.stop_flag.clone();
 
-    nettrap_cli::setup_logging(cli.verbose, cli.quiet, cli.log_file.as_deref(), cli.no_console, cli.log_syslog)?;
+    nettrap_cli::setup_logging(
+        cli.verbose,
+        cli.quiet,
+        cli.log_file.as_deref(),
+        cli.no_console,
+        cli.log_syslog,
+    )?;
 
     let rt = tokio::runtime::Runtime::new()
         .map_err(|e| nettrap_cli::Error::Other(format!("Failed to create runtime: {}", e)))?;

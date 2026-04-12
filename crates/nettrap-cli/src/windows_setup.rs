@@ -17,9 +17,7 @@ pub fn fix_gateway() {
             if !stdout.contains("Default Gateway")
                 || stdout.contains("Default Gateway:                          \r\n")
             {
-                tracing::warn!(
-                    "No default gateway detected. Configure one manually if needed."
-                );
+                tracing::warn!("No default gateway detected. Configure one manually if needed.");
             } else {
                 tracing::info!("Gateway configuration looks OK");
             }

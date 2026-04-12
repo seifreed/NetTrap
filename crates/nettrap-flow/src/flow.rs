@@ -175,6 +175,10 @@ impl TcpState {
             }
             TcpState::Established => {
                 if flags.contains(TcpFlags::FIN) {
+                    // FIN observed: could be active close (we sent FIN → FinWait1)
+                    // or passive close (peer sent FIN → CloseWait).
+                    // Default to FinWait1; callers tracking direction should use
+                    // peer_fin_received() for inbound FINs.
                     TcpState::FinWait1
                 } else {
                     *self
@@ -219,7 +223,18 @@ impl TcpState {
                     *self
                 }
             }
-            TcpState::TimeWait => TcpState::Closed,
+            TcpState::TimeWait => *self, // Stay in TimeWait; cleanup timer handles transition
+        }
+    }
+
+    /// Transition when a FIN is received from the peer (passive close).
+    /// Use this instead of `transition()` when you know the FIN is inbound.
+    pub fn peer_fin_received(&self) -> TcpState {
+        match self {
+            TcpState::Established => TcpState::CloseWait,
+            TcpState::FinWait1 => TcpState::Closing,
+            TcpState::FinWait2 => TcpState::TimeWait,
+            _ => *self,
         }
     }
 }

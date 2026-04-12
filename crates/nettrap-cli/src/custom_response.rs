@@ -38,7 +38,9 @@ impl CustomResponseConfig {
 
         for rule_str in config_str.split("||") {
             let rule_str = rule_str.trim();
-            if rule_str.is_empty() { continue; }
+            if rule_str.is_empty() {
+                continue;
+            }
 
             let mut hosts = Vec::new();
             let mut uris = Vec::new();
@@ -69,10 +71,16 @@ impl CustomResponseConfig {
                 Some("file") => CustomResponseType::HttpRawFile(body),
                 Some("base64") => {
                     use base64::Engine as _;
-                    let decoded = base64::engine::general_purpose::STANDARD
-                        .decode(&body)
-                        .unwrap_or_default();
-                    CustomResponseType::HttpBase64(decoded)
+                    match base64::engine::general_purpose::STANDARD.decode(&body) {
+                        Ok(decoded) => CustomResponseType::HttpBase64(decoded),
+                        Err(e) => {
+                            tracing::error!(
+                                "Invalid base64 in custom response (type=base64), ignoring rule: {}",
+                                e
+                            );
+                            continue; // Skip this rule entirely rather than silently changing type
+                        }
+                    }
                 }
                 _ => CustomResponseType::HttpStaticString(body),
             };
@@ -94,9 +102,15 @@ impl CustomResponseConfig {
 
         for rule in &self.rules {
             let host_match = rule.hosts.is_empty()
-                || rule.hosts.iter().any(|h| h == "*" || host_lower.contains(h));
+                || rule
+                    .hosts
+                    .iter()
+                    .any(|h| h == "*" || host_lower.contains(h));
             let uri_match = rule.uris.is_empty()
-                || rule.uris.iter().any(|u| u == "*" || uri.ends_with(u) || uri.contains(u));
+                || rule
+                    .uris
+                    .iter()
+                    .any(|u| u == "*" || uri.ends_with(u) || uri.contains(u));
 
             // If both specified, both must match (conjunctive)
             // If only one specified, that one must match
@@ -114,7 +128,7 @@ impl CustomResponseConfig {
     /// Build HTTP response from matched rule
     pub fn build_response(&self, host: &str, uri: &str) -> Option<Vec<u8>> {
         let rule = self.find_match(host, uri)?;
-        let date = chrono::Utc::now().format("%a, %d %b %Y %H:%M:%S GMT");
+        let date = crate::faketime::fake_now().format("%a, %d %b %Y %H:%M:%S GMT");
 
         // Build template variables for the template engine
         let mut vars = std::collections::HashMap::new();
@@ -145,12 +159,18 @@ impl CustomResponseConfig {
                 let body_rendered = crate::template::render_template(&body_replaced, &vars);
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nDate: {}\r\nServer: NetTrap\r\n\r\n{}",
-                    ct, body_rendered.len(), date, body_rendered
+                    ct,
+                    body_rendered.len(),
+                    date,
+                    body_rendered
                 );
                 Some(response.into_bytes())
             }
             CustomResponseType::HttpBase64(decoded) => {
-                let ct = rule.content_type.as_deref().unwrap_or("application/octet-stream");
+                let ct = rule
+                    .content_type
+                    .as_deref()
+                    .unwrap_or("application/octet-stream");
                 let mut response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nDate: {}\r\nServer: NetTrap\r\n\r\n",
                     ct, decoded.len(), date

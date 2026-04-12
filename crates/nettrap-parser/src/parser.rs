@@ -1,7 +1,7 @@
 use nom::{
+    IResult,
     bytes::complete::take,
     number::complete::{be_u16, be_u32},
-    IResult,
 };
 
 use crate::prelude::*;
@@ -196,13 +196,17 @@ pub fn detect_protocol(data: &[u8]) -> Option<ApplicationProtocol> {
         return Some(ApplicationProtocol::Tls);
     }
 
-    if data.len() > 12 {
-        let maybe_dns = &data[0..2];
-        let flags = u16::from_be_bytes([maybe_dns[0], maybe_dns[1]]);
-        if (flags & 0x8000) == 0 {
-            if let Ok(Some(_)) = std::str::from_utf8(data).map(|s| s.find('.')) {
-                return Some(ApplicationProtocol::Dns);
-            }
+    // DNS detection: validate header structure beyond just flags
+    if data.len() >= 12 {
+        let flags = u16::from_be_bytes([data[0], data[1]]);
+        let is_query = (flags & 0x8000) == 0;
+        let opcode = (flags >> 11) & 0x0F;
+        let qdcount = u16::from_be_bytes([data[4], data[5]]);
+        // Valid DNS: is query, standard/inverse opcode (0-2), has 1+ questions,
+        // and does NOT start with printable ASCII (which would indicate HTTP/SMTP/etc.)
+        if is_query && opcode <= 2 && (1..=100).contains(&qdcount) && !data[0].is_ascii_alphabetic()
+        {
+            return Some(ApplicationProtocol::Dns);
         }
     }
 

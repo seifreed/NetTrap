@@ -4,9 +4,9 @@
 pub struct SyslogRecvHandler;
 
 const FACILITY_NAMES: &[&str] = &[
-    "kern", "user", "mail", "daemon", "auth", "syslog", "lpr", "news",
-    "uucp", "cron", "authpriv", "ftp", "ntp", "audit", "alert", "clock",
-    "local0", "local1", "local2", "local3", "local4", "local5", "local6", "local7",
+    "kern", "user", "mail", "daemon", "auth", "syslog", "lpr", "news", "uucp", "cron", "authpriv",
+    "ftp", "ntp", "audit", "alert", "clock", "local0", "local1", "local2", "local3", "local4",
+    "local5", "local6", "local7",
 ];
 
 const SEVERITY_NAMES: &[&str] = &[
@@ -43,13 +43,23 @@ impl SyslogRecvHandler {
         let facility = pri >> 3;
         let severity = pri & 0x07;
 
-        let fac_name = FACILITY_NAMES.get(facility as usize).copied().unwrap_or("unknown");
-        let sev_name = SEVERITY_NAMES.get(severity as usize).copied().unwrap_or("unknown");
+        let fac_name = FACILITY_NAMES
+            .get(facility as usize)
+            .copied()
+            .unwrap_or("unknown");
+        let sev_name = SEVERITY_NAMES
+            .get(severity as usize)
+            .copied()
+            .unwrap_or("unknown");
         let message = text[end + 1..].to_string();
 
         tracing::info!(
             "Syslog: facility={} ({}) severity={} ({}) msg={}",
-            facility, fac_name, severity, sev_name, message.chars().take(80).collect::<String>()
+            facility,
+            fac_name,
+            severity,
+            sev_name,
+            message.chars().take(80).collect::<String>()
         );
 
         Some(SyslogMessage {

@@ -1,7 +1,7 @@
+use async_trait::async_trait;
+use parking_lot::RwLock;
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use parking_lot::RwLock;
-use async_trait::async_trait;
 
 use crate::prelude::*;
 
@@ -55,8 +55,14 @@ impl CsvStorage {
 
     /// Escape a field for CSV (quote if it contains comma, quote, or newline)
     fn csv_escape(s: &str) -> String {
-        if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
-            format!("\"{}\"", s.replace('"', "\"\""))
+        // Sanitize CSV formula injection (values starting with =, +, -, @)
+        let needs_formula_guard = s.starts_with('=') || s.starts_with('+') || s.starts_with('-') || s.starts_with('@');
+        if needs_formula_guard || s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
+            if needs_formula_guard {
+                format!("\"'{}\"", s.replace('"', "\"\""))
+            } else {
+                format!("\"{}\"", s.replace('"', "\"\""))
+            }
         } else {
             s.to_string()
         }
@@ -82,7 +88,11 @@ impl Storage for CsvStorage {
             flow.five_tuple.protocol,
             format!("{:?}", flow.direction),
             flow.metadata.bytes_sent + flow.metadata.bytes_received,
-            Self::csv_escape(&format!("state={:?} duration_ms={}", flow.state, flow.duration_ms())),
+            Self::csv_escape(&format!(
+                "state={:?} duration_ms={}",
+                flow.state,
+                flow.duration_ms()
+            )),
         );
         writeln!(w, "{}", line).map_err(|e| Error::Storage(e.to_string()))?;
         Ok(())

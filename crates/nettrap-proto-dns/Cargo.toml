@@ -19,5 +19,8 @@ parking_lot.workspace = true
 tracing.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
-trust-dns-proto.workspace = true
-trust-dns-client.workspace = true
+hickory-proto.workspace = true
+hickory-client.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

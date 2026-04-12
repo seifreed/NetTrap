@@ -13,6 +13,6 @@ nettrap-flow.workspace = true
 nettrap-events.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-ratatui = "0.29"
+ratatui = "0.30"
 crossterm = "0.29"
 tracing.workspace = true

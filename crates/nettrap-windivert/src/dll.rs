@@ -11,26 +11,28 @@ pub mod windivert_dll {
 
     /// Find WinDivert DLL in common locations
     pub fn find_windivert_dll() -> Option<PathBuf> {
-        Some(WINDIVERT_PATH
-            .get_or_init(|| {
-                // Try common locations in order
-                let candidates = get_dll_search_paths();
+        Some(
+            WINDIVERT_PATH
+                .get_or_init(|| {
+                    // Try common locations in order
+                    let candidates = get_dll_search_paths();
 
-                for path in candidates {
-                    let dll_path = path.join(get_dll_name());
-                    if dll_path.exists() {
-                        tracing::debug!("Found WinDivert DLL at: {:?}", dll_path);
-                        return dll_path;
+                    for path in candidates {
+                        let dll_path = path.join(get_dll_name());
+                        if dll_path.exists() {
+                            tracing::debug!("Found WinDivert DLL at: {:?}", dll_path);
+                            return dll_path;
+                        }
                     }
-                }
 
-                // If not found, return just the DLL name and hope it's in PATH
-                tracing::warn!(
-                    "WinDivert DLL not found in search paths, will try loading from PATH"
-                );
-                PathBuf::from(get_dll_name())
-            })
-            .clone())
+                    // If not found, return just the DLL name and hope it's in PATH
+                    tracing::warn!(
+                        "WinDivert DLL not found in search paths, will try loading from PATH"
+                    );
+                    PathBuf::from(get_dll_name())
+                })
+                .clone(),
+        )
     }
 
     fn get_dll_search_paths() -> Vec<PathBuf> {

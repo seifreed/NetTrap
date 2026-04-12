@@ -1,8 +1,8 @@
 use ratatui::{
+    Frame,
     layout::{Constraint, Layout},
     style::{Color, Style},
     widgets::{Block, Borders, List, ListItem, Paragraph},
-    Frame,
 };
 
 pub struct FlowWidget {

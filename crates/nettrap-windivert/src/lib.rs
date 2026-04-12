@@ -9,14 +9,14 @@ mod bindings;
 mod dll;
 
 #[cfg(windows)]
-pub use bindings::WinDivert;
-#[cfg(windows)]
 pub use bindings::HANDLE;
 #[cfg(windows)]
+pub use bindings::WinDivert;
+#[cfg(windows)]
 pub use bindings::{
-    WindivertAddress, WindivertIpHdr, WindivertIpv6Hdr, WindivertTcpHdr, WindivertUdpHdr,
     IPPROTO_TCP, IPPROTO_UDP, WINDIVERT_DIRECTION_IN, WINDIVERT_DIRECTION_OUT,
-    WINDIVERT_LAYER_NETWORK,
+    WINDIVERT_LAYER_NETWORK, WindivertAddress, WindivertIpHdr, WindivertIpv6Hdr, WindivertTcpHdr,
+    WindivertUdpHdr, close_handle,
 };
 #[cfg(windows)]
 pub use dll::windivert_dll::{find_windivert_dll, get_driver_name};
@@ -26,6 +26,6 @@ pub mod error {
 }
 
 pub mod prelude {
-    pub use nettrap_core::prelude::*;
     pub use async_trait::async_trait;
+    pub use nettrap_core::prelude::*;
 }

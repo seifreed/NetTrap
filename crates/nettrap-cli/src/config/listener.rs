@@ -69,14 +69,20 @@ pub struct ListenerConfig {
     #[serde(default = "default_timeout")]
     pub timeout_ms: u64,
     // Maximum concurrent connections per listener (throttling)
-    #[serde(default)]
+    // Default: 100 connections to prevent resource exhaustion
+    #[serde(default = "default_max_connections")]
     pub max_connections: Option<u32>,
     // Banner delay in milliseconds (for dummy/raw handlers)
     #[serde(default)]
     pub banner_delay_ms: u64,
 }
 
-fn default_timeout() -> u64 { 30000 }
+fn default_timeout() -> u64 {
+    30000
+}
+fn default_max_connections() -> Option<u32> {
+    Some(100)
+}
 
 impl ListenerConfig {
     pub fn new(name: impl Into<String>, port: u16) -> Self {
@@ -88,7 +94,14 @@ impl ListenerConfig {
             emulate_response: true,
             response_delay_ms: 0,
             custom_response: None,
-            protocol: if matches!(port, 53 | 67 | 68 | 69 | 123 | 137 | 138 | 161 | 162 | 514 | 1900 | 5353) {
+            protocol: if matches!(
+                port,
+                53 | 67 | 68 | 69 | 123 | 137 | 138 | 161 | 162 | 514 | 1900 | 5353
+            ) {
+                tracing::debug!(
+                    "Port {} auto-detected as UDP (well-known UDP port). Use with_protocol() to override.",
+                    port
+                );
                 nettrap_core::prelude::Protocol::Udp
             } else {
                 nettrap_core::prelude::Protocol::Tcp
@@ -115,20 +128,43 @@ impl ListenerConfig {
             server_version: None,
             pasv_ports: None,
             timeout_ms: 30000,
-            max_connections: None,
+            max_connections: Some(100),
             banner_delay_ms: 0,
         }
     }
 
     /// Expand port_range (e.g. "60000-60010") into individual ListenerConfigs
     pub fn expand_port_range(&self) -> Vec<ListenerConfig> {
+        const MAX_PORT_RANGE: u16 = 1000;
+
         if let Some(ref range_str) = self.port_range {
             let mut configs = Vec::new();
             for part in range_str.split(',') {
                 let part = part.trim();
                 if let Some((start_s, end_s)) = part.split_once('-') {
-                    if let (Ok(start), Ok(end)) = (start_s.trim().parse::<u16>(), end_s.trim().parse::<u16>()) {
-                        for port in start..=end {
+                    if let (Ok(start), Ok(end)) =
+                        (start_s.trim().parse::<u16>(), end_s.trim().parse::<u16>())
+                    {
+                        if start > end {
+                            tracing::warn!(
+                                "Port range '{}-{}' is inverted for listener {}, skipping",
+                                start,
+                                end,
+                                self.name
+                            );
+                            continue;
+                        }
+                        if end - start > MAX_PORT_RANGE {
+                            tracing::warn!(
+                                "Port range '{}-{}' exceeds max {} for listener {}, clamping",
+                                start,
+                                end,
+                                MAX_PORT_RANGE,
+                                self.name
+                            );
+                        }
+                        let clamped_end = start.saturating_add(MAX_PORT_RANGE - 1).min(end);
+                        for port in start..=clamped_end {
                             let mut cfg = self.clone();
                             cfg.port = port;
                             cfg.port_range = None;
@@ -219,32 +255,61 @@ impl ListenerConfig {
         self
     }
 
-    /// Check if a process name is allowed by this listener's filters
+    /// Check if a process name is allowed by this listener's filters.
+    /// Matches the process basename (after last path separator) case-insensitively.
     pub fn is_process_allowed(&self, process_name: &str) -> bool {
+        let basename = process_name
+            .rsplit(|c| c == '/' || c == '\\')
+            .next()
+            .unwrap_or(process_name)
+            .to_lowercase();
+
         if !self.process_whitelist.is_empty() {
-            return self.process_whitelist.iter().any(|p| {
-                process_name.to_lowercase().contains(&p.to_lowercase())
-            });
+            return self
+                .process_whitelist
+                .iter()
+                .any(|p| basename == p.to_lowercase());
         }
         if !self.process_blacklist.is_empty() {
-            return !self.process_blacklist.iter().any(|p| {
-                process_name.to_lowercase().contains(&p.to_lowercase())
-            });
+            return !self
+                .process_blacklist
+                .iter()
+                .any(|p| basename == p.to_lowercase());
         }
         true
     }
 
     /// Parse custom_response for DNS-specific domain-to-IP mappings.
     /// Format: "domain1=ip1,ip2;domain2=ip3"
+    /// Invalid IPs are logged and skipped.
     pub fn parse_dns_custom_responses(&self) -> Vec<(String, Vec<String>)> {
         let mut result = Vec::new();
         if let Some(ref custom) = self.custom_response {
             for entry in custom.split(';') {
                 let entry = entry.trim();
-                if entry.is_empty() { continue; }
+                if entry.is_empty() {
+                    continue;
+                }
                 if let Some((domain, ips)) = entry.split_once('=') {
-                    let ip_list: Vec<String> = ips.split(',').map(|s| s.trim().to_string()).collect();
-                    result.push((domain.trim().to_string(), ip_list));
+                    let ip_list: Vec<String> = ips
+                        .split(',')
+                        .filter_map(|s| {
+                            let s = s.trim().to_string();
+                            if s.parse::<std::net::IpAddr>().is_ok() {
+                                Some(s)
+                            } else {
+                                tracing::warn!(
+                                    "Invalid IP '{}' in DNS custom response for domain '{}', skipping",
+                                    s,
+                                    domain.trim()
+                                );
+                                None
+                            }
+                        })
+                        .collect();
+                    if !ip_list.is_empty() {
+                        result.push((domain.trim().to_string(), ip_list));
+                    }
                 }
             }
         }
@@ -253,8 +318,12 @@ impl ListenerConfig {
 
     /// Check if a host IP is allowed by this listener's filters
     pub fn is_host_allowed(&self, host: &str) -> bool {
-        // Always allow loopback
-        if host == "127.0.0.1" || host == "::1" || host.starts_with("127.") {
+        // Always allow loopback (including IPv4-mapped IPv6 variants)
+        if host == "127.0.0.1"
+            || host == "::1"
+            || host.starts_with("127.")
+            || host.starts_with("::ffff:127.")
+        {
             return true;
         }
         if !self.host_whitelist.is_empty() {

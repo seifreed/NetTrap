@@ -13,6 +13,8 @@
 //! - [`build_http_response_with_version`]: Build simple HTTP 200 response
 //! - [`build_http_response_with_fakefile`]: Build HTTP response with fake file content
 
+pub mod service_name;
+
 use std::path::Path;
 use tokio::io::AsyncWriteExt;
 
@@ -78,7 +80,9 @@ pub async fn dump_http_post(data: &[u8], prefix: &Option<String>, peer: &std::ne
     };
 
     if let Some(parent) = std::path::Path::new(&filename).parent() {
-        let _ = tokio::fs::create_dir_all(parent).await;
+        if let Err(e) = tokio::fs::create_dir_all(parent).await {
+            tracing::warn!("Failed to create directory {:?}: {}", parent, e);
+        }
     }
 
     match tokio::fs::write(&filename, data).await {
@@ -187,7 +191,7 @@ pub fn build_http_response_with_version(server: &str) -> Vec<u8> {
 /// Complete HTTP response bytes.
 pub fn build_http_response_with_fakefile(path: &str, server: &str) -> Vec<u8> {
     use std::collections::HashMap;
-    
+
     let ext = std::path::Path::new(path)
         .extension()
         .and_then(|e| e.to_str())
@@ -213,7 +217,10 @@ pub fn build_http_response_with_fakefile(path: &str, server: &str) -> Vec<u8> {
     ]);
 
     let content = fake_file_for_extension(&ext);
-    let mime = mime_types.get(ext.as_str()).copied().unwrap_or("application/octet-stream");
+    let mime = mime_types
+        .get(ext.as_str())
+        .copied()
+        .unwrap_or("application/octet-stream");
     let date = crate::faketime::fake_now().format("%a, %d %b %Y %H:%M:%S GMT");
 
     format!(
@@ -240,7 +247,9 @@ pub fn build_http_response_with_fakefile(path: &str, server: &str) -> Vec<u8> {
 /// Fake content appropriate for the extension.
 fn fake_file_for_extension(ext: &str) -> Vec<u8> {
     match ext {
-        "html" | "htm" => b"<html><head><title>Index</title></head><body><h1>Index</h1></body></html>".to_vec(),
+        "html" | "htm" => {
+            b"<html><head><title>Index</title></head><body><h1>Index</h1></body></html>".to_vec()
+        }
         "css" => b"body { font-family: sans-serif; margin: 0; }".to_vec(),
         "js" => b"console.log('loaded');".to_vec(),
         "json" => b"{\"status\":\"ok\"}".to_vec(),
@@ -263,10 +272,10 @@ mod tests {
     fn test_extract_http_host() {
         let data = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
         assert_eq!(extract_http_host(data), "example.com");
-        
+
         let data2 = b"GET / HTTP/1.1\r\nhost: example.org\r\n\r\n";
         assert_eq!(extract_http_host(data2), "example.org");
-        
+
         let data3 = b"GET / HTTP/1.1\r\n\r\n";
         assert_eq!(extract_http_host(data3), "");
     }
@@ -275,10 +284,10 @@ mod tests {
     fn test_extract_http_method() {
         let data = b"POST /login HTTP/1.1\r\n\r\n";
         assert_eq!(extract_http_method(data), "POST");
-        
+
         let data2 = b"GET / HTTP/1.1\r\n\r\n";
         assert_eq!(extract_http_method(data2), "GET");
-        
+
         let data3 = b"";
         assert_eq!(extract_http_method(data3), "GET");
     }
@@ -287,10 +296,10 @@ mod tests {
     fn test_extract_http_path() {
         let data = b"GET /path/to/resource?q=1 HTTP/1.1\r\n\r\n";
         assert_eq!(extract_http_path(data), "/path/to/resource?q=1");
-        
+
         let data2 = b"GET / HTTP/1.1\r\n\r\n";
         assert_eq!(extract_http_path(data2), "/");
-        
+
         let data3 = b"GET\r\n\r\n";
         let result = extract_http_path(data3);
         assert!(result.is_empty() || result == "/");
@@ -300,10 +309,10 @@ mod tests {
     fn test_fake_file() {
         let html = fake_file_for_extension("html");
         assert!(html.starts_with(b"<html>"));
-        
+
         let css = fake_file_for_extension("css");
         assert!(css.starts_with(b"body"));
-        
+
         let unknown = fake_file_for_extension("xyz");
         assert!(unknown.is_empty());
     }

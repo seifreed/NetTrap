@@ -2,6 +2,38 @@ use std::path::PathBuf;
 
 use crate::custom_response::CustomResponseConfig;
 
+/// DNS response mode configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DnsResponseMode {
+    #[default]
+    Static,
+    Auto,
+    Hostname,
+}
+
+impl std::fmt::Display for DnsResponseMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Static => write!(f, "static"),
+            Self::Auto => write!(f, "auto"),
+            Self::Hostname => write!(f, "hostname"),
+        }
+    }
+}
+
+impl std::str::FromStr for DnsResponseMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "static" => Ok(Self::Static),
+            "auto" => Ok(Self::Auto),
+            "hostname" | "gethostname" => Ok(Self::Hostname),
+            _ => Err(format!("Invalid DNS response mode: {}", s)),
+        }
+    }
+}
+
 /// Immutable per-listener configuration.
 ///
 /// Contains all configuration that comes from the config file or CLI args.
@@ -23,6 +55,7 @@ pub struct ListenerConfig {
     pub custom_response: Option<String>,
     pub custom_response_config: Option<CustomResponseConfig>,
     pub server_version: Option<String>,
+    /// Validated at construction time; None means default (Static).
     pub dns_response_mode: Option<String>,
     pub dns_response_ip: Option<String>,
     pub dns_response_mx: Option<String>,
@@ -64,5 +97,39 @@ impl Default for ListenerConfig {
             smtp_dir: None,
             log_hexdump: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn test_dns_response_mode_from_str() {
+        assert_eq!(
+            DnsResponseMode::from_str("static").unwrap(),
+            DnsResponseMode::Static
+        );
+        assert_eq!(
+            DnsResponseMode::from_str("auto").unwrap(),
+            DnsResponseMode::Auto
+        );
+        assert_eq!(
+            DnsResponseMode::from_str("hostname").unwrap(),
+            DnsResponseMode::Hostname
+        );
+        assert_eq!(
+            DnsResponseMode::from_str("HOSTNAME").unwrap(),
+            DnsResponseMode::Hostname
+        );
+        assert!(DnsResponseMode::from_str("invalid").is_err());
+    }
+
+    #[test]
+    fn test_dns_response_mode_display() {
+        assert_eq!(format!("{}", DnsResponseMode::Static), "static");
+        assert_eq!(format!("{}", DnsResponseMode::Auto), "auto");
+        assert_eq!(format!("{}", DnsResponseMode::Hostname), "hostname");
     }
 }

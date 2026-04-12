@@ -1,7 +1,6 @@
 use md5::{Digest as Md5Digest, Md5};
 use sha2::Sha256;
 
-
 pub fn calculate_ja3(
     version: u16,
     cipher_suites: &[u16],
@@ -109,7 +108,8 @@ pub fn ja3_from_handshake(data: &[u8]) -> Option<(String, String)> {
         extensions.push(ext_type);
 
         if ext_type == 0x000a && pos + 4 + ext_len <= data.len() {
-            let mut group_pos = pos + 6;
+            // supported_groups: list_length(2) at ext_data start (pos+4), groups start at pos+6
+            let mut group_pos = pos + 4;
             let groups_len = u16::from_be_bytes([data[group_pos], data[group_pos + 1]]) as usize;
             group_pos += 2;
             let groups_end = group_pos + groups_len;
@@ -120,7 +120,8 @@ pub fn ja3_from_handshake(data: &[u8]) -> Option<(String, String)> {
         }
 
         if ext_type == 0x000b && pos + 4 + ext_len <= data.len() {
-            let mut format_pos = pos + 5;
+            // ec_point_formats: formats_length(1) at ext_data start (pos+4), formats start at pos+5
+            let mut format_pos = pos + 4;
             let formats_len = data[format_pos] as usize;
             format_pos += 1;
             for i in 0..formats_len {
@@ -171,7 +172,11 @@ pub fn calculate_ja4(
     };
 
     // SNI flag
-    let sni_flag = if sni.is_some_and(|s| !s.is_empty()) { "d" } else { "i" };
+    let sni_flag = if sni.is_some_and(|s| !s.is_empty()) {
+        "d"
+    } else {
+        "i"
+    };
 
     // Counts (capped at 99)
     let cipher_count = cipher_suites.len().min(99);
@@ -192,7 +197,10 @@ pub fn calculate_ja4(
         .unwrap_or_else(|| "00".to_string());
 
     // JA4_a: first section
-    let ja4_a = format!("{}{}{}{:02}{:02}", proto, version, sni_flag, cipher_count, ext_count);
+    let ja4_a = format!(
+        "{}{}{}{:02}{:02}",
+        proto, version, sni_flag, cipher_count, ext_count
+    );
 
     // JA4_b: sorted cipher suites hash (excluding GREASE values)
     let mut sorted_ciphers: Vec<u16> = cipher_suites

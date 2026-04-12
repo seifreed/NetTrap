@@ -27,8 +27,8 @@ impl Default for StorageConfig {
 
 #[derive(Debug, Clone, Copy, Default)]
 pub enum StorageFormat {
-    Jsonl,
     #[default]
+    Jsonl,
     Json,
     Csv,
 }
@@ -50,6 +50,6 @@ pub fn create_storage(config: StorageConfig) -> Result<Box<dyn Storage>> {
             tracing::warn!("JSON storage format not yet implemented, using JSONL");
             Ok(Box::new(JsonlStorage::new(config.path)))
         }
-        StorageFormat::Csv => Ok(Box::new(CsvStorage::new(config.path)))
+        StorageFormat::Csv => Ok(Box::new(CsvStorage::new(config.path))),
     }
 }

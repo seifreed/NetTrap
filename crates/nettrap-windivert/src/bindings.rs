@@ -52,6 +52,10 @@ impl WindivertAddress {
     }
 
     pub fn network(&self) -> WindivertDataNetwork {
+        const NETWORK_SIZE: usize = std::mem::size_of::<WindivertDataNetwork>();
+        if self.data.len() < NETWORK_SIZE {
+            return WindivertDataNetwork::default();
+        }
         unsafe { std::ptr::read_unaligned(self.data.as_ptr() as *const WindivertDataNetwork) }
     }
 }
@@ -179,12 +183,7 @@ impl WinDivert {
         layer: WindivertLayer,
         flags: u64,
     ) -> Result<HANDLE, String> {
-        let dll_path = crate::find_windivert_dll()
-            .ok_or_else(|| "Failed to resolve WinDivert DLL path".to_string())?;
-        let lib = unsafe {
-            libloading::Library::new(&dll_path)
-                .map_err(|e| format!("Failed to load {}: {}", dll_path.display(), e))?
-        };
+        let lib = load_library()?;
 
         let filter_cstr =
             std::ffi::CString::new(filter).map_err(|e| format!("Invalid filter string: {}", e))?;
@@ -243,7 +242,10 @@ impl WinDivert {
         };
 
         if result == 0 {
-            Err(format!("WinDivertRecv failed (GetLastError={})", last_error()))
+            Err(format!(
+                "WinDivertRecv failed (GetLastError={})",
+                last_error()
+            ))
         } else {
             Ok(len)
         }
@@ -277,25 +279,42 @@ impl WinDivert {
         };
 
         if result == 0 {
-            Err(format!("WinDivertSend failed (GetLastError={})", last_error()))
+            Err(format!(
+                "WinDivertSend failed (GetLastError={})",
+                last_error()
+            ))
         } else {
             Ok(())
         }
     }
 
     pub fn close(&mut self, handle: HANDLE) -> Result<(), String> {
-        if let Some(lib) = &self.handle {
-            let close: libloading::Symbol<unsafe extern "system" fn(HANDLE) -> i32> = unsafe {
-                lib.get(b"WinDivertClose\0")
-                    .map_err(|e| format!("Failed to get WinDivertClose: {}", e))?
-            };
-
-            unsafe { close(handle) };
-        }
-
+        close_handle(handle)?;
         self.handle = None;
         Ok(())
     }
+}
+
+#[cfg(windows)]
+fn load_library() -> Result<libloading::Library, String> {
+    let dll_path = crate::find_windivert_dll()
+        .ok_or_else(|| "Failed to resolve WinDivert DLL path".to_string())?;
+    unsafe {
+        libloading::Library::new(&dll_path)
+            .map_err(|e| format!("Failed to load {}: {}", dll_path.display(), e))
+    }
+}
+
+#[cfg(windows)]
+pub fn close_handle(handle: HANDLE) -> Result<(), String> {
+    let lib = load_library()?;
+    let close: libloading::Symbol<unsafe extern "system" fn(HANDLE) -> i32> = unsafe {
+        lib.get(b"WinDivertClose\0")
+            .map_err(|e| format!("Failed to get WinDivertClose: {}", e))?
+    };
+
+    unsafe { close(handle) };
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -339,4 +358,9 @@ impl WinDivert {
     pub fn close(&mut self, _handle: HANDLE) -> Result<(), String> {
         Err("WinDivert only available on Windows".to_string())
     }
+}
+
+#[cfg(not(windows))]
+pub fn close_handle(_handle: HANDLE) -> Result<(), String> {
+    Err("WinDivert only available on Windows".to_string())
 }

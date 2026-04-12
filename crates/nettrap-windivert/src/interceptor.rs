@@ -222,27 +222,13 @@ impl Interceptor for WinDivertInterceptor {
             .map_err(|e| Error::Interception(format!("Join error: {}", e)))?
     }
     
-    async fn send_packet(&self, packet: Packet) -> Result<()> {
-        let handle = self.handle.read();
-        let handle = handle.ok_or_else(|| Error::InvalidState("WinDivert not initialized".into()))?;
-        
-        let windivert = self.windivert.read();
-        let windivert = windivert.as_ref()
-            .ok_or_else(|| Error::InvalidState("WinDivert not initialized".into()))?;
-        
-        let mut addr = WindivertAddress::default();
-        addr.set_direction(WINDIVERT_DIRECTION_OUT);
-        
-        // Reconstruct packet from FiveTuple
-        // This is simplified - full implementation would rebuild the entire packet
-        let mut packet_buf = vec![0u8; 65535];
-        let len = packet.payload().len();
-        packet_buf[..len].copy_from_slice(packet.payload());
-        
-        windivert.send(handle, &packet_buf[..len], &addr)
-            .map_err(|e| Error::Interception(format!("WinDivertSend failed: {}", e)))?;
-        
-        Ok(())
+    async fn send_packet(&self, _packet: Packet) -> Result<()> {
+        // WinDivert requires a complete IP packet (headers + payload) but the Packet
+        // struct only contains the application-layer payload after header stripping.
+        // Sending raw payload would inject malformed packets into the network stack.
+        Err(Error::NotSupported(
+            "WinDivert packet re-injection requires full IP packet reconstruction (not implemented)".into(),
+        ))
     }
     
     async fn shutdown(&mut self) -> Result<()> {

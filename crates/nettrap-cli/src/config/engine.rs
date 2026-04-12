@@ -46,6 +46,8 @@ pub struct DistributedConfig {
 
     /// Node identification
     #[serde(default)]
+    pub node_id: Option<String>,
+    #[serde(default)]
     pub node_region: Option<String>,
     #[serde(default)]
     pub node_tags: Vec<String>,
@@ -86,10 +88,24 @@ pub struct EventSinkConfig {
     /// Batch size for HTTP sinks (default 100)
     #[serde(default = "default_batch_size")]
     pub batch_size: usize,
+    /// Max time an HTTP event batch may remain buffered before flush (default 1000ms)
+    #[serde(default = "default_flush_interval_ms")]
+    pub flush_interval_ms: u64,
+    /// Max time to wait for a single outbound HTTP request before marking delivery state unknown
+    #[serde(default = "default_request_timeout_ms")]
+    pub request_timeout_ms: u64,
 }
 
 fn default_batch_size() -> usize {
     100
+}
+
+fn default_flush_interval_ms() -> u64 {
+    1000
+}
+
+fn default_request_timeout_ms() -> u64 {
+    5000
 }
 
 // ─── Database Storage Config ─────────────────────────────────────────────────
@@ -97,7 +113,7 @@ fn default_batch_size() -> usize {
 /// Database storage configuration
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DatabaseConfig {
-    /// Database backend: "sqlite", "mariadb", "mysql", or "none" (default)
+    /// Database backend: "sqlite", "postgres", or "none" (default)
     #[serde(default)]
     pub backend: String,
 
@@ -105,10 +121,10 @@ pub struct DatabaseConfig {
     #[serde(default)]
     pub sqlite_path: Option<String>,
 
-    /// MariaDB/MySQL connection URL (for backend = "mariadb" or "mysql")
-    /// Format: mysql://user:password@host:port/database
+    /// PostgreSQL connection URL (for backend = "postgres" or "postgresql")
+    /// Format: postgres://user:password@host:port/database
     #[serde(default)]
-    pub mysql_url: Option<String>,
+    pub postgres_url: Option<String>,
 
     /// Connection pool size (default: 5)
     #[serde(default = "default_pool_size")]
@@ -147,6 +163,8 @@ pub struct EngineConfig {
     pub pcap_path: Option<String>,
     pub output_format: String,
     pub output_path: Option<String>,
+    #[serde(default)]
+    pub api_bind: Option<String>,
     // Network mode
     #[serde(default)]
     pub network_mode: NetworkMode,
@@ -230,6 +248,7 @@ impl Default for EngineConfig {
             pcap_path: None,
             output_format: "jsonl".to_string(),
             output_path: None,
+            api_bind: None,
             network_mode: NetworkMode::Auto,
             tls_ca_cert: None,
             tls_ca_key: None,
@@ -261,9 +280,45 @@ impl Default for EngineConfig {
 impl EngineConfig {
     pub fn from_file(path: &std::path::Path) -> crate::Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        let config: Self =
+        let mut config: Self =
             toml::from_str(&content).map_err(|e| crate::Error::Config(e.to_string()))?;
+        config.validate();
         Ok(config)
+    }
+
+    /// Validate and fix config values, warning about problematic settings.
+    fn validate(&mut self) {
+        if self.database.pool_size == 0 {
+            tracing::warn!("database.pool_size is 0, correcting to 1");
+            self.database.pool_size = 1;
+        }
+        if self.attribution_timeout_ms == 0 && self.attribution_enabled {
+            tracing::warn!(
+                "attribution_timeout_ms is 0 with attribution enabled, correcting to 100ms"
+            );
+            self.attribution_timeout_ms = 100;
+        }
+        for listener in &mut self.listeners {
+            if listener.port == 0 {
+                tracing::warn!(
+                    "Listener '{}' has port 0, will bind to random port",
+                    listener.name
+                );
+            }
+            // Validate dns_response_mode if set
+            if let Some(ref mode) = listener.dns_response_mode {
+                let valid = ["static", "auto", "hostname", "gethostname"];
+                if !valid.contains(&mode.to_lowercase().as_str()) {
+                    tracing::warn!(
+                        "Listener '{}': invalid dns_response_mode '{}', resetting to default. Valid: {:?}",
+                        listener.name,
+                        mode,
+                        &valid
+                    );
+                    listener.dns_response_mode = None;
+                }
+            }
+        }
     }
 
     pub fn to_file(&self, path: &str) -> crate::Result<()> {

@@ -8,6 +8,6 @@ pub mod error {
 
 pub mod prelude {
     pub use crate::quic::*;
-    pub use nettrap_core::prelude::*;
     pub use nettrap_core::error::{Error, Result};
+    pub use nettrap_core::prelude::*;
 }

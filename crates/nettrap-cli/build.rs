@@ -202,12 +202,22 @@ fn resolve_msvc_tool(tool_name: &str) -> PathBuf {
             }
 
             for version in fs::read_dir(&tools_root).into_iter().flatten().flatten() {
-                let preferred = version.path().join("bin").join(host_dir).join("arm64").join(tool_name);
+                let preferred = version
+                    .path()
+                    .join("bin")
+                    .join(host_dir)
+                    .join("arm64")
+                    .join(tool_name);
                 if preferred.exists() {
                     return preferred;
                 }
 
-                let fallback = version.path().join("bin").join("Hostx64").join("arm64").join(tool_name);
+                let fallback = version
+                    .path()
+                    .join("bin")
+                    .join("Hostx64")
+                    .join("arm64")
+                    .join(tool_name);
                 if fallback.exists() {
                     return fallback;
                 }

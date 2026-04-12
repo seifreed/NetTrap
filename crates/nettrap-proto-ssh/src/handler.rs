@@ -32,9 +32,12 @@ impl SshHandler {
 
     /// Build a fake SSH key exchange init packet
     pub fn build_kexinit(&self) -> Vec<u8> {
+        use rand::Rng;
+
         let mut packet = Vec::new();
         // SSH packet: length(4) + padding_length(1) + type(1=SSH_MSG_KEXINIT) + cookie(16) + ...
-        let cookie: [u8; 16] = [0x01; 16]; // fake cookie
+        // Generate random cookie to avoid fingerprinting
+        let cookie: [u8; 16] = rand::rng().random();
 
         // Minimal KEX_INIT
         let mut payload = Vec::new();
@@ -83,8 +86,11 @@ impl SshHandler {
         payload.push(0); // false
         payload.extend_from_slice(&0u32.to_be_bytes());
 
-        // Build SSH packet
-        let padding_len = 8 - ((payload.len() + 5) % 8);
+        // Build SSH packet: [packet_length(4)][padding_length(1)][payload][padding]
+        // packet_length = 1 + payload.len() + padding_len
+        // (1 + payload.len() + padding_len) must be multiple of 8
+        let unpadded = 1 + payload.len();
+        let padding_len = 8 - (unpadded % 8);
         let padding_len = if padding_len < 4 {
             padding_len + 8
         } else {
@@ -116,7 +122,10 @@ impl SshHandler {
         payload.extend_from_slice(&(lang.len() as u32).to_be_bytes());
         payload.extend_from_slice(lang);
 
-        let padding_len = 8 - ((payload.len() + 5) % 8);
+        // SSH packet: [packet_length(4)][padding_length(1)][payload][padding]
+        // (1 + payload.len() + padding_len) must be multiple of 8
+        let unpadded = 1 + payload.len();
+        let padding_len = 8 - (unpadded % 8);
         let padding_len = if padding_len < 4 {
             padding_len + 8
         } else {

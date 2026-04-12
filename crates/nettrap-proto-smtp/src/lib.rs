@@ -1,17 +1,17 @@
-pub mod smtp;
 pub mod handler;
+pub mod smtp;
 
-pub use smtp::*;
 pub use handler::*;
+pub use smtp::*;
 
 pub mod error {
     pub use nettrap_core::error::*;
 }
 
 pub mod prelude {
-    pub use crate::smtp::*;
     pub use crate::handler::*;
-    pub use nettrap_core::prelude::*;
-    pub use nettrap_core::error::{Error, Result};
+    pub use crate::smtp::*;
     pub use async_trait::async_trait;
+    pub use nettrap_core::error::{Error, Result};
+    pub use nettrap_core::prelude::*;
 }

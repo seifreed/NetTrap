@@ -20,7 +20,11 @@ pub fn mkcert_version() -> Option<String> {
     } else {
         // mkcert -version outputs to stderr on some versions
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        if !stderr.is_empty() { Some(stderr) } else { None }
+        if !stderr.is_empty() {
+            Some(stderr)
+        } else {
+            None
+        }
     }
 }
 
@@ -63,25 +67,24 @@ pub fn install_ca() -> Result<(), String> {
 
 /// Generate a certificate for the given hostnames using mkcert.
 /// Returns (cert_path, key_path) of the generated PEM files.
-pub fn generate_cert(
-    hostnames: &[&str],
-    output_dir: &Path,
-) -> Result<(PathBuf, PathBuf), String> {
-    std::fs::create_dir_all(output_dir)
-        .map_err(|e| format!("Failed to create cert dir: {}", e))?;
+pub fn generate_cert(hostnames: &[&str], output_dir: &Path) -> Result<(PathBuf, PathBuf), String> {
+    std::fs::create_dir_all(output_dir).map_err(|e| format!("Failed to create cert dir: {}", e))?;
 
     let cert_path = output_dir.join("cert.pem");
     let key_path = output_dir.join("key.pem");
 
     let mut cmd = Command::new("mkcert");
-    cmd.arg("-cert-file").arg(&cert_path)
-       .arg("-key-file").arg(&key_path);
+    cmd.arg("-cert-file")
+        .arg(&cert_path)
+        .arg("-key-file")
+        .arg(&key_path);
 
     for host in hostnames {
         cmd.arg(host);
     }
 
-    let output = cmd.output()
+    let output = cmd
+        .output()
         .map_err(|e| format!("Failed to run mkcert: {}", e))?;
 
     if output.status.success() {
@@ -101,10 +104,16 @@ pub fn get_ca_paths() -> Result<(PathBuf, PathBuf), String> {
     let ca_key = caroot.join("rootCA-key.pem");
 
     if !ca_cert.exists() {
-        return Err(format!("CA cert not found at {}. Run 'nettrap tls install' first.", ca_cert.display()));
+        return Err(format!(
+            "CA cert not found at {}. Run 'nettrap tls install' first.",
+            ca_cert.display()
+        ));
     }
     if !ca_key.exists() {
-        return Err(format!("CA key not found at {}. Run 'nettrap tls install' first.", ca_key.display()));
+        return Err(format!(
+            "CA key not found at {}. Run 'nettrap tls install' first.",
+            ca_key.display()
+        ));
     }
 
     Ok((ca_cert, ca_key))
@@ -147,17 +156,26 @@ pub fn install_mkcert() -> Result<(), String> {
     let body = {
         let rt = tokio::runtime::Runtime::new().map_err(|e| format!("Runtime error: {}", e))?;
         rt.block_on(async {
-            let resp = reqwest::get(&url).await.map_err(|e| format!("Download failed: {}", e))?;
+            let resp = reqwest::get(&url)
+                .await
+                .map_err(|e| format!("Download failed: {}", e))?;
             if !resp.status().is_success() {
                 return Err(format!("Download failed: HTTP {}", resp.status()));
             }
-            resp.bytes().await.map_err(|e| format!("Download read failed: {}", e))
+            resp.bytes()
+                .await
+                .map_err(|e| format!("Download read failed: {}", e))
         })?
     };
 
     // Write binary
-    std::fs::write(&install_path, &body)
-        .map_err(|e| format!("Failed to write mkcert to {}: {} (try with sudo)", install_path.display(), e))?;
+    std::fs::write(&install_path, &body).map_err(|e| {
+        format!(
+            "Failed to write mkcert to {}: {} (try with sudo)",
+            install_path.display(),
+            e
+        )
+    })?;
 
     // Make executable on Unix
     #[cfg(unix)]
@@ -175,7 +193,10 @@ pub fn install_mkcert() -> Result<(), String> {
         println!("Verified: mkcert {}", version);
         Ok(())
     } else {
-        Err(format!("mkcert installed to {} but not found in PATH. Add it to your PATH.", install_path.display()))
+        Err(format!(
+            "mkcert installed to {} but not found in PATH. Add it to your PATH.",
+            install_path.display()
+        ))
     }
 }
 
@@ -225,8 +246,20 @@ pub fn print_status() {
             println!("CAROOT: {}", caroot.display());
             let ca_cert = caroot.join("rootCA.pem");
             let ca_key = caroot.join("rootCA-key.pem");
-            println!("CA cert: {} ({})", ca_cert.display(), if ca_cert.exists() { "exists" } else { "MISSING" });
-            println!("CA key:  {} ({})", ca_key.display(), if ca_key.exists() { "exists" } else { "MISSING" });
+            println!(
+                "CA cert: {} ({})",
+                ca_cert.display(),
+                if ca_cert.exists() {
+                    "exists"
+                } else {
+                    "MISSING"
+                }
+            );
+            println!(
+                "CA key:  {} ({})",
+                ca_key.display(),
+                if ca_key.exists() { "exists" } else { "MISSING" }
+            );
         }
     } else {
         println!("mkcert: NOT installed");

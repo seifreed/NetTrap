@@ -16,9 +16,7 @@ impl MemcachedHandler {
         } else if cmd.starts_with("get ") {
             tracing::info!("MEMCACHED get: {}", cmd);
             b"END\r\n".to_vec()
-        } else if cmd.starts_with("set ")
-            || cmd.starts_with("add ")
-            || cmd.starts_with("replace ")
+        } else if cmd.starts_with("set ") || cmd.starts_with("add ") || cmd.starts_with("replace ")
         {
             tracing::warn!(
                 "MEMCACHED write attempt: {}",
@@ -46,11 +44,31 @@ impl MemcachedHandler {
     }
 
     fn handle_binary(&self, data: &[u8]) -> Vec<u8> {
+        // Memcached binary protocol header is 24 bytes
         if data.len() < 24 {
             return Vec::new();
         }
+
+        // Validate magic byte (0x80 = request)
+        if data[0] != 0x80 {
+            return Vec::new();
+        }
+
+        // Extract body length (bytes 8-11) and validate full packet presence
+        let body_len = u32::from_be_bytes([data[8], data[9], data[10], data[11]]) as usize;
+        let total_len = 24usize + body_len;
+        if data.len() < total_len {
+            // Incomplete packet - wait for more data
+            return Vec::new();
+        }
+
         let opcode = data[1];
-        tracing::info!("MEMCACHED binary opcode: 0x{:02x}", opcode);
+        tracing::info!(
+            "MEMCACHED binary opcode: 0x{:02x}, body_len: {}",
+            opcode,
+            body_len
+        );
+
         // Minimal binary response header
         let mut resp = vec![0x81]; // Response magic
         resp.push(opcode);

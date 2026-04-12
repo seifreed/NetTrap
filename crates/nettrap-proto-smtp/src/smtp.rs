@@ -1,4 +1,4 @@
-
+#[derive(Debug, Clone)]
 pub struct SmtpResponse {
     pub code: u16,
     pub message: String,
@@ -61,7 +61,21 @@ impl SmtpResponse {
         }
     }
 
+    /// Raw multi-line response — message already contains status codes and CRLF.
+    /// `to_bytes()` emits the message directly without prepending a code.
+    pub fn raw(message: impl Into<String>) -> Self {
+        Self {
+            code: 0,
+            message: message.into(),
+        }
+    }
+
     pub fn to_bytes(&self) -> Vec<u8> {
-        format!("{} {}\r\n", self.code, self.message).into_bytes()
+        if self.code == 0 {
+            // Raw response: message already contains codes and formatting
+            format!("{}\r\n", self.message).into_bytes()
+        } else {
+            format!("{} {}\r\n", self.code, self.message).into_bytes()
+        }
     }
 }

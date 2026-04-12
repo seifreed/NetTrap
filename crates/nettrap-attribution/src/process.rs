@@ -4,15 +4,16 @@ use nettrap_core::prelude::*;
 pub fn get_process_for_socket(
     local_ip: std::net::IpAddr,
     local_port: u16,
-    _protocol: Protocol,
+    protocol: Protocol,
 ) -> Option<ProcessInfo> {
     use std::fs::File;
     use std::io::{BufRead, BufReader};
 
-    let path = if local_ip.is_ipv4() {
-        "/proc/net/tcp"
-    } else {
-        "/proc/net/tcp6"
+    let path = match (local_ip.is_ipv4(), protocol) {
+        (true, Protocol::Udp) => "/proc/net/udp",
+        (false, Protocol::Udp) => "/proc/net/udp6",
+        (true, _) => "/proc/net/tcp",
+        (false, _) => "/proc/net/tcp6",
     };
 
     let file = File::open(path).ok()?;

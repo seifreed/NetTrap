@@ -7,37 +7,49 @@
 /// Defaults: {{variable|default_value}}
 
 pub fn render_template(template: &str, vars: &std::collections::HashMap<String, String>) -> String {
-    let mut result = template.to_string();
+    render_template_depth(template, vars, 0)
+}
+
+fn render_template_depth(
+    template: &str,
+    vars: &std::collections::HashMap<String, String>,
+    depth: usize,
+) -> String {
+    const MAX_DEPTH: usize = 16;
+    if depth >= MAX_DEPTH {
+        tracing::warn!("Template recursion limit ({}) reached, stopping", MAX_DEPTH);
+        return template.to_string();
+    }
+
+    // Process escape sequences BEFORE variable substitution to prevent
+    // attacker-controlled values from injecting control characters
+    let mut result = template
+        .replace("\\r\\n", "\r\n")
+        .replace("\\n", "\n")
+        .replace("\\t", "\t");
 
     // Process conditionals first: {{#if var}}content{{/if}}
     loop {
-        let start = result.find("{{#if ");
-        if start.is_none() {
+        let Some(start) = result.find("{{#if ") else {
             break;
-        }
-        let start = start.unwrap();
+        };
 
-        let name_end = result[start + 6..].find("}}");
-        if name_end.is_none() {
+        let Some(name_end_offset) = result[start + 6..].find("}}") else {
             break;
-        }
-        let name_end = start + 6 + name_end.unwrap();
+        };
+        let name_end = start + 6 + name_end_offset;
 
         let var_name = result[start + 6..name_end].trim();
-        let endif = result[name_end + 2..].find("{{/if}}");
-        if endif.is_none() {
+        let Some(endif_offset) = result[name_end + 2..].find("{{/if}}") else {
             break;
-        }
-        let endif = name_end + 2 + endif.unwrap();
+        };
+        let endif = name_end + 2 + endif_offset;
 
         let content = &result[name_end + 2..endif];
-        let var_exists = vars
-            .get(var_name)
-            .map(|v| !v.is_empty())
-            .unwrap_or(false);
+        let var_exists = vars.get(var_name).map(|v| !v.is_empty()).unwrap_or(false);
 
         if var_exists {
-            let rendered = render_template(content, vars);
+            let rendered = render_template_depth(content, vars, depth + 1);
             result = format!("{}{}{}", &result[..start], rendered, &result[endif + 7..]);
         } else {
             result = format!("{}{}", &result[..start], &result[endif + 7..]);
@@ -46,22 +58,19 @@ pub fn render_template(template: &str, vars: &std::collections::HashMap<String, 
 
     // Process variables with defaults: {{var|default}}
     loop {
-        let start = result.find("{{");
-        if start.is_none() {
+        let Some(start) = result.find("{{") else {
             break;
-        }
-        let start = start.unwrap();
+        };
 
         // Skip conditionals
         if result[start..].starts_with("{{#") || result[start..].starts_with("{{/") {
             break;
         }
 
-        let end = result[start + 2..].find("}}");
-        if end.is_none() {
+        let Some(end_offset) = result[start + 2..].find("}}") else {
             break;
-        }
-        let end = start + 2 + end.unwrap();
+        };
+        let end = start + 2 + end_offset;
 
         let expr = result[start + 2..end].trim();
 
@@ -71,7 +80,15 @@ pub fn render_template(template: &str, vars: &std::collections::HashMap<String, 
             } else {
                 "%Y-%m-%d %H:%M:%S"
             };
-            chrono::Utc::now().format(fmt).to_string()
+            // Validate format string by attempting to format; fall back on invalid specifiers
+            let formatted = std::panic::catch_unwind(|| chrono::Utc::now().format(fmt).to_string());
+            match formatted {
+                Ok(s) => s,
+                Err(_) => {
+                    tracing::warn!("Invalid date format '{}' in template, using default", fmt);
+                    chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()
+                }
+            }
         } else if expr.contains('|') {
             let parts: Vec<&str> = expr.splitn(2, '|').collect();
             let var_name = parts[0].trim();
@@ -85,11 +102,6 @@ pub fn render_template(template: &str, vars: &std::collections::HashMap<String, 
 
         result = format!("{}{}{}", &result[..start], value, &result[end + 2..]);
     }
-
-    // Process escape sequences
-    result = result.replace("\\r\\n", "\r\n");
-    result = result.replace("\\n", "\n");
-    result = result.replace("\\t", "\t");
 
     result
 }
@@ -122,10 +134,7 @@ mod tests {
         );
 
         let empty = HashMap::new();
-        assert_eq!(
-            render_template("{{#if show}}visible{{/if}}", &empty),
-            ""
-        );
+        assert_eq!(render_template("{{#if show}}visible{{/if}}", &empty), "");
     }
 
     #[test]

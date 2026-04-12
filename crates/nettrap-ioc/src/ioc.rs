@@ -1,6 +1,5 @@
 use regex::Regex;
 
-
 #[derive(Debug, Clone)]
 pub struct IoC {
     pub ioc_type: IoCType,
@@ -94,7 +93,7 @@ impl IoCDetector {
             let ip = cap[0].to_string();
             if !ip.starts_with("192.168.")
                 && !ip.starts_with("10.")
-                && !ip.starts_with("172.")
+                && !is_rfc1918_172(&ip)
                 && !ip.starts_with("127.")
             {
                 ips.push(IoC {
@@ -138,8 +137,11 @@ impl IoCDetector {
 
         for cap in self.sha1_pattern.captures_iter(data) {
             let hash = cap[0].to_string();
-            let already_found = hashes.iter().any(|h| h.value.contains(&hash));
-            if !already_found {
+            // Use exact substring check: a SHA256 contains this SHA1 as a substring
+            let is_substring_of_longer = hashes
+                .iter()
+                .any(|h| h.value.len() > hash.len() && h.value.contains(&hash));
+            if !is_substring_of_longer {
                 hashes.push(IoC {
                     ioc_type: IoCType::HashSha1,
                     value: hash,
@@ -152,8 +154,11 @@ impl IoCDetector {
 
         for cap in self.md5_pattern.captures_iter(data) {
             let hash = cap[0].to_string();
-            let already_found = hashes.iter().any(|h| h.value.contains(&hash));
-            if !already_found {
+            // Use exact substring check: a longer hash contains this MD5 as a substring
+            let is_substring_of_longer = hashes
+                .iter()
+                .any(|h| h.value.len() > hash.len() && h.value.contains(&hash));
+            if !is_substring_of_longer {
                 hashes.push(IoC {
                     ioc_type: IoCType::HashMd5,
                     value: hash,
@@ -205,6 +210,18 @@ impl IoCDetector {
             })
             .collect()
     }
+}
+
+/// Check if IP is in the RFC1918 172.16.0.0/12 range (172.16.x.x - 172.31.x.x)
+pub fn is_rfc1918_172(ip: &str) -> bool {
+    if let Some(rest) = ip.strip_prefix("172.") {
+        if let Some(second_octet_str) = rest.split('.').next() {
+            if let Ok(second_octet) = second_octet_str.parse::<u8>() {
+                return (16..=31).contains(&second_octet);
+            }
+        }
+    }
+    false
 }
 
 impl Default for IoCDetector {

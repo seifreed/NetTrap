@@ -1,5 +1,8 @@
 /// Format data as hex dump (16 bytes per line) for logging
 pub fn hexdump(data: &[u8], max_bytes: usize) -> String {
+    if max_bytes == 0 && !data.is_empty() {
+        return format!("... ({} bytes, hexdump disabled)\n", data.len());
+    }
     let len = data.len().min(max_bytes);
     let mut output = String::new();
 
@@ -13,14 +16,18 @@ pub fn hexdump(data: &[u8], max_bytes: usize) -> String {
         // Hex bytes
         for (i, byte) in chunk.iter().enumerate() {
             output.push_str(&format!("{:02x} ", byte));
-            if i == 7 { output.push(' '); }
+            if i == 7 {
+                output.push(' ');
+            }
         }
 
         // Padding
         let padding = 16 - chunk.len();
         for i in 0..padding {
             output.push_str("   ");
-            if chunk.len() + i == 7 { output.push(' '); }
+            if chunk.len() + i == 7 {
+                output.push(' ');
+            }
         }
 
         output.push_str(" |");

@@ -1,5 +1,5 @@
-use parking_lot::RwLock;
 use crate::taste::{ProtocolTaste, TasteScore};
+use parking_lot::RwLock;
 
 /// A registered protocol handler with its taste detector
 pub struct RegisteredHandler {
@@ -25,12 +25,12 @@ impl ProtocolRouter {
     }
 
     pub fn with_default_tcp(mut self, name: impl Into<String>) -> Self {
-        self.default_tcp = Some(name.into());
+        self.default_tcp = normalize_default_name(name.into());
         self
     }
 
     pub fn with_default_udp(mut self, name: impl Into<String>) -> Self {
-        self.default_udp = Some(name.into());
+        self.default_udp = normalize_default_name(name.into());
         self
     }
 
@@ -60,14 +60,45 @@ impl ProtocolRouter {
         best_name.map(|name| (name, best_score))
     }
 
+    /// Determine the best TCP handler, falling back to the configured default
+    /// when no detector yields a positive score.
+    pub fn route_tcp(&self, data: &[u8], dst_port: u16) -> Option<(String, TasteScore)> {
+        self.route_with_default(data, dst_port, self.default_tcp.as_deref())
+    }
+
+    /// Determine the best UDP handler, falling back to the configured default
+    /// when no detector yields a positive score.
+    pub fn route_udp(&self, data: &[u8], dst_port: u16) -> Option<(String, TasteScore)> {
+        self.route_with_default(data, dst_port, self.default_udp.as_deref())
+    }
+
+    fn route_with_default(
+        &self,
+        data: &[u8],
+        dst_port: u16,
+        default_handler: Option<&str>,
+    ) -> Option<(String, TasteScore)> {
+        match self.route(data, dst_port) {
+            Some((name, score)) if score > 1 => Some((name, score)),
+            Some((name, score)) if score == 1 && default_handler.is_none() => Some((name, score)),
+            _ => default_handler
+                .filter(|name| !name.trim().is_empty())
+                .map(|name| (name.to_string(), 0)),
+        }
+    }
+
     /// Get default handler name for TCP if no content match
     pub fn default_tcp_handler(&self) -> Option<&str> {
-        self.default_tcp.as_deref()
+        self.default_tcp
+            .as_deref()
+            .filter(|name| !name.trim().is_empty())
     }
 
     /// Get default handler name for UDP if no content match
     pub fn default_udp_handler(&self) -> Option<&str> {
-        self.default_udp.as_deref()
+        self.default_udp
+            .as_deref()
+            .filter(|name| !name.trim().is_empty())
     }
 
     pub fn handler_count(&self) -> usize {
@@ -76,5 +107,91 @@ impl ProtocolRouter {
 }
 
 impl Default for ProtocolRouter {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn normalize_default_name(name: String) -> Option<String> {
+    if name.trim().is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct NeverMatchTaste;
+
+    impl ProtocolTaste for NeverMatchTaste {
+        fn taste(&self, _data: &[u8], _dst_port: u16) -> TasteScore {
+            0
+        }
+
+        fn protocol_name(&self) -> &'static str {
+            "never"
+        }
+    }
+
+    #[test]
+    fn route_tcp_falls_back_to_default_handler() {
+        let router = ProtocolRouter::new().with_default_tcp("http");
+        router.register("never", Box::new(NeverMatchTaste), false);
+
+        let routed = router.route_tcp(b"??", 31337);
+
+        assert_eq!(routed, Some(("http".to_string(), 0)));
+    }
+
+    #[test]
+    fn route_udp_falls_back_to_default_handler() {
+        let router = ProtocolRouter::new().with_default_udp("dns");
+        router.register("never", Box::new(NeverMatchTaste), false);
+
+        let routed = router.route_udp(b"??", 53530);
+
+        assert_eq!(routed, Some(("dns".to_string(), 0)));
+    }
+
+    #[test]
+    fn route_tcp_prefers_default_over_raw_fallback_score() {
+        let router = ProtocolRouter::new().with_default_tcp("http");
+        router.register("raw", Box::new(crate::taste::RawTaste), false);
+
+        let routed = router.route_tcp(b"\x00\x01", 31337);
+
+        assert_eq!(routed, Some(("http".to_string(), 0)));
+    }
+
+    #[test]
+    fn empty_default_handler_is_ignored() {
+        let router = ProtocolRouter::new().with_default_udp("");
+        router.register("never", Box::new(NeverMatchTaste), false);
+
+        assert_eq!(router.default_udp_handler(), None);
+        assert_eq!(router.route_udp(b"??", 53530), None);
+    }
+
+    #[test]
+    fn route_tcp_uses_raw_fallback_when_no_default_is_configured() {
+        let router = ProtocolRouter::new();
+        router.register("raw", Box::new(crate::taste::RawTaste), false);
+
+        let routed = router.route_tcp(b"\x00\x01", 31337);
+
+        assert_eq!(routed, Some(("raw".to_string(), 1)));
+    }
+
+    #[test]
+    fn route_udp_uses_raw_fallback_when_no_default_is_configured() {
+        let router = ProtocolRouter::new();
+        router.register("raw", Box::new(crate::taste::RawTaste), false);
+
+        let routed = router.route_udp(b"\x00\x01", 53530);
+
+        assert_eq!(routed, Some(("raw".to_string(), 1)));
+    }
 }

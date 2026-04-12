@@ -9,8 +9,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 const MAX_CACHE_SIZE: usize = 1000; // Maximum cached certificates
+const CACHE_TTL_SECS: u64 = 3600; // Certificate cache TTL: 1 hour
 
-/// LRU cache for certificates
+/// LRU cache for certificates with TTL
 struct CertCache {
     certs: std::collections::HashMap<String, CachedCert>,
     order: VecDeque<String>,
@@ -25,11 +26,28 @@ impl CertCache {
     }
 
     fn get(&self, hostname: &str) -> Option<&CachedCert> {
-        self.certs.get(hostname)
+        if let Some(entry) = self.certs.get(hostname) {
+            if entry.created.elapsed().as_secs() < CACHE_TTL_SECS {
+                return Some(entry);
+            }
+        }
+        None
     }
 
     fn insert(&mut self, hostname: String, cert: CachedCert) {
-        // Evict oldest entries if cache is full
+        // Evict expired entries first
+        let expired: Vec<String> = self
+            .certs
+            .iter()
+            .filter(|(_, v)| v.created.elapsed().as_secs() >= CACHE_TTL_SECS)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in &expired {
+            self.certs.remove(key);
+            self.order.retain(|k| k != key);
+        }
+
+        // Evict oldest entries if cache is still full
         while self.certs.len() >= MAX_CACHE_SIZE {
             if let Some(evict_key) = self.order.pop_front() {
                 self.certs.remove(&evict_key);
@@ -40,6 +58,7 @@ impl CertCache {
         }
 
         self.certs.insert(hostname.clone(), cert);
+        self.order.retain(|k| k != &hostname);
         self.order.push_back(hostname);
     }
 }
@@ -57,6 +76,7 @@ pub struct CertificateAuthority {
 struct CachedCert {
     cert_pem: String,
     key_pem: String,
+    created: std::time::Instant,
 }
 
 impl CertificateAuthority {
@@ -196,19 +216,30 @@ impl CertificateAuthority {
         // Save to disk if cert_dir configured
         if let Some(ref dir) = self.cert_dir {
             let safe_name = hostname.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
-            let _ = std::fs::create_dir_all(dir);
-            let _ = std::fs::write(dir.join(format!("{}.crt", safe_name)), &cert_pem);
-            let _ = std::fs::write(dir.join(format!("{}.key", safe_name)), &key_pem);
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                tracing::warn!("Failed to create cert directory {:?}: {}", dir, e);
+            } else {
+                if let Err(e) = std::fs::write(dir.join(format!("{}.crt", safe_name)), &cert_pem) {
+                    tracing::warn!("Failed to write cert file: {}", e);
+                }
+                if let Err(e) = std::fs::write(dir.join(format!("{}.key", safe_name)), &key_pem) {
+                    tracing::warn!("Failed to write key file: {}", e);
+                }
+            }
         }
 
-        // Cache with LRU eviction (single lock)
+        // Cache with LRU eviction — re-check under write lock to avoid TOCTOU duplicates
         {
             let mut cache = self.cache.write();
+            if let Some(cached) = cache.get(hostname) {
+                return Ok((cached.cert_pem.clone(), cached.key_pem.clone()));
+            }
             cache.insert(
                 hostname.to_string(),
                 CachedCert {
                     cert_pem: cert_pem.clone(),
                     key_pem: key_pem.clone(),
+                    created: std::time::Instant::now(),
                 },
             );
         }
@@ -222,7 +253,8 @@ impl CertificateAuthority {
     }
 
     pub fn clear_cache(&self) {
-        self.cache.write().certs.clear();
-        self.cache.write().order.clear();
+        let mut cache = self.cache.write();
+        cache.certs.clear();
+        cache.order.clear();
     }
 }

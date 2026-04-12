@@ -1,9 +1,9 @@
-pub mod event;
 pub mod bus;
+pub mod event;
 pub mod handler;
 
-pub use event::*;
 pub use bus::*;
+pub use event::*;
 pub use handler::*;
 
 pub mod error {
@@ -11,9 +11,9 @@ pub mod error {
 }
 
 pub mod prelude {
-    pub use crate::event::*;
     pub use crate::bus::*;
+    pub use crate::event::*;
     pub use crate::handler::*;
-    pub use nettrap_core::prelude::*;
     pub use nettrap_core::error::{Error, Result};
+    pub use nettrap_core::prelude::*;
 }

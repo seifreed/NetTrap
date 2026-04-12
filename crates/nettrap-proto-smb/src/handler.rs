@@ -5,20 +5,33 @@ pub struct SmbHandler {
 
 impl SmbHandler {
     pub fn new() -> Self {
-        Self { server_name: "NETTRAP".to_string(), domain: "WORKGROUP".to_string() }
+        Self {
+            server_name: "NETTRAP".to_string(),
+            domain: "WORKGROUP".to_string(),
+        }
     }
-    pub fn with_server_name(mut self, n: impl Into<String>) -> Self { self.server_name = n.into(); self }
-    pub fn with_domain(mut self, d: impl Into<String>) -> Self { self.domain = d.into(); self }
+    pub fn with_server_name(mut self, n: impl Into<String>) -> Self {
+        self.server_name = n.into();
+        self
+    }
+    pub fn with_domain(mut self, d: impl Into<String>) -> Self {
+        self.domain = d.into();
+        self
+    }
 
     /// Handle incoming SMB data, return response
     pub fn handle(&self, data: &[u8]) -> Vec<u8> {
-        if data.len() < 4 { return Vec::new(); }
+        if data.len() < 4 {
+            return Vec::new();
+        }
 
         // NetBIOS session header: 4 bytes (type + length)
         // SMB header starts with 0xFF 'S' 'M' 'B' (SMB1) or 0xFE 'S' 'M' 'B' (SMB2)
         let smb_offset = if data[0] == 0x00 { 4 } else { 0 }; // Skip NetBIOS header
 
-        if data.len() < smb_offset + 4 { return Vec::new(); }
+        if data.len() < smb_offset + 4 {
+            return Vec::new();
+        }
 
         let magic = &data[smb_offset..smb_offset + 4];
 
@@ -34,20 +47,25 @@ impl SmbHandler {
     }
 
     fn handle_smb1(&self, data: &[u8]) -> Vec<u8> {
-        if data.len() < 36 { return Vec::new(); }
+        if data.len() < 36 {
+            return Vec::new();
+        }
         let command = data[4]; // SMB command byte
         tracing::info!("SMB1 command: 0x{:02x}", command);
 
         match command {
-            0x72 => { // SMB_COM_NEGOTIATE
+            0x72 => {
+                // SMB_COM_NEGOTIATE
                 tracing::info!("SMB1 NEGOTIATE received");
                 self.build_smb2_negotiate_response() // Upgrade to SMB2
             }
-            0x73 => { // SMB_COM_SESSION_SETUP_ANDX
+            0x73 => {
+                // SMB_COM_SESSION_SETUP_ANDX
                 tracing::warn!("SMB1 SESSION_SETUP attempt detected");
                 self.build_smb1_error(data, 0xC000006D) // STATUS_LOGON_FAILURE
             }
-            0x75 => { // SMB_COM_TREE_CONNECT_ANDX
+            0x75 => {
+                // SMB_COM_TREE_CONNECT_ANDX
                 tracing::warn!("SMB1 TREE_CONNECT attempt");
                 self.build_smb1_error(data, 0xC0000022) // STATUS_ACCESS_DENIED
             }
@@ -59,27 +77,36 @@ impl SmbHandler {
     }
 
     fn handle_smb2(&self, data: &[u8]) -> Vec<u8> {
-        if data.len() < 68 { return Vec::new(); }
+        if data.len() < 68 {
+            return Vec::new();
+        }
         let command = u16::from_le_bytes([data[12], data[13]]);
         tracing::info!("SMB2 command: 0x{:04x}", command);
 
         match command {
-            0x0000 => { // NEGOTIATE
+            0x0000 => {
+                // NEGOTIATE
                 tracing::info!("SMB2 NEGOTIATE received");
                 self.build_smb2_negotiate_response()
             }
-            0x0001 => { // SESSION_SETUP
+            0x0001 => {
+                // SESSION_SETUP
                 tracing::warn!("SMB2 SESSION_SETUP attempt - potential lateral movement");
                 // Extract NTLM if present
                 if data.len() > 100 {
                     if let Some(ntlm_info) = Self::extract_ntlm_info(data) {
-                        tracing::warn!("SMB NTLM: domain={}, user={}, workstation={}",
-                            ntlm_info.0, ntlm_info.1, ntlm_info.2);
+                        tracing::warn!(
+                            "SMB NTLM: domain={}, user={}, workstation={}",
+                            ntlm_info.0,
+                            ntlm_info.1,
+                            ntlm_info.2
+                        );
                     }
                 }
                 self.build_smb2_session_setup_response(data)
             }
-            0x0003 => { // TREE_CONNECT
+            0x0003 => {
+                // TREE_CONNECT
                 tracing::warn!("SMB2 TREE_CONNECT attempt");
                 self.build_smb2_error(data, 0xC0000022) // ACCESS_DENIED
             }
@@ -179,27 +206,49 @@ impl SmbHandler {
     ///  44-51: WorkstationFields(len u16, maxlen u16, offset u32)
     fn extract_ntlm_info(data: &[u8]) -> Option<(String, String, String)> {
         let ntlm_sig = b"NTLMSSP\x00";
-        let base = data.windows(8).position(|w| w == ntlm_sig)?;
+        // Limit scan to first 4KB to prevent DoS with large payloads
+        let scan_limit = data.len().min(4096);
+        let base = data[..scan_limit].windows(8).position(|w| w == ntlm_sig)?;
         let ntlm = &data[base..];
 
         // Need at least 52 bytes for Type 3 header through WorkstationFields
-        if ntlm.len() < 52 { return None; }
+        if ntlm.len() < 52 {
+            return None;
+        }
 
         let msg_type = u32::from_le_bytes([ntlm[8], ntlm[9], ntlm[10], ntlm[11]]);
-        if msg_type != 3 { return None; }
+        if msg_type != 3 {
+            return None;
+        }
+
+        // Limit total NTLM buffer size to prevent memory exhaustion
+        let ntlm_max = ntlm.len().min(8192);
+        let ntlm = &ntlm[..ntlm_max];
 
         let read_field = |offset: usize| -> Option<String> {
-            if offset + 8 > ntlm.len() { return None; }
+            if offset + 8 > ntlm.len() {
+                return None;
+            }
             let len = u16::from_le_bytes([ntlm[offset], ntlm[offset + 1]]) as usize;
             let field_offset = u32::from_le_bytes([
-                ntlm[offset + 4], ntlm[offset + 5], ntlm[offset + 6], ntlm[offset + 7],
+                ntlm[offset + 4],
+                ntlm[offset + 5],
+                ntlm[offset + 6],
+                ntlm[offset + 7],
             ]) as usize;
-            if len == 0 { return Some(String::new()); }
-            if field_offset + len > ntlm.len() { return None; }
+            if len == 0 {
+                return Some(String::new());
+            }
+            // Limit field length to prevent excessive memory allocation
+            let len = len.min(256);
+            if field_offset + len > ntlm.len() {
+                return None;
+            }
             let raw = &ntlm[field_offset..field_offset + len];
             // NTLM uses UTF-16LE for strings in Type 3
             if len >= 2 && len % 2 == 0 {
-                let utf16: Vec<u16> = raw.chunks_exact(2)
+                let utf16: Vec<u16> = raw
+                    .chunks_exact(2)
                     .map(|c| u16::from_le_bytes([c[0], c[1]]))
                     .collect();
                 Some(String::from_utf16_lossy(&utf16))
@@ -216,4 +265,8 @@ impl SmbHandler {
     }
 }
 
-impl Default for SmbHandler { fn default() -> Self { Self::new() } }
+impl Default for SmbHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}

@@ -1,6 +1,6 @@
+use crate::nbi::NetworkBehaviorIndicator;
 use serde::Serialize;
 use std::path::Path;
-use crate::nbi::NetworkBehaviorIndicator;
 
 /// Supported output formats
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,53 +74,66 @@ fn export_jsonl(events: &[NetworkBehaviorIndicator], path: &Path) -> std::io::Re
 // ─── SARIF v2.1.0 ───────────────────────────────────────────────────────────
 
 fn export_sarif(events: &[NetworkBehaviorIndicator], path: &Path) -> std::io::Result<()> {
-    let results: Vec<SarifResult> = events.iter().map(|e| {
-        let level = match e.protocol.as_str() {
-            "RAW" | "SMTP" | "FTP" | "POP3" | "IRC" => "note",
-            "DNS" | "HTTP" | "TLS" => "warning",
-            _ => "warning",
-        };
+    let results: Vec<SarifResult> = events
+        .iter()
+        .map(|e| {
+            let level = match e.protocol.as_str() {
+                "RAW" | "SMTP" | "FTP" | "POP3" | "IRC" => "note",
+                "DNS" | "HTTP" | "TLS" => "warning",
+                _ => "warning",
+            };
 
-        // Build rule ID from protocol
-        let rule_id = format!("NT-{}-001", e.protocol.to_uppercase());
+            // Build rule ID from protocol
+            let rule_id = format!("NT-{}-001", e.protocol.to_uppercase());
 
-        // Build message
-        let indicators_str: String = e.indicators.iter()
-            .map(|(k, v)| format!("{}={}", k, v))
-            .collect::<Vec<_>>()
-            .join(", ");
+            // Build message
+            let indicators_str: String = e
+                .indicators
+                .iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect::<Vec<_>>()
+                .join(", ");
 
-        let message = if indicators_str.is_empty() {
-            format!("{} event from {}:{}", e.protocol, e.src_ip, e.src_port)
-        } else {
-            format!("{} event from {}:{} — {}", e.protocol, e.src_ip, e.src_port, indicators_str)
-        };
+            let message = if indicators_str.is_empty() {
+                format!(
+                    "{} event from {}:{} to {}:{}",
+                    e.protocol, e.src_ip, e.src_port, e.dst_ip, e.dst_port
+                )
+            } else {
+                format!(
+                    "{} event from {}:{} to {}:{} — {}",
+                    e.protocol, e.src_ip, e.src_port, e.dst_ip, e.dst_port, indicators_str
+                )
+            };
 
-        SarifResult {
-            rule_id,
-            level: level.to_string(),
-            message: SarifMessage { text: message },
-            locations: vec![SarifLocation {
-                logical_location: SarifLogicalLocation {
-                    fully_qualified_name: format!(
-                        "{}:{} -> :{}",
-                        e.src_ip, e.src_port, e.dst_port
-                    ),
+            SarifResult {
+                rule_id,
+                level: level.to_string(),
+                message: SarifMessage { text: message },
+                locations: vec![SarifLocation {
+                    logical_location: SarifLogicalLocation {
+                        fully_qualified_name: format!(
+                            "{}:{} -> {}:{}",
+                            e.src_ip, e.src_port, e.dst_ip, e.dst_port
+                        ),
+                    },
+                }],
+                properties: SarifProperties {
+                    event_id: e.event_id.clone(),
+                    timestamp: e.timestamp.clone(),
+                    listener: e.listener.clone(),
+                    protocol: e.protocol.clone(),
+                    src_ip: e.src_ip.clone(),
+                    src_port: e.src_port,
+                    dst_ip: e.dst_ip.clone(),
+                    dst_port: e.dst_port,
+                    process_name: e.process_name.clone(),
+                    process_pid: e.process_pid,
+                    indicators: e.indicators.clone(),
                 },
-            }],
-            properties: SarifProperties {
-                timestamp: e.timestamp.clone(),
-                listener: e.listener.clone(),
-                protocol: e.protocol.clone(),
-                src_ip: e.src_ip.clone(),
-                src_port: e.src_port,
-                dst_port: e.dst_port,
-                process_name: e.process_name.clone(),
-                process_pid: e.process_pid,
-                indicators: e.indicators.clone(),
-            },
-        }
-    }).collect();
+            }
+        })
+        .collect();
 
     // Collect unique rule IDs
     let mut rules: Vec<SarifRule> = Vec::new();
@@ -239,11 +252,13 @@ struct SarifLogicalLocation {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SarifProperties {
+    event_id: String,
     timestamp: String,
     listener: String,
     protocol: String,
     src_ip: String,
     src_port: u16,
+    dst_ip: String,
     dst_port: u16,
     process_name: Option<String>,
     process_pid: Option<u32>,
@@ -272,7 +287,10 @@ fn export_toon(events: &[NetworkBehaviorIndicator], path: &Path) -> std::io::Res
     let mut by_protocol: std::collections::BTreeMap<String, Vec<&NetworkBehaviorIndicator>> =
         std::collections::BTreeMap::new();
     for event in events {
-        by_protocol.entry(event.protocol.clone()).or_default().push(event);
+        by_protocol
+            .entry(event.protocol.clone())
+            .or_default()
+            .push(event);
     }
 
     // Write each protocol group as a TOON tabular array
@@ -288,15 +306,28 @@ fn export_toon(events: &[NetworkBehaviorIndicator], path: &Path) -> std::io::Res
         }
         all_keys.sort();
 
-        // Build column headers: timestamp, listener, src_ip, src_port, dst_port, [indicator keys...]
-        let mut columns = vec!["timestamp".to_string(), "listener".to_string(), "src_ip".to_string(), "src_port".to_string(), "dst_port".to_string()];
+        // Build column headers: timestamp, listener, src_ip, src_port, dst_ip, dst_port, [indicator keys...]
+        let mut columns = vec![
+            "timestamp".to_string(),
+            "listener".to_string(),
+            "src_ip".to_string(),
+            "src_port".to_string(),
+            "dst_ip".to_string(),
+            "dst_port".to_string(),
+        ];
         if proto_events.iter().any(|e| e.process_name.is_some()) {
             columns.push("process".to_string());
         }
         columns.extend(all_keys.iter().cloned());
 
         let header = columns.join(",");
-        writeln!(file, "{}_events[{}]{{{}}}:", protocol.to_lowercase(), proto_events.len(), header)?;
+        writeln!(
+            file,
+            "{}_events[{}]{{{}}}:",
+            protocol.to_lowercase(),
+            proto_events.len(),
+            header
+        )?;
 
         for e in proto_events {
             let mut row = Vec::new();
@@ -304,6 +335,7 @@ fn export_toon(events: &[NetworkBehaviorIndicator], path: &Path) -> std::io::Res
             row.push(e.listener.clone());
             row.push(e.src_ip.clone());
             row.push(e.src_port.to_string());
+            row.push(e.dst_ip.clone());
             row.push(e.dst_port.to_string());
             if columns.contains(&"process".to_string()) {
                 row.push(e.process_name.clone().unwrap_or_default());
@@ -312,13 +344,16 @@ fn export_toon(events: &[NetworkBehaviorIndicator], path: &Path) -> std::io::Res
                 row.push(e.indicators.get(key).cloned().unwrap_or_default());
             }
             // Escape commas in values
-            let escaped: Vec<String> = row.iter().map(|v| {
-                if v.contains(',') || v.contains('\n') {
-                    format!("\"{}\"", v.replace('"', "\"\""))
-                } else {
-                    v.clone()
-                }
-            }).collect();
+            let escaped: Vec<String> = row
+                .iter()
+                .map(|v| {
+                    if v.contains(',') || v.contains('\n') {
+                        format!("\"{}\"", v.replace('"', "\"\""))
+                    } else {
+                        v.clone()
+                    }
+                })
+                .collect();
             writeln!(file, "  {}", escaped.join(","))?;
         }
     }
@@ -344,27 +379,41 @@ fn export_csv(events: &[NetworkBehaviorIndicator], path: &Path) -> std::io::Resu
     all_keys.sort();
 
     // Write CSV header
-    let mut header_parts = vec![
-        "timestamp", "listener", "protocol", "src_ip", "src_port", "dst_port",
-        "process_name", "process_pid",
+    let header_parts = vec![
+        "event_id",
+        "timestamp",
+        "listener",
+        "protocol",
+        "src_ip",
+        "src_port",
+        "dst_ip",
+        "dst_port",
+        "process_name",
+        "process_pid",
     ];
-    let key_refs: Vec<&str> = all_keys.iter().map(|s| s.as_str()).collect();
-    header_parts.extend(key_refs.iter());
-    writeln!(file, "{}", header_parts.join(","))?;
+    let escaped_keys: Vec<String> = all_keys.iter().map(|s| csv_escape(s)).collect();
+    let header_line: Vec<&str> = header_parts.iter().copied()
+        .chain(escaped_keys.iter().map(|s| s.as_str()))
+        .collect();
+    writeln!(file, "{}", header_line.join(","))?;
 
     // Write rows
     for e in events {
         let mut row = Vec::new();
+        row.push(csv_escape(&e.event_id));
         row.push(csv_escape(&e.timestamp));
         row.push(csv_escape(&e.listener));
         row.push(csv_escape(&e.protocol));
         row.push(csv_escape(&e.src_ip));
         row.push(e.src_port.to_string());
+        row.push(csv_escape(&e.dst_ip));
         row.push(e.dst_port.to_string());
         row.push(csv_escape(&e.process_name.clone().unwrap_or_default()));
         row.push(e.process_pid.map(|p| p.to_string()).unwrap_or_default());
         for key in &all_keys {
-            row.push(csv_escape(&e.indicators.get(key).cloned().unwrap_or_default()));
+            row.push(csv_escape(
+                &e.indicators.get(key).cloned().unwrap_or_default(),
+            ));
         }
         writeln!(file, "{}", row.join(","))?;
     }
@@ -373,21 +422,94 @@ fn export_csv(events: &[NetworkBehaviorIndicator], path: &Path) -> std::io::Resu
 }
 
 fn csv_escape(value: &str) -> String {
-    if value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r') {
-        format!("\"{}\"", value.replace('"', "\"\""))
+    // Sanitize CSV formula injection (values starting with =, +, -, @)
+    let needs_formula_guard = value.starts_with('=') || value.starts_with('+') || value.starts_with('-') || value.starts_with('@');
+    if needs_formula_guard || value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r') {
+        if needs_formula_guard {
+            format!("\"'{}\"", value.replace('"', "\"\""))
+        } else {
+            format!("\"{}\"", value.replace('"', "\"\""))
+        }
     } else {
         value.to_string()
     }
 }
 
-/// Parse NBI events from a JSONL file
-pub fn load_nbis_from_jsonl(path: &Path) -> Vec<NetworkBehaviorIndicator> {
+#[derive(Debug, Clone, Default)]
+pub struct JsonlLoadResult {
+    pub events: Vec<NetworkBehaviorIndicator>,
+    pub invalid_lines: usize,
+    pub read_error: Option<String>,
+}
+
+impl JsonlLoadResult {
+    pub fn has_integrity_issues(&self) -> bool {
+        self.invalid_lines > 0 || self.read_error.is_some()
+    }
+}
+
+pub fn load_nbis_from_jsonl_detailed(path: &Path) -> JsonlLoadResult {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
-        Err(_) => return Vec::new(),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return JsonlLoadResult::default();
+        }
+        Err(err) => {
+            return JsonlLoadResult {
+                events: Vec::new(),
+                invalid_lines: 0,
+                read_error: Some(err.to_string()),
+            };
+        }
     };
-    content
-        .lines()
-        .filter_map(|line| serde_json::from_str::<NetworkBehaviorIndicator>(line).ok())
-        .collect()
+
+    let mut result = JsonlLoadResult::default();
+    for line in content.lines() {
+        match serde_json::from_str::<NetworkBehaviorIndicator>(line) {
+            Ok(mut event) => {
+                event.event_id = event.normalized_event_id();
+                result.events.push(event);
+            }
+            Err(_) => result.invalid_lines += 1,
+        }
+    }
+
+    result
+}
+
+/// Parse NBI events from a JSONL file
+pub fn load_nbis_from_jsonl(path: &Path) -> Vec<NetworkBehaviorIndicator> {
+    load_nbis_from_jsonl_detailed(path).events
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::nbi::raw_nbi;
+    use crate::session::SessionDestination;
+
+    #[test]
+    fn detailed_jsonl_loader_reports_invalid_lines() {
+        let path = std::env::temp_dir().join(format!(
+            "nettrap-output-test-{}.jsonl",
+            uuid::Uuid::new_v4()
+        ));
+        let valid = raw_nbi(
+            "raw",
+            "127.0.0.1",
+            12345,
+            &SessionDestination::unknown(8080),
+            4,
+            "",
+        );
+        std::fs::write(&path, format!("{}\n{{invalid-json}}\n", valid.to_json())).unwrap();
+
+        let loaded = load_nbis_from_jsonl_detailed(&path);
+        assert_eq!(loaded.events.len(), 1);
+        assert_eq!(loaded.invalid_lines, 1);
+        assert!(loaded.read_error.is_none());
+        assert!(loaded.has_integrity_issues());
+
+        let _ = std::fs::remove_file(path);
+    }
 }

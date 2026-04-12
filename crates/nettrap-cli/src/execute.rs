@@ -1,15 +1,43 @@
 use std::process::Command;
 
-/// Shell-escape a string to prevent command injection
+/// Maximum input length to prevent DoS via oversized inputs
+const MAX_INPUT_LEN: usize = 256;
+
+/// Shell-escape a string to prevent command injection.
+/// Only allows safe characters: alphanumeric, dash, underscore, dot, colon.
+/// Logs a warning if dangerous characters were stripped.
 fn shell_escape(s: &str) -> String {
     if s.is_empty() {
         return String::new();
     }
-    // Only allow safe characters: alphanumeric, dash, underscore, dot, colon
-    // This is more restrictive than shell escaping but safer
-    s.chars()
+    // Truncate overly long inputs
+    let s = if s.len() > MAX_INPUT_LEN {
+        tracing::warn!(
+            "Input too long ({}), truncating to {} chars",
+            s.len(),
+            MAX_INPUT_LEN
+        );
+        &s[..s.floor_char_boundary(MAX_INPUT_LEN)]
+    } else {
+        s
+    };
+
+    let original = s;
+    let sanitized: String = s
+        .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || *c == '.' || *c == ':')
-        .collect()
+        .collect();
+
+    // Log if we stripped dangerous characters
+    if sanitized.len() != original.len() && !sanitized.is_empty() {
+        tracing::warn!(
+            "Stripped dangerous characters from input. Original: '{}', Sanitized: '{}'",
+            original,
+            sanitized
+        );
+    }
+
+    sanitized
 }
 
 /// Execute a command template when a connection is received.
@@ -23,6 +51,7 @@ fn shell_escape(s: &str) -> String {
 /// - {listener}: Listener name
 ///
 /// All template values are sanitized to prevent command injection.
+/// WARNING: The template itself is NOT sanitized - only use trusted template strings!
 pub fn execute_on_connect(
     template: &str,
     pid: Option<u32>,
@@ -97,5 +126,26 @@ mod tests {
             shell_escape("process;cat /etc/passwd"),
             "processcatetcpasswd"
         );
+    }
+
+    #[test]
+    fn test_shell_escape_ipv6() {
+        // IPv6 addresses use colons which are allowed
+        assert_eq!(shell_escape("::1"), "::1");
+        assert_eq!(shell_escape("fe80::1"), "fe80::1");
+        assert_eq!(shell_escape("2001:db8::1"), "2001:db8::1");
+    }
+
+    #[test]
+    fn test_shell_escape_truncation() {
+        let long_input = "a".repeat(300);
+        let result = shell_escape(&long_input);
+        assert_eq!(result.len(), MAX_INPUT_LEN);
+    }
+
+    #[test]
+    fn test_shell_escape_empty() {
+        assert_eq!(shell_escape(""), "");
+        assert_eq!(shell_escape("   "), "");
     }
 }

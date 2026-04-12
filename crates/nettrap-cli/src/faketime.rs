@@ -20,7 +20,11 @@ pub fn get_delta() -> i64 {
 /// Set the faketime delta
 pub fn set_delta(delta_secs: i64) {
     TIME_DELTA.store(delta_secs, Ordering::Relaxed);
-    tracing::info!("FakeTime delta set to {} seconds ({} days)", delta_secs, delta_secs / 86400);
+    tracing::info!(
+        "FakeTime delta set to {} seconds ({} days)",
+        delta_secs,
+        delta_secs / 86400
+    );
 }
 
 /// Add to the current delta (clamped to ±100 years to prevent overflow)
@@ -44,7 +48,8 @@ pub async fn run_auto_increment(config: crate::config::FakeTimeConfig) {
 
     tracing::info!(
         "FakeTime auto-increment: +{} seconds every {} seconds",
-        config.auto_increment_secs, config.auto_delay_secs
+        config.auto_increment_secs,
+        config.auto_delay_secs
     );
 
     loop {
@@ -53,7 +58,8 @@ pub async fn run_auto_increment(config: crate::config::FakeTimeConfig) {
         let total = get_delta();
         tracing::debug!(
             "FakeTime auto-increment: delta now {} seconds ({:.1} days)",
-            total, total as f64 / 86400.0
+            total,
+            total as f64 / 86400.0
         );
     }
 }

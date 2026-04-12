@@ -3,8 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::prelude::*;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum RulePriority {
     Critical = 0,
     High = 100,
@@ -13,7 +12,6 @@ pub enum RulePriority {
     #[default]
     Default = 1000,
 }
-
 
 impl Ord for RulePriority {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
@@ -109,29 +107,42 @@ impl PolicyRule {
     }
 
     pub fn with_src_ip(mut self, ip: &str) -> Self {
-        if let Ok(cidr) = ip.parse::<ipnet::IpNet>() {
-            self.matchers.push(RuleMatcher::SrcIp(cidr));
+        match ip.parse::<ipnet::IpNet>() {
+            Ok(cidr) => self.matchers.push(RuleMatcher::SrcIp(cidr)),
+            Err(e) => tracing::warn!("Invalid src_ip '{}' in policy rule, ignoring: {}", ip, e),
         }
         self
     }
 
     pub fn with_dst_ip(mut self, ip: &str) -> Self {
-        if let Ok(cidr) = ip.parse::<ipnet::IpNet>() {
-            self.matchers.push(RuleMatcher::DstIp(cidr));
+        match ip.parse::<ipnet::IpNet>() {
+            Ok(cidr) => self.matchers.push(RuleMatcher::DstIp(cidr)),
+            Err(e) => tracing::warn!("Invalid dst_ip '{}' in policy rule, ignoring: {}", ip, e),
         }
         self
     }
 
     pub fn with_process_name(mut self, name: impl Into<String>) -> Self {
-        if let Ok(re) = Regex::new(&format!("^{}$", name.into())) {
-            self.matchers.push(RuleMatcher::ProcessName(re));
+        let name = name.into();
+        match Regex::new(&format!("^{}$", regex::escape(&name))) {
+            Ok(re) => self.matchers.push(RuleMatcher::ProcessName(re)),
+            Err(e) => tracing::warn!(
+                "Invalid process_name pattern '{}' in policy rule: {}",
+                name,
+                e
+            ),
         }
         self
     }
 
     pub fn with_process_name_regex(mut self, pattern: &str) -> Self {
-        if let Ok(re) = Regex::new(pattern) {
-            self.matchers.push(RuleMatcher::ProcessName(re));
+        match Regex::new(pattern) {
+            Ok(re) => self.matchers.push(RuleMatcher::ProcessName(re)),
+            Err(e) => tracing::warn!(
+                "Invalid process_name_regex '{}' in policy rule: {}",
+                pattern,
+                e
+            ),
         }
         self
     }
@@ -180,12 +191,8 @@ pub enum RuleMatcher {
 impl RuleMatcher {
     pub fn matches(&self, ctx: &PolicyContext) -> bool {
         match self {
-            RuleMatcher::Port(port) => {
-                ctx.flow.five_tuple.dst_port == *port
-            }
-            RuleMatcher::Ports(ports) => {
-                ports.contains(&ctx.flow.five_tuple.dst_port)
-            }
+            RuleMatcher::Port(port) => ctx.flow.five_tuple.dst_port == *port,
+            RuleMatcher::Ports(ports) => ports.contains(&ctx.flow.five_tuple.dst_port),
             RuleMatcher::Protocol(proto) => ctx.flow.five_tuple.protocol == *proto,
             RuleMatcher::SrcIp(cidr) => cidr.contains(&ctx.flow.five_tuple.src_ip),
             RuleMatcher::DstIp(cidr) => cidr.contains(&ctx.flow.five_tuple.dst_ip),
@@ -285,5 +292,10 @@ pub fn block_ip(ip: &str) -> PolicyRule {
 }
 
 pub fn passthrough_localhost() -> PolicyRule {
-    PolicyRule::passthrough().with_priority(RulePriority::High)
+    let mut rule = PolicyRule::passthrough().with_priority(RulePriority::High);
+    rule.matchers.push(RuleMatcher::DstIpList(vec![
+        "127.0.0.0/8".parse().expect("valid CIDR"),
+        "::1/128".parse().expect("valid CIDR"),
+    ]));
+    rule
 }

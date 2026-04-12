@@ -1,11 +1,11 @@
 /// Telnet protocol command bytes (RFC 854)
-pub const IAC: u8 = 255;  // Interpret As Command
+pub const IAC: u8 = 255; // Interpret As Command
 pub const DONT: u8 = 254;
 pub const DO: u8 = 253;
 pub const WONT: u8 = 252;
 pub const WILL: u8 = 251;
-pub const SB: u8 = 250;   // Sub-negotiation Begin
-pub const SE: u8 = 240;   // Sub-negotiation End
+pub const SB: u8 = 250; // Sub-negotiation Begin
+pub const SE: u8 = 240; // Sub-negotiation End
 
 /// Telnet option codes
 pub const OPT_ECHO: u8 = 1;

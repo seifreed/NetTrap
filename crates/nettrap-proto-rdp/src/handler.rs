@@ -3,13 +3,18 @@ pub struct RdpHandler {
 }
 
 impl RdpHandler {
-    pub fn new() -> Self { Self {} }
+    pub fn new() -> Self {
+        Self {}
+    }
 
     pub fn handle(&self, data: &[u8]) -> Vec<u8> {
-        if data.len() < 11 { return Vec::new(); }
+        if data.len() < 11 {
+            return Vec::new();
+        }
 
         // TPKT header: version(1) + reserved(1) + length(2)
-        if data[0] != 0x03 { // Not TPKT
+        if data[0] != 0x03 {
+            // Not TPKT
             return Vec::new();
         }
 
@@ -17,7 +22,8 @@ impl RdpHandler {
         let x224_type = data[5] >> 4;
 
         match x224_type {
-            0x0E => { // Connection Request (CR)
+            0x0E => {
+                // Connection Request (CR)
                 tracing::info!("RDP Connection Request received");
                 // Extract cookie/username if present
                 if let Some(cookie) = Self::extract_cookie(data) {
@@ -35,15 +41,24 @@ impl RdpHandler {
     }
 
     fn extract_cookie(data: &[u8]) -> Option<String> {
-        let text = String::from_utf8_lossy(data);
+        // Limit search to first 1KB to prevent ReDoS with large payloads.
+        // Cookie/username in RDP handshake appears early in the connection.
+        let search_limit = data.len().min(1024);
+        let search_data = &data[..search_limit];
+        let text = String::from_utf8_lossy(search_data);
+
         if let Some(start) = text.find("Cookie: mstshash=") {
             let rest = &text[start + 17..];
             let end = rest.find('\r').unwrap_or(rest.len());
-            Some(rest[..end].to_string())
+            // Limit extracted value to reasonable length
+            let value = &rest[..end.min(256)];
+            Some(value.to_string())
         } else if let Some(start) = text.find("Cookie:") {
             let rest = &text[start + 7..];
             let end = rest.find('\r').unwrap_or(rest.len());
-            Some(rest[..end].trim().to_string())
+            // Limit extracted value to reasonable length
+            let value = &rest[..end.min(256)];
+            Some(value.trim().to_string())
         } else {
             None
         }
@@ -79,13 +94,17 @@ impl RdpHandler {
         // Send a simple TPKT with X.224 Disconnect Request
         vec![
             0x03, 0x00, 0x00, 0x0B, // TPKT: v3, len=11
-            0x06,                    // X.224 length
-            0x80,                    // DR type
-            0x00, 0x00,              // Dst ref
-            0x00, 0x00,              // Src ref
-            0x00,                    // Reason: not specified
+            0x06, // X.224 length
+            0x80, // DR type
+            0x00, 0x00, // Dst ref
+            0x00, 0x00, // Src ref
+            0x00, // Reason: not specified
         ]
     }
 }
 
-impl Default for RdpHandler { fn default() -> Self { Self::new() } }
+impl Default for RdpHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}

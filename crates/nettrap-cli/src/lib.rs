@@ -6,17 +6,24 @@ pub mod distributed;
 pub mod engine;
 pub mod execute;
 pub mod faketime;
+pub mod handler_registry;
 pub mod hexdump;
 pub mod i18n;
 pub mod listener_config;
+pub mod listener_context;
 pub mod listener_runtime;
+pub mod listeners;
 pub mod mkcert;
 pub mod nbi;
 pub mod output;
 pub mod process_filter;
+pub mod protocol_handlers;
+pub mod router_setup;
 pub mod session;
 pub mod startup;
 pub mod template;
+pub mod tls_manager;
+pub mod types;
 pub mod utils;
 pub mod vfs;
 pub mod webroot;
@@ -62,7 +69,13 @@ impl From<nettrap_core::Error> for Error {
     }
 }
 
-pub fn setup_logging(verbose: bool, quiet: bool, log_file: Option<&std::path::Path>, no_console: bool, log_syslog: bool) -> Result<()> {
+pub fn setup_logging(
+    verbose: bool,
+    quiet: bool,
+    log_file: Option<&std::path::Path>,
+    no_console: bool,
+    log_syslog: bool,
+) -> Result<()> {
     let filter = if quiet {
         "error"
     } else if verbose {

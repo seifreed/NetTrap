@@ -1,6 +1,6 @@
 pub mod intercept;
-pub mod platform;
 pub mod pcap;
+pub mod platform;
 
 pub use intercept::*;
 pub use platform::*;
@@ -15,6 +15,6 @@ pub mod error {
 pub mod prelude {
     pub use crate::intercept::*;
     pub use crate::platform::*;
-    pub use nettrap_core::prelude::*;
     pub use async_trait::async_trait;
+    pub use nettrap_core::prelude::*;
 }

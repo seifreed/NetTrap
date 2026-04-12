@@ -24,8 +24,16 @@ impl SocksHandler {
         let cmd = data[1];
         let port = u16::from_be_bytes([data[2], data[3]]);
         let ip = format!("{}.{}.{}.{}", data[4], data[5], data[6], data[7]);
-        let user_end = data[8..].iter().position(|&b| b == 0).unwrap_or(data.len() - 8);
-        let user = String::from_utf8_lossy(&data[8..8 + user_end]);
+
+        // Find null terminator for username, with bounds validation
+        // SOCKS4 username starts at byte 8 and is null-terminated
+        let user_data = &data[8..];
+        let user_end = user_data
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(user_data.len()) // Use remaining bytes if no null found
+            .min(user_data.len()); // Clamp to valid range
+        let user = String::from_utf8_lossy(&user_data[..user_end]);
 
         tracing::warn!(
             "SOCKS4 request: cmd={}, dest={}:{}, user={}",
@@ -47,11 +55,17 @@ impl SocksHandler {
         }
 
         // Check if this is the initial handshake (version + nmethods + methods)
+        // Use >= to handle cases where handshake and connect arrive in one TCP read
         let nmethods = data[1] as usize;
-        if data.len() == 2 + nmethods {
-            tracing::info!("SOCKS5 handshake: {} auth methods", nmethods);
-            // Accept no authentication
-            return vec![0x05, 0x00];
+        if nmethods > 0 && data.len() >= 2 + nmethods {
+            // Either exact handshake length, or next byte is another SOCKS5 message (0x05)
+            if data.len() == 2 + nmethods
+                || (data.len() > 2 + nmethods && data[2 + nmethods] == 0x05)
+            {
+                tracing::info!("SOCKS5 handshake: {} auth methods", nmethods);
+                // Accept no authentication
+                return vec![0x05, 0x00];
+            }
         }
 
         // This might be a connect request

@@ -1,6 +1,6 @@
+use crate::prelude::*;
 use async_trait::async_trait;
 use std::path::PathBuf;
-use crate::prelude::*;
 
 pub struct TftpHandler {
     root_dir: Option<PathBuf>,
@@ -37,16 +37,33 @@ impl TftpHandler {
         tracing::debug!("TFTP RRQ for file: {}", filename);
 
         let content = if let Some(ref root) = self.root_dir {
-            let path = root.join(filename);
-            // Prevent path traversal
-            if path.starts_with(root) {
-                std::fs::read(&path).unwrap_or_else(|_| self.default_content.clone())
-            } else {
-                tracing::warn!("TFTP path traversal attempt: {}", filename);
-                return vec![TftpPacket::Error {
-                    code: 2,
-                    message: "Access violation".to_string(),
-                }];
+            let canonical_root = match root.canonicalize() {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!("TFTP root dir canonicalize failed: {}", e);
+                    return vec![TftpPacket::Error {
+                        code: 2,
+                        message: "Access violation".to_string(),
+                    }];
+                }
+            };
+            let path = canonical_root.join(filename);
+            // Prevent path traversal: canonicalize resolves symlinks and ../ components
+            match path.canonicalize() {
+                Ok(canonical_path) if canonical_path.starts_with(&canonical_root) => {
+                    std::fs::read(&canonical_path).unwrap_or_else(|_| self.default_content.clone())
+                }
+                Ok(_) => {
+                    tracing::warn!("TFTP path traversal attempt: {}", filename);
+                    return vec![TftpPacket::Error {
+                        code: 2,
+                        message: "Access violation".to_string(),
+                    }];
+                }
+                Err(_) => {
+                    // File doesn't exist — serve default content
+                    self.default_content.clone()
+                }
             }
         } else {
             self.default_content.clone()
@@ -97,7 +114,9 @@ impl TftpHandler {
 }
 
 impl Default for TftpHandler {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[async_trait]
@@ -110,15 +129,11 @@ pub trait TftpHandlerTrait: Send + Sync {
 impl TftpHandlerTrait for TftpHandler {
     async fn handle_packet(&self, packet: &TftpPacket) -> Result<Vec<TftpPacket>> {
         match packet {
-            TftpPacket::ReadRequest { filename, .. } => {
-                Ok(self.handle_read_request(filename))
-            }
+            TftpPacket::ReadRequest { filename, .. } => Ok(self.handle_read_request(filename)),
             TftpPacket::WriteRequest { filename, .. } => {
                 Ok(vec![self.handle_write_request(filename)])
             }
-            TftpPacket::Data { block, data } => {
-                Ok(vec![self.handle_data_block(*block, data)])
-            }
+            TftpPacket::Data { block, data } => Ok(vec![self.handle_data_block(*block, data)]),
             TftpPacket::Ack { .. } => {
                 Ok(Vec::new()) // ACKs don't need responses in server mode
             }

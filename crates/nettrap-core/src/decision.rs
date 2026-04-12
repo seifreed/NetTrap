@@ -13,7 +13,6 @@ pub enum PolicyDecision {
     Drop,
 }
 
-
 impl std::fmt::Display for PolicyDecision {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -29,7 +28,7 @@ impl std::fmt::Display for PolicyDecision {
 
 impl PolicyDecision {
     pub fn should_intercept(&self) -> bool {
-        matches!(self, PolicyDecision::Intercept | PolicyDecision::Emulate)
+        matches!(self, PolicyDecision::Intercept | PolicyDecision::Emulate | PolicyDecision::Sinkhole)
     }
 
     pub fn should_block(&self) -> bool {

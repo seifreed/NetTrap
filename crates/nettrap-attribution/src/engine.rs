@@ -43,16 +43,21 @@ impl AttributionEngine {
         let key = five_tuple.to_flow_key();
         let now = Instant::now();
 
+        // Use DashMap's entry API for atomic check-and-remove
+        // This prevents the race condition where another thread could insert
+        // between checking and removing
         if let Some(entry) = self.cache.get(&key) {
             let (attribution, timestamp) = entry.value();
             if now.duration_since(*timestamp) < self.cache_timeout {
                 self.stats.write().cache_hits += 1;
                 return attribution.clone();
-            } else {
-                drop(entry);
-                self.cache.remove(&key);
-                self.stats.write().cache_evictions += 1;
             }
+            // Entry expired - atomically remove if it still exists and is expired
+            drop(entry);
+            self.cache.remove_if(&key, |_, (_, ts)| {
+                now.duration_since(*ts) >= self.cache_timeout
+            });
+            self.stats.write().cache_evictions += 1;
         }
 
         self.stats.write().cache_misses += 1;

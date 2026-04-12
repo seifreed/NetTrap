@@ -8,7 +8,10 @@ use crate::prelude::*;
 #[cfg(not(target_os = "windows"))]
 pub type DefaultInterceptor = crate::pcap::PcapInterceptor;
 
-#[cfg(all(target_os = "windows", any(target_arch = "x86_64", target_arch = "x86")))]
+#[cfg(all(
+    target_os = "windows",
+    any(target_arch = "x86_64", target_arch = "x86")
+))]
 pub type DefaultInterceptor = crate::windivert::WinDivertInterceptor;
 
 #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
@@ -18,9 +21,9 @@ pub type DefaultInterceptor = crate::pcap::PcapInterceptor;
 pub mod windivert {
     use crate::prelude::*;
     use nettrap_windivert::{
-        WinDivert, HANDLE, WindivertAddress, WindivertIpHdr, WindivertIpv6Hdr, WindivertTcpHdr,
-        WindivertUdpHdr, IPPROTO_TCP, IPPROTO_UDP, WINDIVERT_DIRECTION_IN,
-        WINDIVERT_DIRECTION_OUT, WINDIVERT_LAYER_NETWORK,
+        HANDLE, IPPROTO_TCP, IPPROTO_UDP, WINDIVERT_DIRECTION_IN, WINDIVERT_DIRECTION_OUT,
+        WINDIVERT_LAYER_NETWORK, WinDivert, WindivertAddress, WindivertIpHdr, WindivertIpv6Hdr,
+        WindivertTcpHdr, WindivertUdpHdr, close_handle,
     };
     use parking_lot::{Mutex, RwLock};
     use std::sync::Arc;
@@ -36,6 +39,7 @@ pub mod windivert {
 
     impl WinDivertInterceptor {
         pub fn new(config: InterceptorConfig) -> Result<Self> {
+            validate_mode(&config)?;
             Ok(Self {
                 filter: build_filter(&config),
                 config,
@@ -60,7 +64,10 @@ pub mod windivert {
         }
 
         pub fn is_available() -> bool {
-            cfg!(all(target_os = "windows", any(target_arch = "x86_64", target_arch = "x86")))
+            cfg!(all(
+                target_os = "windows",
+                any(target_arch = "x86_64", target_arch = "x86")
+            ))
         }
 
         fn parse_ipv4_packet(
@@ -68,12 +75,18 @@ pub mod windivert {
             len: usize,
             direction: PacketDirection,
         ) -> Result<Option<Packet>> {
-            if len < std::mem::size_of::<WindivertIpHdr>() {
+            const IP_MIN_HEADER: usize = std::mem::size_of::<WindivertIpHdr>();
+
+            if len < IP_MIN_HEADER {
                 return Ok(None);
             }
 
             let ip_header = unsafe { &*(data.as_ptr() as *const WindivertIpHdr) };
-            let ihl = (ip_header.ver_hdrlen & 0x0F) as usize * 4;
+            let ihl = ((ip_header.ver_hdrlen & 0x0F) as usize) * 4;
+            // Validate IHL: RFC 791 specifies minimum 5 (20 bytes), maximum 15 (60 bytes)
+            if ihl < 20 || ihl > 60 {
+                return Ok(None);
+            }
             if len < ihl {
                 return Ok(None);
             }
@@ -89,7 +102,8 @@ pub mod windivert {
                         return Ok(None);
                     }
 
-                    let tcp_header = unsafe { &*(data.as_ptr().add(ihl) as *const WindivertTcpHdr) };
+                    let tcp_header =
+                        unsafe { &*(data.as_ptr().add(ihl) as *const WindivertTcpHdr) };
                     let src_port = u16::from_be(tcp_header.src_port);
                     let dst_port = u16::from_be(tcp_header.dst_port);
                     let tcp_header_len = ((tcp_header.flags0 >> 4) as usize) * 4;
@@ -118,7 +132,8 @@ pub mod windivert {
                         return Ok(None);
                     }
 
-                    let udp_header = unsafe { &*(data.as_ptr().add(ihl) as *const WindivertUdpHdr) };
+                    let udp_header =
+                        unsafe { &*(data.as_ptr().add(ihl) as *const WindivertUdpHdr) };
                     let src_port = u16::from_be(udp_header.src_port);
                     let dst_port = u16::from_be(udp_header.dst_port);
                     let payload_start = ihl + std::mem::size_of::<WindivertUdpHdr>();
@@ -147,7 +162,7 @@ pub mod windivert {
         ) -> Result<Option<Packet>> {
             const IPV6_HEADER_LEN: usize = 40;
 
-            if len < std::mem::size_of::<WindivertIpv6Hdr>() {
+            if len < IPV6_HEADER_LEN {
                 return Ok(None);
             }
 
@@ -214,7 +229,11 @@ pub mod windivert {
             }
         }
 
-        fn parse_packet(data: &[u8], len: usize, addr: &WindivertAddress) -> Result<Option<Packet>> {
+        fn parse_packet(
+            data: &[u8],
+            len: usize,
+            addr: &WindivertAddress,
+        ) -> Result<Option<Packet>> {
             if len < 1 {
                 return Ok(None);
             }
@@ -236,7 +255,10 @@ pub mod windivert {
     #[async_trait]
     impl Interceptor for WinDivertInterceptor {
         async fn init(&mut self) -> Result<()> {
-            tracing::info!("Initializing WinDivert interceptor with filter: {}", self.filter);
+            tracing::info!(
+                "Initializing WinDivert interceptor with filter: {}",
+                self.filter
+            );
 
             let mut windivert = WinDivert::new();
             let handle = windivert
@@ -267,9 +289,8 @@ pub mod windivert {
                     let api = guard
                         .as_ref()
                         .ok_or_else(|| Error::InvalidState("WinDivert not initialized".into()))?;
-                    api.recv(handle, &mut packet_buf, &mut addr).map_err(|e| {
-                        Error::Interception(format!("WinDivertRecv failed: {}", e))
-                    })?
+                    api.recv(handle, &mut packet_buf, &mut addr)
+                        .map_err(|e| Error::Interception(format!("WinDivertRecv failed: {}", e)))?
                 };
 
                 let packet = Self::parse_packet(&packet_buf, len as usize, &addr)?
@@ -325,10 +346,13 @@ pub mod windivert {
 
             let handle = self.handle.write().take();
             if let Some(handle) = handle {
-                if let Some(mut api) = self.windivert.lock().take() {
-                    let _ = api.close(handle as HANDLE);
-                }
+                close_handle(handle as HANDLE)
+                    .map_err(|e| Error::Interception(format!("WinDivertClose failed: {}", e)))?;
             }
+
+            // Once the raw handle is closed, any blocked recv should unwind and
+            // release the shared WinDivert state.
+            self.windivert.lock().take();
 
             Ok(())
         }
@@ -342,6 +366,16 @@ pub mod windivert {
         }
     }
 
+    fn validate_mode(config: &InterceptorConfig) -> Result<()> {
+        match config.mode {
+            nettrap_core::config::InterceptionMode::WinDivert => Ok(()),
+            other => Err(Error::Interception(format!(
+                "WinDivert interceptor requires interception mode 'windivert', got '{}'",
+                other
+            ))),
+        }
+    }
+
     fn build_filter(config: &InterceptorConfig) -> String {
         let mut clauses = vec!["ip".to_string()];
 
@@ -350,11 +384,6 @@ pub mod windivert {
             if !trimmed.is_empty() {
                 clauses.push(format!("ifIdx == {}", trimmed));
             }
-        }
-
-        match config.mode {
-            nettrap_core::config::InterceptionMode::WinDivert => clauses.push("true".to_string()),
-            _ => clauses.push("true".to_string()),
         }
 
         clauses.join(" and ")
@@ -367,9 +396,8 @@ pub mod windivert {
         #[test]
         fn parses_ipv4_tcp_packet() {
             let data: [u8; 40] = [
-                0x45, 0x00, 0x00, 0x28, 0, 0, 0, 0, 64, 6, 0, 0, 192, 168, 1, 10, 93, 184, 216,
-                34, 0x1f, 0x90, 0x00, 0x50, 0, 0, 0, 0, 0, 0, 0, 0, 0x50, 0x02, 0x20, 0x00, 0, 0,
-                0, 0,
+                0x45, 0x00, 0x00, 0x28, 0, 0, 0, 0, 64, 6, 0, 0, 192, 168, 1, 10, 93, 184, 216, 34,
+                0x1f, 0x90, 0x00, 0x50, 0, 0, 0, 0, 0, 0, 0, 0, 0x50, 0x02, 0x20, 0x00, 0, 0, 0, 0,
             ];
             let addr = WindivertAddress {
                 direction: WINDIVERT_DIRECTION_OUT,
@@ -406,6 +434,39 @@ pub mod windivert {
             assert!(packet.is_udp());
             assert!(packet.direction.is_inbound());
             assert_eq!(packet.payload.as_ref(), b"test");
+        }
+
+        #[test]
+        fn build_filter_uses_interface_constraint_without_dummy_clause() {
+            let config = InterceptorConfig {
+                mode: nettrap_core::config::InterceptionMode::WinDivert,
+                interface: Some("7".to_string()),
+                ..Default::default()
+            };
+
+            assert_eq!(build_filter(&config), "ip and ifIdx == 7");
+        }
+
+        #[test]
+        fn build_filter_defaults_to_ip_clause_for_windivert_mode() {
+            let config = InterceptorConfig {
+                mode: nettrap_core::config::InterceptionMode::WinDivert,
+                ..Default::default()
+            };
+
+            assert_eq!(build_filter(&config), "ip");
+        }
+
+        #[test]
+        fn rejects_non_windivert_interception_modes() {
+            let config = InterceptorConfig {
+                mode: nettrap_core::config::InterceptionMode::Userspace,
+                ..Default::default()
+            };
+
+            let result = WinDivertInterceptor::new(config);
+
+            assert!(result.is_err());
         }
     }
 }
@@ -466,7 +527,10 @@ impl InterceptorBuilder {
         crate::pcap::PcapInterceptor::new(self.config)
     }
 
-    #[cfg(all(target_os = "windows", any(target_arch = "x86_64", target_arch = "x86")))]
+    #[cfg(all(
+        target_os = "windows",
+        any(target_arch = "x86_64", target_arch = "x86")
+    ))]
     pub fn build_windivert(self) -> Result<crate::windivert::WinDivertInterceptor> {
         crate::windivert::WinDivertInterceptor::new(self.config)
     }

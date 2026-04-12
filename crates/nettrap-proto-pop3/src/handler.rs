@@ -1,7 +1,7 @@
+use crate::prelude::*;
 use async_trait::async_trait;
 use base64::Engine as Base64Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use crate::prelude::*;
 
 pub struct Pop3Handler {
     domain: String,
@@ -27,7 +27,10 @@ impl Pop3Handler {
         let size = default_email.body.len();
         Self {
             domain: "nettrap.local".to_string(),
-            emails: vec![Pop3Email { size, ..default_email }],
+            emails: vec![Pop3Email {
+                size,
+                ..default_email
+            }],
         }
     }
 
@@ -42,7 +45,9 @@ impl Pop3Handler {
 }
 
 impl Default for Pop3Handler {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[async_trait]
@@ -63,12 +68,20 @@ impl Pop3HandlerTrait for Pop3Handler {
             Ok(Pop3Response::ok("Mailbox locked and ready"))
         } else if upper.starts_with("STAT") {
             let total_size: usize = self.emails.iter().map(|e| e.size).sum();
-            Ok(Pop3Response::ok(format!("{} {}", self.emails.len(), total_size)))
+            Ok(Pop3Response::ok(format!(
+                "{} {}",
+                self.emails.len(),
+                total_size
+            )))
         } else if upper.starts_with("LIST") {
             if parts.len() > 1 {
                 if let Ok(idx) = parts[1].parse::<usize>() {
                     if idx > 0 && idx <= self.emails.len() {
-                        Ok(Pop3Response::ok(format!("{} {}", idx, self.emails[idx - 1].size)))
+                        Ok(Pop3Response::ok(format!(
+                            "{} {}",
+                            idx,
+                            self.emails[idx - 1].size
+                        )))
                     } else {
                         Ok(Pop3Response::err("No such message"))
                     }
@@ -81,9 +94,15 @@ impl Pop3HandlerTrait for Pop3Handler {
                     response.push_str(&format!("{} {}\r\n", i + 1, email.size));
                 }
                 response.push_str(".\r\n");
-                Ok(Pop3Response { positive: true, message: response })
+                Ok(Pop3Response {
+                    positive: true,
+                    message: response,
+                })
             }
         } else if upper.starts_with("RETR") {
+            // Note: accepting RETR without prior USER/PASS is intentional for honeypot
+            // to maximize data capture, but log it for detection
+            tracing::info!("POP3 RETR command received (stateless handler)");
             if parts.len() > 1 {
                 if let Ok(idx) = parts[1].parse::<usize>() {
                     if idx > 0 && idx <= self.emails.len() {
@@ -91,7 +110,10 @@ impl Pop3HandlerTrait for Pop3Handler {
                         let mut response = format!("+OK {} octets\r\n", email.size);
                         response.push_str(&email.body);
                         response.push_str(".\r\n");
-                        Ok(Pop3Response { positive: true, message: response })
+                        Ok(Pop3Response {
+                            positive: true,
+                            message: response,
+                        })
                     } else {
                         Ok(Pop3Response::err("No such message"))
                     }
@@ -120,7 +142,10 @@ impl Pop3HandlerTrait for Pop3Handler {
                             response.push_str("\r\n");
                         }
                         response.push_str(".\r\n");
-                        Ok(Pop3Response { positive: true, message: response })
+                        Ok(Pop3Response {
+                            positive: true,
+                            message: response,
+                        })
                     } else {
                         Ok(Pop3Response::err("No such message"))
                     }
@@ -147,34 +172,68 @@ impl Pop3HandlerTrait for Pop3Handler {
                     response.push_str(&format!("{} nettrap-msg-{}\r\n", i + 1, i + 1));
                 }
                 response.push_str(".\r\n");
-                Ok(Pop3Response { positive: true, message: response })
+                Ok(Pop3Response {
+                    positive: true,
+                    message: response,
+                })
             }
         } else if upper.starts_with("AUTH") {
             // AUTH command — capture credentials
+            const MAX_AUTH_DATA_LEN: usize = 8192; // 8KB limit for base64 input
+
             if parts.len() > 1 {
                 let mechanism = parts[1].to_uppercase();
                 match mechanism.as_str() {
                     "PLAIN" => {
                         // AUTH PLAIN <base64> or AUTH PLAIN then continuation
                         if let Some(data) = parts.get(2) {
+                            // Check size limit before decoding
+                            if data.len() > MAX_AUTH_DATA_LEN {
+                                tracing::warn!(
+                                    "POP3 AUTH PLAIN: input too long ({} bytes), rejecting",
+                                    data.len()
+                                );
+                                return Ok(Pop3Response::err("Input too long"));
+                            }
+
                             if let Ok(decoded) = BASE64.decode(data.as_bytes()) {
+                                // Also check decoded size
+                                if decoded.len() > MAX_AUTH_DATA_LEN {
+                                    tracing::warn!(
+                                        "POP3 AUTH PLAIN: decoded data too large ({} bytes)",
+                                        decoded.len()
+                                    );
+                                    return Ok(Pop3Response::err("Credential data too large"));
+                                }
+
                                 let cred_parts: Vec<&[u8]> = decoded.split(|&b| b == 0).collect();
                                 if cred_parts.len() >= 3 {
                                     // RFC 4616: \0authcid\0passwd (with optional authzid prefix)
                                     let user = String::from_utf8_lossy(cred_parts[1]);
                                     let pass = String::from_utf8_lossy(cred_parts[2]);
-                                    tracing::info!("POP3 AUTH PLAIN — user: {} pass: {}", user, pass);
+                                    tracing::info!(
+                                        "POP3 AUTH PLAIN — user: {} pass: {}",
+                                        user,
+                                        pass
+                                    );
                                 } else if cred_parts.len() == 2 {
                                     // 2-part format: authcid\0passwd (no authzid)
                                     let user = String::from_utf8_lossy(cred_parts[0]);
                                     let pass = String::from_utf8_lossy(cred_parts[1]);
-                                    tracing::info!("POP3 AUTH PLAIN — user: {} pass: {}", user, pass);
+                                    tracing::info!(
+                                        "POP3 AUTH PLAIN — user: {} pass: {}",
+                                        user,
+                                        pass
+                                    );
                                 }
                             }
                             Ok(Pop3Response::ok("Authentication successful"))
                         } else {
                             // Send continuation prompt
-                            Ok(Pop3Response { positive: true, message: "+\r\n".to_string() })
+                            Ok(Pop3Response {
+                                positive: true,
+                                message: "+\r\n".to_string(),
+                            })
                         }
                     }
                     _ => {
@@ -185,7 +244,10 @@ impl Pop3HandlerTrait for Pop3Handler {
             } else {
                 // AUTH with no args — list mechanisms
                 let response = "+OK\r\nPLAIN\r\nLOGIN\r\n.\r\n".to_string();
-                Ok(Pop3Response { positive: true, message: response })
+                Ok(Pop3Response {
+                    positive: true,
+                    message: response,
+                })
             }
         } else if upper.starts_with("APOP") {
             // APOP <user> <digest>
@@ -195,7 +257,10 @@ impl Pop3HandlerTrait for Pop3Handler {
             Ok(Pop3Response::ok("Authentication successful"))
         } else if upper.starts_with("CAPA") {
             let response = "+OK Capability list follows\r\nUSER\r\nTOP\r\nUIDL\r\nSTLS\r\nSASL PLAIN LOGIN\r\n.\r\n".to_string();
-            Ok(Pop3Response { positive: true, message: response })
+            Ok(Pop3Response {
+                positive: true,
+                message: response,
+            })
         } else if upper.starts_with("STLS") {
             Ok(Pop3Response::ok("Begin TLS negotiation"))
         } else if upper.starts_with("QUIT") {

@@ -16,3 +16,4 @@ serde.workspace = true
 regex.workspace = true
 ipnet.workspace = true
 tracing.workspace = true
+once_cell.workspace = true

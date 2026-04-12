@@ -1,8 +1,26 @@
+fn has_path_traversal(s: &str) -> bool {
+    let lower = s.to_lowercase();
+    s.contains("..")
+        || s.contains('\\')
+        || s.starts_with('/')
+        || lower.contains("%2e%2e")
+        || lower.contains("%2e%2e%2f")
+        || lower.contains("%2e%2e%5c")
+        || lower.contains("..%2f")
+        || lower.contains("..%5c")
+        || lower.contains("%2e.")
+        || lower.contains(".%2e")
+        || s.contains('\0')
+        || lower.contains("%252e")
+}
+
 pub struct FtpHandler {
     banner: String,
     root_dir: Option<std::path::PathBuf>,
     pasv_port_start: u16,
     pasv_port_end: u16,
+    pasv_port_counter: std::sync::atomic::AtomicU16,
+    pasv_address: String,
 }
 
 impl FtpHandler {
@@ -12,6 +30,8 @@ impl FtpHandler {
             root_dir: None,
             pasv_port_start: 60000,
             pasv_port_end: 60100,
+            pasv_port_counter: std::sync::atomic::AtomicU16::new(0),
+            pasv_address: "0,0,0,0".to_string(),
         }
     }
 
@@ -28,6 +48,12 @@ impl FtpHandler {
     pub fn with_pasv_ports(mut self, start: u16, end: u16) -> Self {
         self.pasv_port_start = start;
         self.pasv_port_end = end;
+        self.pasv_port_counter = std::sync::atomic::AtomicU16::new(0);
+        self
+    }
+
+    pub fn with_pasv_address(mut self, addr: impl Into<String>) -> Self {
+        self.pasv_address = addr.into();
         self
     }
 }
@@ -82,12 +108,24 @@ impl FtpHandler {
         } else if upper.starts_with("TYPE") {
             FtpResponse::new(200, "Type set to I")
         } else if upper.starts_with("PASV") {
-            let port = self.pasv_port_start;
+            // Round-robin port allocation across the configured range
+            let port = {
+                let current = self
+                    .pasv_port_counter
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let range = self
+                    .pasv_port_end
+                    .saturating_sub(self.pasv_port_start)
+                    .max(1);
+                // Use modulo directly on counter to handle wrap-around correctly
+                // When current wraps from u16::MAX to 0, modulo still gives valid offset
+                self.pasv_port_start + (current % range)
+            };
             let p1 = port / 256;
             let p2 = port % 256;
             FtpResponse::new(
                 227,
-                format!("Entering Passive Mode (127,0,0,1,{},{})", p1, p2),
+                format!("Entering Passive Mode ({},{},{})", self.pasv_address, p1, p2),
             )
         } else if upper.starts_with("LIST") {
             if let Some(ref root) = self.root_dir {
@@ -125,10 +163,12 @@ impl FtpHandler {
             FtpResponse::new(150, "Opening data connection")
         } else if upper.starts_with("RETR") {
             let filename = command.get(5..).unwrap_or("").trim();
-            // Reject path traversal attempts
-            if filename.contains("..") || filename.contains('\\') || filename.starts_with('/') {
+
+            if has_path_traversal(filename) {
+                tracing::warn!("FTP path traversal attempt blocked: {:?}", filename);
                 return FtpResponse::new(550, "Invalid path");
             }
+
             if let Some(ref root) = self.root_dir {
                 let path = root.join(filename);
                 // Canonicalize root first - if it fails, reject the request
@@ -230,8 +270,7 @@ impl FtpHandler {
             }
         } else if upper.starts_with("SIZE") {
             let filename = command.get(5..).unwrap_or("").trim();
-            // Reject path traversal attempts
-            if filename.contains("..") || filename.contains('\\') || filename.starts_with('/') {
+            if has_path_traversal(filename) {
                 return FtpResponse::new(550, "Invalid path");
             }
             if let Some(ref root) = self.root_dir {
@@ -260,15 +299,8 @@ impl FtpHandler {
                         .unwrap_or(0);
                     FtpResponse::new(213, size.to_string())
                 } else {
-                    let ext = std::path::Path::new(filename)
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .unwrap_or("");
-                    if let Some(content) = default_file_for_extension(ext) {
-                        FtpResponse::new(213, content.len().to_string())
-                    } else {
-                        FtpResponse::new(550, "File not found")
-                    }
+                    // File exists but outside root or not a file — deny without extension fallback
+                    FtpResponse::new(550, "File not found")
                 }
             } else {
                 FtpResponse::new(213, "0")

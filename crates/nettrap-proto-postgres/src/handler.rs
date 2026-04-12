@@ -32,8 +32,9 @@ impl PostgresHandler {
                 if data.len() < 6 {
                     return Vec::new();
                 }
-                let query = String::from_utf8_lossy(&data[5..]);
-                tracing::warn!("POSTGRES QUERY: {}", query);
+                let raw_query = String::from_utf8_lossy(&data[5..]);
+                let query = raw_query.trim_end_matches('\0');
+                tracing::warn!("POSTGRES QUERY (v{}): {}", self.version, query);
                 // CommandComplete + ReadyForQuery
                 let mut resp = Vec::new();
                 let tag = b"SELECT 0";
@@ -51,9 +52,13 @@ impl PostgresHandler {
                 // Startup message (no type byte, starts with length)
                 let len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
                 if len > 8 && data.len() >= 8 {
-                    let version = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
-                    tracing::info!("POSTGRES startup: version=0x{:08x}", version);
-                    if version == 196608 {
+                    let pg_version = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
+                    tracing::info!(
+                        "POSTGRES startup (server v{}): client version=0x{:08x}",
+                        self.version,
+                        pg_version
+                    );
+                    if pg_version == 196608 {
                         // 3.0
                         // Parse user/database from key=value pairs
                         let params = String::from_utf8_lossy(&data[8..]);

@@ -58,6 +58,9 @@ pub enum Error {
 
     #[error("TLS error: {0}")]
     Tls(String),
+
+    #[error("NAT error: {0}")]
+    Nat(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

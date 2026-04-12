@@ -6,9 +6,11 @@ members = [
     "crates/nettrap-events",
     "crates/nettrap-policy",
     "crates/nettrap-attribution",
+    "crates/nettrap-engine",
     "crates/nettrap-interceptor",
     "crates/nettrap-socket",
     "crates/nettrap-nat",
+    "crates/nettrap-protocols",
     "crates/nettrap-proto-dns",
     "crates/nettrap-proto-http",
     "crates/nettrap-proto-tls",
@@ -83,6 +85,7 @@ uuid = { version = "1.15", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 ipnet = "2.11"
 socket2 = "0.5"
+libc = "0.2"
 pcap-file = "2.0"
 parking_lot = "0.12"
 dashmap = "6.1"
@@ -106,28 +109,30 @@ sha2 = "0.10"
 md-5 = "0.10"
 hmac = "0.12"
 rand = "0.9"
-trust-dns-proto = "0.23"
-trust-dns-client = "0.23"
+idna = "1.1"
+hickory-proto = "0.25"
+hickory-client = "0.25"
 http = "1.3"
 http-body-util = "0.1"
 hyper = { version = "1.6", features = ["full"] }
 hyper-util = "0.1"
 tokio-rustls = { version = "0.26", features = ["ring"] }
-rustls-pemfile = "2.2"
+rustls-pki-types = "1.14"
 rcgen = "0.13"
 memchr = "2.7"
 nom = "8.0"
 pcap = "2.4"
 hostname = "0.4"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
-rusqlite = { version = "0.34", features = ["bundled"] }
-sqlx = { version = "0.8", features = ["runtime-tokio", "mysql"], default-features = false }
+rusqlite = { version = "0.39", features = ["bundled"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres"], default-features = false }
 
 nettrap-core = { path = "crates/nettrap-core" }
 nettrap-flow = { path = "crates/nettrap-flow" }
 nettrap-events = { path = "crates/nettrap-events" }
 nettrap-policy = { path = "crates/nettrap-policy" }
 nettrap-attribution = { path = "crates/nettrap-attribution" }
+nettrap-engine = { path = "crates/nettrap-engine" }
 nettrap-interceptor = { path = "crates/nettrap-interceptor" }
 nettrap-socket = { path = "crates/nettrap-socket" }
 nettrap-nat = { path = "crates/nettrap-nat" }
@@ -144,6 +149,7 @@ nettrap-ioc = { path = "crates/nettrap-ioc" }
 nettrap-pcap = { path = "crates/nettrap-pcap" }
 nettrap-report = { path = "crates/nettrap-report" }
 nettrap-storage = { path = "crates/nettrap-storage" }
+nettrap-api = { path = "crates/nettrap-api" }
 nettrap-windivert = { path = "crates/nettrap-windivert" }
 nettrap-tls-mitm = { path = "crates/nettrap-tls-mitm" }
 nettrap-proxy = { path = "crates/nettrap-proxy" }
@@ -175,6 +181,7 @@ nettrap-proto-chargen = { path = "crates/nettrap-proto-chargen" }
 nettrap-proto-quotd = { path = "crates/nettrap-proto-quotd" }
 nettrap-proto-syslogrecv = { path = "crates/nettrap-proto-syslogrecv" }
 nettrap-proto-dummy = { path = "crates/nettrap-proto-dummy" }
+nettrap-protocols = { path = "crates/nettrap-protocols" }
 
 [profile.release]
 lto = "thin"

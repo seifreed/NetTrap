@@ -48,6 +48,18 @@ impl HttpRequest {
             })
             .collect();
 
+        // Validate headers don't contain CRLF (prevent HTTP response splitting/request smuggling)
+        for (key, value) in &headers {
+            if key.contains('\r')
+                || key.contains('\n')
+                || value.contains('\r')
+                || value.contains('\n')
+            {
+                tracing::warn!("HTTP header contains CRLF, rejecting request");
+                return None;
+            }
+        }
+
         let body_start = header_end + 4;
         let body = if body_start < data.len() {
             // Limit body size based on Content-Length if present

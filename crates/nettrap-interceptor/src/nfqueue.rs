@@ -1,9 +1,9 @@
-use std::process::Command;
-use std::sync::Arc;
 use async_trait::async_trait;
 use parking_lot::RwLock;
+use std::process::Command;
+use std::sync::Arc;
 
-use crate::intercept::{Interceptor, InterceptorConfig, InterceptStats};
+use crate::intercept::{InterceptStats, Interceptor, InterceptorConfig};
 use crate::prelude::*;
 
 /// Linux NFQUEUE-based interceptor using iptables for traffic redirection.
@@ -20,7 +20,7 @@ pub struct NfqueueInterceptor {
     rules_installed: RwLock<Vec<IptablesRule>>,
     mode: NetworkMode,
     interface: Option<String>,
-    listener_ports: Vec<(u16, bool)>, // (port, is_tcp)
+    redirect_rules: Vec<PortRedirect>,
     flush_on_start: bool,
     saved_rules: RwLock<Option<String>>,
     saved_ip_forward: RwLock<Option<String>>,
@@ -39,6 +39,31 @@ struct IptablesRule {
     rule_args: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PortRedirect {
+    pub source_port: Option<u16>,
+    pub target_port: u16,
+    pub is_tcp: bool,
+}
+
+impl PortRedirect {
+    pub fn new(source_port: u16, is_tcp: bool, target_port: u16) -> Self {
+        Self {
+            source_port: Some(source_port),
+            target_port,
+            is_tcp,
+        }
+    }
+
+    pub fn catch_all(is_tcp: bool, target_port: u16) -> Self {
+        Self {
+            source_port: None,
+            target_port,
+            is_tcp,
+        }
+    }
+}
+
 impl NfqueueInterceptor {
     pub fn new(config: InterceptorConfig) -> Result<Self> {
         Ok(Self {
@@ -49,7 +74,7 @@ impl NfqueueInterceptor {
             rules_installed: RwLock::new(Vec::new()),
             mode: NetworkMode::SingleHost,
             interface: None,
-            listener_ports: Vec::new(),
+            redirect_rules: Vec::new(),
             flush_on_start: false,
             saved_rules: RwLock::new(None),
             saved_ip_forward: RwLock::new(None),
@@ -72,7 +97,15 @@ impl NfqueueInterceptor {
     }
 
     pub fn with_listener_ports(mut self, ports: Vec<(u16, bool)>) -> Self {
-        self.listener_ports = ports;
+        self.redirect_rules = ports
+            .into_iter()
+            .map(|(port, is_tcp)| PortRedirect::new(port, is_tcp, port))
+            .collect();
+        self
+    }
+
+    pub fn with_port_redirects(mut self, redirects: Vec<PortRedirect>) -> Self {
+        self.redirect_rules = redirects;
         self
     }
 
@@ -117,11 +150,13 @@ impl NfqueueInterceptor {
 
             if let Some(mut stdin) = child.stdin.take() {
                 use std::io::Write;
-                stdin.write_all(rules.as_bytes())
-                    .map_err(|e| Error::Interception(format!("iptables-restore write failed: {}", e)))?;
+                stdin.write_all(rules.as_bytes()).map_err(|e| {
+                    Error::Interception(format!("iptables-restore write failed: {}", e))
+                })?;
             }
 
-            child.wait()
+            child
+                .wait()
                 .map_err(|e| Error::Interception(format!("iptables-restore wait failed: {}", e)))?;
 
             tracing::info!("Restored iptables rules");
@@ -133,27 +168,37 @@ impl NfqueueInterceptor {
     fn install_redirect_rules(&self) -> Result<()> {
         let mut installed = Vec::new();
 
-        for &(port, is_tcp) in &self.listener_ports {
-            let proto = if is_tcp { "tcp" } else { "udp" };
+        for redirect in &self.redirect_rules {
+            let proto = if redirect.is_tcp { "tcp" } else { "udp" };
 
             match self.mode {
                 NetworkMode::SingleHost => {
                     // OUTPUT chain: redirect local outbound to localhost
                     let mut args = vec![
-                        "-t".to_string(), "nat".to_string(),
-                        "-A".to_string(), "OUTPUT".to_string(),
-                        "-p".to_string(), proto.to_string(),
-                        "--dport".to_string(), port.to_string(),
+                        "-t".to_string(),
+                        "nat".to_string(),
+                        "-A".to_string(),
+                        "OUTPUT".to_string(),
+                        "-p".to_string(),
+                        proto.to_string(),
                     ];
+
+                    if let Some(source_port) = redirect.source_port {
+                        args.extend_from_slice(&["--dport".to_string(), source_port.to_string()]);
+                    }
 
                     // Don't redirect loopback
                     args.extend_from_slice(&[
-                        "!".to_string(), "-d".to_string(), "127.0.0.0/8".to_string(),
+                        "!".to_string(),
+                        "-d".to_string(),
+                        "127.0.0.0/8".to_string(),
                     ]);
 
                     args.extend_from_slice(&[
-                        "-j".to_string(), "REDIRECT".to_string(),
-                        "--to-port".to_string(), port.to_string(),
+                        "-j".to_string(),
+                        "REDIRECT".to_string(),
+                        "--to-port".to_string(),
+                        redirect.target_port.to_string(),
                     ]);
 
                     self.run_iptables(&args)?;
@@ -166,26 +211,34 @@ impl NfqueueInterceptor {
                 NetworkMode::MultiHost => {
                     // PREROUTING chain: redirect incoming traffic from external hosts
                     let mut args = vec![
-                        "-t".to_string(), "nat".to_string(),
-                        "-A".to_string(), "PREROUTING".to_string(),
-                        "-p".to_string(), proto.to_string(),
-                        "--dport".to_string(), port.to_string(),
+                        "-t".to_string(),
+                        "nat".to_string(),
+                        "-A".to_string(),
+                        "PREROUTING".to_string(),
+                        "-p".to_string(),
+                        proto.to_string(),
                     ];
+
+                    if let Some(source_port) = redirect.source_port {
+                        args.extend_from_slice(&["--dport".to_string(), source_port.to_string()]);
+                    }
 
                     // Don't redirect loopback traffic
                     args.extend_from_slice(&[
-                        "!".to_string(), "-d".to_string(), "127.0.0.0/8".to_string(),
+                        "!".to_string(),
+                        "-d".to_string(),
+                        "127.0.0.0/8".to_string(),
                     ]);
 
                     if let Some(ref iface) = self.interface {
-                        args.extend_from_slice(&[
-                            "-i".to_string(), iface.clone(),
-                        ]);
+                        args.extend_from_slice(&["-i".to_string(), iface.clone()]);
                     }
 
                     args.extend_from_slice(&[
-                        "-j".to_string(), "REDIRECT".to_string(),
-                        "--to-port".to_string(), port.to_string(),
+                        "-j".to_string(),
+                        "REDIRECT".to_string(),
+                        "--to-port".to_string(),
+                        redirect.target_port.to_string(),
                     ]);
 
                     self.run_iptables(&args)?;
@@ -197,7 +250,20 @@ impl NfqueueInterceptor {
                 }
             }
 
-            tracing::debug!("Installed iptables REDIRECT rule for {} port {}", proto, port);
+            if let Some(source_port) = redirect.source_port {
+                tracing::debug!(
+                    "Installed iptables REDIRECT rule for {} port {} -> {}",
+                    proto,
+                    source_port,
+                    redirect.target_port
+                );
+            } else {
+                tracing::debug!(
+                    "Installed catch-all iptables REDIRECT rule for {} traffic -> {}",
+                    proto,
+                    redirect.target_port
+                );
+            }
         }
 
         // Enable IP forwarding for MultiHost mode, saving original state
@@ -205,8 +271,14 @@ impl NfqueueInterceptor {
             if let Ok(original) = std::fs::read_to_string("/proc/sys/net/ipv4/ip_forward") {
                 *self.saved_ip_forward.write() = Some(original.trim().to_string());
             }
-            let _ = std::fs::write("/proc/sys/net/ipv4/ip_forward", "1");
-            tracing::info!("Enabled IPv4 forwarding for MultiHost mode");
+            if let Err(e) = std::fs::write("/proc/sys/net/ipv4/ip_forward", "1") {
+                tracing::warn!(
+                    "Failed to enable IP forwarding for MultiHost mode: {}. Routing may not work.",
+                    e
+                );
+            } else {
+                tracing::info!("Enabled IPv4 forwarding for MultiHost mode");
+            }
         }
 
         *self.rules_installed.write() = installed;
@@ -219,8 +291,16 @@ impl NfqueueInterceptor {
 
         for rule in &rules {
             // Replace -A with -D to delete
-            let delete_args: Vec<String> = rule.rule_args.iter()
-                .map(|a| if a == "-A" { "-D".to_string() } else { a.clone() })
+            let delete_args: Vec<String> = rule
+                .rule_args
+                .iter()
+                .map(|a| {
+                    if a == "-A" {
+                        "-D".to_string()
+                    } else {
+                        a.clone()
+                    }
+                })
                 .collect();
 
             if let Err(e) = self.run_iptables(&delete_args) {
@@ -288,7 +368,7 @@ impl Interceptor for NfqueueInterceptor {
         *self.running.write() = true;
         tracing::info!(
             "NFQUEUE interceptor initialized with {} redirect rules",
-            self.rules_installed.read().len()
+            self.redirect_rules.len()
         );
 
         Ok(())
@@ -324,9 +404,22 @@ impl Interceptor for NfqueueInterceptor {
 
         // Restore original IP forwarding state
         if self.mode == NetworkMode::MultiHost {
-            let original = self.saved_ip_forward.read().clone().unwrap_or_else(|| "0".to_string());
-            let _ = std::fs::write("/proc/sys/net/ipv4/ip_forward", &original);
-            tracing::info!("Restored IPv4 forwarding to '{}'", original);
+            let original = self
+                .saved_ip_forward
+                .read()
+                .clone()
+                .unwrap_or_else(|| "0".to_string());
+            if let Err(e) = std::fs::write("/proc/sys/net/ipv4/ip_forward", &original) {
+                tracing::error!(
+                    "CRITICAL: Failed to restore IPv4 forwarding to '{}': {}. \
+                     Manual intervention required: echo '{}' > /proc/sys/net/ipv4/ip_forward",
+                    original,
+                    e,
+                    original,
+                );
+            } else {
+                tracing::info!("Restored IPv4 forwarding to '{}'", original);
+            }
         }
 
         tracing::info!("NFQUEUE interceptor shut down cleanly");

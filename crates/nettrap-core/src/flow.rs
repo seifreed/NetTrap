@@ -2,8 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::prelude::*;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum FlowState {
     #[default]
     New,
@@ -34,7 +33,6 @@ impl FlowState {
         matches!(self, FlowState::Established | FlowState::Closing)
     }
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlowMetadata {

@@ -1,7 +1,6 @@
 pub struct RedisHandler {
     version: String,
     require_auth: bool,
-    authenticated: bool,
 }
 
 impl RedisHandler {
@@ -9,7 +8,6 @@ impl RedisHandler {
         Self {
             version: "7.0.15".to_string(),
             require_auth: false,
-            authenticated: false,
         }
     }
 
@@ -23,7 +21,7 @@ impl RedisHandler {
         self
     }
 
-    pub fn handle_command(&mut self, data: &[u8]) -> Vec<u8> {
+    pub fn handle_command(&self, data: &[u8]) -> Vec<u8> {
         let text = String::from_utf8_lossy(data);
         let commands = Self::parse_resp(&text);
 
@@ -45,7 +43,19 @@ impl RedisHandler {
                     format!("${}\r\n{}\r\n", info.len(), info)
                 }
                 "AUTH" => {
-                    self.authenticated = true;
+                    // Capture credentials: AUTH [username] password
+                    // Always accept (honeypot) — no per-connection state needed
+                    if args.len() >= 2 {
+                        tracing::warn!(
+                            "REDIS AUTH attempt: username='{}', password='{}'",
+                            args[0],
+                            args[1]
+                        );
+                    } else if args.len() == 1 {
+                        tracing::warn!("REDIS AUTH attempt: password='{}'", args[0]);
+                    } else {
+                        tracing::warn!("REDIS AUTH attempt (no credentials)");
+                    }
                     "+OK\r\n".to_string()
                 }
                 "SET" => {
@@ -59,7 +69,16 @@ impl RedisHandler {
                         // This is how attackers write SSH keys or crontabs
                         "+OK\r\n".to_string()
                     } else if args.first().map(|a| a.to_uppercase()) == Some("GET".to_string()) {
-                        "*2\r\n$3\r\ndir\r\n$5\r\n/tmp/\r\n".to_string()
+                        let key = args.get(1).copied().unwrap_or("dir");
+                        let value = match key.to_lowercase().as_str() {
+                            "dir" => "/tmp/",
+                            "dbfilename" => "dump.rdb",
+                            "save" => "3600 1 300 100 60 10000",
+                            "maxmemory" => "0",
+                            "bind" => "0.0.0.0",
+                            _ => "",
+                        };
+                        format!("*2\r\n${}\r\n{}\r\n${}\r\n{}\r\n", key.len(), key, value.len(), value)
                     } else {
                         "+OK\r\n".to_string()
                     }
@@ -84,9 +103,7 @@ impl RedisHandler {
                 "SELECT" => "+OK\r\n".to_string(),
                 "QUIT" => "+OK\r\n".to_string(),
                 "COMMAND" => "*0\r\n".to_string(),
-                "CLUSTER" => {
-                    "-ERR This instance has cluster support disabled\r\n".to_string()
-                }
+                "CLUSTER" => "-ERR This instance has cluster support disabled\r\n".to_string(),
                 "CLIENT" => "+OK\r\n".to_string(),
                 "SAVE" | "BGSAVE" => {
                     tracing::warn!("REDIS SAVE attempt (RDB dump attack)");
@@ -106,21 +123,47 @@ impl RedisHandler {
 
     /// Parse RESP protocol (Redis Serialization Protocol)
     fn parse_resp(data: &str) -> Vec<Vec<String>> {
+        const MAX_ARRAY_COUNT: usize = 1024; // Limit number of array elements
+        const MAX_BULK_SIZE: usize = 64 * 1024; // 64KB max per bulk string
+
         let mut commands = Vec::new();
         let lines: Vec<&str> = data.lines().collect();
         let mut i = 0;
 
         while i < lines.len() {
             if lines[i].starts_with('*') {
-                // Array: *N followed by $len\r\ndata pairs
-                let count: usize = lines[i][1..].trim().parse().unwrap_or(0);
+                // Array: *N followed by $len\r\ndata pairs (cap at 1024 to prevent abuse)
+                let count: usize = lines[i][1..]
+                    .trim()
+                    .parse()
+                    .unwrap_or(0)
+                    .min(MAX_ARRAY_COUNT);
                 let mut parts = Vec::new();
                 i += 1;
                 for _ in 0..count {
                     if i < lines.len() && lines[i].starts_with('$') {
+                        // Parse bulk string length (signed to handle $-1 null bulk strings)
+                        let bulk_len: isize = lines[i][1..].trim().parse().unwrap_or(0);
+
+                        if bulk_len < 0 {
+                            // Null bulk string ($-1): no data line follows
+                            i += 1;
+                            continue;
+                        }
+
+                        // Limit bulk string size
+                        if bulk_len as usize > MAX_BULK_SIZE {
+                            tracing::warn!("RESP bulk string too large ({}), rejecting", bulk_len);
+                            return commands; // Return what we have so far
+                        }
+
                         i += 1; // skip $len
                         if i < lines.len() {
-                            parts.push(lines[i].trim().to_string());
+                            // Additional validation: ensure data doesn't exceed claimed length
+                            let data = lines[i].trim();
+                            if data.len() <= MAX_BULK_SIZE {
+                                parts.push(data.to_string());
+                            }
                             i += 1;
                         }
                     }

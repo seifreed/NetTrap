@@ -6,11 +6,11 @@ use crate::prelude::*;
 
 #[async_trait]
 pub trait ListenerTrait: Send + Sync {
-    fn name(&self) -> &'static str;
+    fn name(&self) -> &str;
     fn port(&self) -> u16;
     fn protocol(&self) -> Protocol;
     fn binds_to(&self) -> std::net::IpAddr;
-    
+
     async fn start(&self) -> Result<()>;
     async fn stop(&self) -> Result<()>;
     fn is_running(&self) -> bool;
@@ -20,52 +20,59 @@ pub struct TcpListenerWrapper {
     config: ListenerConfig,
     listener: RwLock<Option<TcpListener>>,
     running: RwLock<bool>,
+    name: String,
 }
 
 impl TcpListenerWrapper {
     pub fn new(config: ListenerConfig) -> Self {
+        let name = config.name.clone();
         Self {
             config,
             listener: RwLock::new(None),
             running: RwLock::new(false),
+            name,
         }
     }
 }
 
 #[async_trait]
 impl ListenerTrait for TcpListenerWrapper {
-    fn name(&self) -> &'static str {
-        Box::leak(self.config.name.clone().into_boxed_str())
+    fn name(&self) -> &str {
+        &self.name
     }
-    
+
     fn port(&self) -> u16 {
         self.config.port
     }
-    
+
     fn protocol(&self) -> Protocol {
         self.config.protocol
     }
-    
+
     fn binds_to(&self) -> std::net::IpAddr {
         self.config.bind_address
     }
-    
+
     async fn start(&self) -> Result<()> {
         let addr = std::net::SocketAddr::new(self.config.bind_address, self.config.port);
         let listener = TcpListener::bind(addr).await?;
         *self.listener.write() = Some(listener);
         *self.running.write() = true;
-        tracing::info!("TCP listener {} started on port {}", self.config.name, self.config.port);
+        tracing::info!(
+            "TCP listener {} started on port {}",
+            self.config.name,
+            self.config.port
+        );
         Ok(())
     }
-    
+
     async fn stop(&self) -> Result<()> {
         *self.listener.write() = None;
         *self.running.write() = false;
         tracing::info!("TCP listener {} stopped", self.config.name);
         Ok(())
     }
-    
+
     fn is_running(&self) -> bool {
         *self.running.read()
     }
@@ -75,52 +82,59 @@ pub struct UdpListenerWrapper {
     config: ListenerConfig,
     socket: RwLock<Option<UdpSocket>>,
     running: RwLock<bool>,
+    name: String,
 }
 
 impl UdpListenerWrapper {
     pub fn new(config: ListenerConfig) -> Self {
+        let name = config.name.clone();
         Self {
             config,
             socket: RwLock::new(None),
             running: RwLock::new(false),
+            name,
         }
     }
 }
 
 #[async_trait]
 impl ListenerTrait for UdpListenerWrapper {
-    fn name(&self) -> &'static str {
-        Box::leak(self.config.name.clone().into_boxed_str())
+    fn name(&self) -> &str {
+        &self.name
     }
-    
+
     fn port(&self) -> u16 {
         self.config.port
     }
-    
+
     fn protocol(&self) -> Protocol {
         self.config.protocol
     }
-    
+
     fn binds_to(&self) -> std::net::IpAddr {
         self.config.bind_address
     }
-    
+
     async fn start(&self) -> Result<()> {
         let addr = std::net::SocketAddr::new(self.config.bind_address, self.config.port);
         let socket = UdpSocket::bind(addr).await?;
         *self.socket.write() = Some(socket);
         *self.running.write() = true;
-        tracing::info!("UDP listener {} started on port {}", self.config.name, self.config.port);
+        tracing::info!(
+            "UDP listener {} started on port {}",
+            self.config.name,
+            self.config.port
+        );
         Ok(())
     }
-    
+
     async fn stop(&self) -> Result<()> {
         *self.socket.write() = None;
         *self.running.write() = false;
         tracing::info!("UDP listener {} stopped", self.config.name);
         Ok(())
     }
-    
+
     fn is_running(&self) -> bool {
         *self.running.read()
     }
@@ -145,26 +159,26 @@ impl ListenerConfig {
             enabled: true,
         }
     }
-    
+
     pub fn dns() -> Self {
         Self::new("dns", 53, Protocol::Udp)
     }
-    
+
     pub fn http() -> Self {
         Self::new("http", 80, Protocol::Tcp)
     }
-    
+
     pub fn https() -> Self {
         Self::new("https", 443, Protocol::Tcp)
     }
-    
+
     pub fn with_bind_address(mut self, addr: impl Into<String>) -> Self {
         if let Ok(ip) = addr.into().parse() {
             self.bind_address = ip;
         }
         self
     }
-    
+
     pub fn enabled(mut self, enabled: bool) -> Self {
         self.enabled = enabled;
         self

@@ -17,7 +17,8 @@ impl TimeHandler {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
-        let secs_since_1900 = (now.as_secs() + NTP_EPOCH_OFFSET) as u32;
+        // RFC 868 time wraps at u32::MAX (~2036); wrapping_add makes truncation explicit
+        let secs_since_1900 = now.as_secs().wrapping_add(NTP_EPOCH_OFFSET) as u32;
         tracing::info!("Time response: {} seconds since 1900", secs_since_1900);
         secs_since_1900.to_be_bytes().to_vec()
     }

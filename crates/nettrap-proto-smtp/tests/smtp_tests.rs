@@ -4,17 +4,17 @@
 mod tests {
     use nettrap_proto_smtp::handler::{SmtpHandler, SmtpHandlerTrait};
     use nettrap_proto_smtp::smtp::SmtpResponse;
-    
+
     #[tokio::test]
     async fn test_smtp_ehlo() {
         let handler = SmtpHandler::new();
         let result = handler.handle("EHLO test.example.com").await;
         assert!(result.is_ok(), "SMTP EHLO should succeed");
-        
+
         let response = result.unwrap();
         assert!(response.message.contains("OK"), "EHLO should return OK");
     }
-    
+
     #[tokio::test]
     async fn test_smtp_mail_from() {
         let handler = SmtpHandler::new();
@@ -22,7 +22,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.unwrap().code, 250);
     }
-    
+
     #[tokio::test]
     async fn test_smtp_rcpt_to() {
         let handler = SmtpHandler::new();
@@ -30,7 +30,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.unwrap().code, 250);
     }
-    
+
     #[tokio::test]
     async fn test_smtp_data() {
         let handler = SmtpHandler::new();
@@ -38,7 +38,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.unwrap().code, 354);
     }
-    
+
     #[tokio::test]
     async fn test_smtp_quit() {
         let handler = SmtpHandler::new();
@@ -46,7 +46,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.unwrap().code, 221);
     }
-    
+
     #[tokio::test]
     async fn test_smtp_unknown_command() {
         let handler = SmtpHandler::new();
@@ -54,20 +54,25 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.unwrap().code, 500);
     }
-    
+
     #[test]
     fn test_smtp_banner() {
         let handler = SmtpHandler::new();
         let banner = handler.get_welcome_banner();
-        assert!(banner.contains("nettrap.local"), "SMTP banner should contain domain");
+        assert!(
+            banner.contains("nettrap.local"),
+            "SMTP banner should contain domain"
+        );
         assert!(banner.contains("ESMTP"), "SMTP banner should contain ESMTP");
-        assert!(banner.contains("NetTrap"), "SMTP banner should contain NetTrap");
+        assert!(
+            banner.contains("NetTrap"),
+            "SMTP banner should contain NetTrap"
+        );
     }
-    
+
     #[test]
     fn test_smtp_domain() {
-        let handler = SmtpHandler::new()
-            .with_domain("mail.example.com");
+        let handler = SmtpHandler::new().with_domain("mail.example.com");
         assert_eq!(handler.domain(), "mail.example.com");
     }
 }

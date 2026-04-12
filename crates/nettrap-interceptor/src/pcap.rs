@@ -1,5 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use parking_lot::{Mutex, RwLock};
@@ -11,6 +12,7 @@ pub struct PcapInterceptor {
     config: crate::intercept::InterceptorConfig,
     capture: Arc<Mutex<Option<pcap::Capture<pcap::Active>>>>,
     running: RwLock<bool>,
+    shutdown_flag: Arc<AtomicBool>,
     interface: String,
     linktype: Arc<RwLock<Option<Linktype>>>,
 }
@@ -26,6 +28,7 @@ impl PcapInterceptor {
             config,
             capture: Arc::new(Mutex::new(None)),
             running: RwLock::new(false),
+            shutdown_flag: Arc::new(AtomicBool::new(false)),
             interface,
             linktype: Arc::new(RwLock::new(None)),
         })
@@ -49,7 +52,11 @@ impl PcapInterceptor {
 
     fn device_score(device: &Device) -> i32 {
         let mut score = 0;
-        let desc = device.desc.as_deref().unwrap_or_default().to_ascii_lowercase();
+        let desc = device
+            .desc
+            .as_deref()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
         let name = device.name.to_ascii_lowercase();
 
         if device.flags.is_up() {
@@ -67,11 +74,7 @@ impl PcapInterceptor {
         if device.addresses.iter().any(|addr| addr.addr.is_ipv4()) {
             score += 15;
         }
-        if device
-            .addresses
-            .iter()
-            .any(|addr| !addr.addr.is_loopback())
-        {
+        if device.addresses.iter().any(|addr| !addr.addr.is_loopback()) {
             score += 20;
         }
 
@@ -151,7 +154,9 @@ impl PcapInterceptor {
     ) -> Result<Option<Packet>> {
         match linktype {
             Linktype::ETHERNET => Self::parse_ethernet(data, len, interface),
-            Linktype::RAW | Linktype::IPV4 => Self::parse_ip_packet(data, len, 0, Some(4), interface),
+            Linktype::RAW | Linktype::IPV4 => {
+                Self::parse_ip_packet(data, len, 0, Some(4), interface)
+            }
             Linktype::IPV6 => Self::parse_ip_packet(data, len, 0, Some(6), interface),
             Linktype::NULL | Linktype::LOOP => Self::parse_null_loopback(data, len, interface),
             _ => Self::parse_ip_packet(data, len, 0, None, interface),
@@ -166,8 +171,19 @@ impl PcapInterceptor {
         let mut ethertype = u16::from_be_bytes([data[12], data[13]]);
         let mut ip_offset = 14;
 
-        // Handle 802.1Q VLAN tagging (and stacked QinQ)
+        // Handle 802.1Q VLAN tagging (and stacked QinQ), with depth limit
+        // to prevent DoS from maliciously nested VLAN tags
+        const MAX_VLAN_DEPTH: usize = 8;
+        let mut vlan_depth = 0;
         while ethertype == 0x8100 || ethertype == 0x88A8 {
+            vlan_depth += 1;
+            if vlan_depth > MAX_VLAN_DEPTH {
+                tracing::debug!(
+                    "Dropping packet: VLAN nesting depth exceeds {}",
+                    MAX_VLAN_DEPTH
+                );
+                return Ok(None);
+            }
             if len < ip_offset + 4 {
                 return Ok(None);
             }
@@ -214,7 +230,12 @@ impl PcapInterceptor {
         }
     }
 
-    fn parse_ipv4(data: &[u8], len: usize, ip_offset: usize, interface: &str) -> Result<Option<Packet>> {
+    fn parse_ipv4(
+        data: &[u8],
+        len: usize,
+        ip_offset: usize,
+        interface: &str,
+    ) -> Result<Option<Packet>> {
         if len < ip_offset + 20 {
             return Ok(None);
         }
@@ -238,10 +259,23 @@ impl PcapInterceptor {
         ));
         let protocol_num = data[ip_offset + 9];
 
-        Self::parse_transport(data, len, ip_offset + ihl, protocol_num, src_ip, dst_ip, interface)
+        Self::parse_transport(
+            data,
+            len,
+            ip_offset + ihl,
+            protocol_num,
+            src_ip,
+            dst_ip,
+            interface,
+        )
     }
 
-    fn parse_ipv6(data: &[u8], len: usize, ip_offset: usize, interface: &str) -> Result<Option<Packet>> {
+    fn parse_ipv6(
+        data: &[u8],
+        len: usize,
+        ip_offset: usize,
+        interface: &str,
+    ) -> Result<Option<Packet>> {
         if len < ip_offset + 40 {
             return Ok(None);
         }
@@ -284,26 +318,36 @@ impl PcapInterceptor {
         ]));
         let protocol_num = data[ip_offset + 6];
 
-        Self::parse_transport(data, len, ip_offset + 40, protocol_num, src_ip, dst_ip, interface)
+        Self::parse_transport(
+            data,
+            len,
+            ip_offset + 40,
+            protocol_num,
+            src_ip,
+            dst_ip,
+            interface,
+        )
     }
 
     /// Infer packet direction based on IP addresses.
     /// Local/private source with public destination = Outbound, and vice versa.
     fn infer_direction(src_ip: &IpAddr, dst_ip: &IpAddr) -> PacketDirection {
-        let src_local = src_ip.is_loopback() || match src_ip {
-            IpAddr::V4(v4) => v4.is_private() || v4.is_link_local(),
-            IpAddr::V6(v6) => {
-                let o = v6.octets();
-                (o[0] & 0xFE) == 0xFC || (o[0] == 0xFE && (o[1] & 0xC0) == 0x80)
-            }
-        };
-        let dst_local = dst_ip.is_loopback() || match dst_ip {
-            IpAddr::V4(v4) => v4.is_private() || v4.is_link_local(),
-            IpAddr::V6(v6) => {
-                let o = v6.octets();
-                (o[0] & 0xFE) == 0xFC || (o[0] == 0xFE && (o[1] & 0xC0) == 0x80)
-            }
-        };
+        let src_local = src_ip.is_loopback()
+            || match src_ip {
+                IpAddr::V4(v4) => v4.is_private() || v4.is_link_local(),
+                IpAddr::V6(v6) => {
+                    let o = v6.octets();
+                    (o[0] & 0xFE) == 0xFC || (o[0] == 0xFE && (o[1] & 0xC0) == 0x80)
+                }
+            };
+        let dst_local = dst_ip.is_loopback()
+            || match dst_ip {
+                IpAddr::V4(v4) => v4.is_private() || v4.is_link_local(),
+                IpAddr::V6(v6) => {
+                    let o = v6.octets();
+                    (o[0] & 0xFE) == 0xFC || (o[0] == 0xFE && (o[1] & 0xC0) == 0x80)
+                }
+            };
 
         match (src_local, dst_local) {
             (true, false) => PacketDirection::Outbound,
@@ -448,6 +492,7 @@ impl Interceptor for PcapInterceptor {
         let capture = self.capture.clone();
         let linktype = self.linktype.clone();
         let interface = self.interface.clone();
+        let shutdown_flag = self.shutdown_flag.clone();
 
         tokio::task::spawn_blocking(move || {
             let mut cap_guard = capture.lock();
@@ -468,7 +513,12 @@ impl Interceptor for PcapInterceptor {
                             return Ok(pkt);
                         }
                     }
-                    Err(pcap::Error::TimeoutExpired) => continue,
+                    Err(pcap::Error::TimeoutExpired) => {
+                        if shutdown_flag.load(Ordering::Relaxed) {
+                            return Err(Error::InvalidState("Shutdown requested".into()));
+                        }
+                        continue;
+                    }
                     Err(e) => {
                         return Err(Error::Interception(format!(
                             "Failed to receive packet: {}",
@@ -483,11 +533,15 @@ impl Interceptor for PcapInterceptor {
     }
 
     async fn send_packet(&self, _packet: Packet) -> Result<()> {
-        Err(Error::NotSupported("Pcap capture cannot send packets".into()))
+        Err(Error::NotSupported(
+            "Pcap capture cannot send packets".into(),
+        ))
     }
 
     async fn shutdown(&mut self) -> Result<()> {
         tracing::info!("Shutting down pcap interceptor");
+        // Signal the recv loop to exit before acquiring the capture lock
+        self.shutdown_flag.store(true, Ordering::Relaxed);
         *self.running.write() = false;
         *self.capture.lock() = None;
         *self.linktype.write() = None;

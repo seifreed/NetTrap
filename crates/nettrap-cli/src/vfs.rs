@@ -1,17 +1,14 @@
 //! Virtual Filesystem (VFS) — provides a fake filesystem for honeypot services
 //! (FTP, TFTP, SMB, etc.) without exposing real host files.
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::Path;
-use parking_lot::RwLock;
 
 /// A single entry in the virtual filesystem
 #[derive(Debug, Clone)]
 pub enum VfsEntry {
-    File {
-        content: Vec<u8>,
-        size: u64,
-    },
+    File { content: Vec<u8>, size: u64 },
     Directory,
 }
 
@@ -67,10 +64,7 @@ impl VirtualFilesystem {
             "/pub/readme.txt",
             b"Welcome to the FTP server.\r\n".to_vec(),
         );
-        vfs.create_file_internal(
-            "/pub/docs/manual.pdf",
-            Self::fake_pdf(),
-        );
+        vfs.create_file_internal("/pub/docs/manual.pdf", Self::fake_pdf());
         vfs.create_file_internal(
             "/home/admin/.bashrc",
             b"# .bashrc\nexport PATH=/usr/local/bin:$PATH\n".to_vec(),
@@ -91,11 +85,19 @@ impl VirtualFilesystem {
     fn seed_from_dir_depth(&self, base: &Path, current: &Path, depth: usize) {
         const MAX_DEPTH: usize = 20;
         if depth > MAX_DEPTH {
-            tracing::warn!("VFS seed_from_dir: max depth {} reached at {:?}, stopping (possible symlink cycle)", MAX_DEPTH, current);
+            tracing::warn!(
+                "VFS seed_from_dir: max depth {} reached at {:?}, stopping (possible symlink cycle)",
+                MAX_DEPTH,
+                current
+            );
             return;
         }
         // Skip symlinks to prevent cycle traversal
-        if current.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+        if current
+            .symlink_metadata()
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
             tracing::debug!("VFS seed_from_dir: skipping symlink {:?}", current);
             return;
         }
@@ -123,7 +125,11 @@ impl VirtualFilesystem {
 
     fn normalize_path(path: &str) -> String {
         let p = path.replace('\\', "/");
-        let p = if p.starts_with('/') { p } else { format!("/{}", p) };
+        let p = if p.starts_with('/') {
+            p
+        } else {
+            format!("/{}", p)
+        };
         // Remove double slashes
         let mut result = String::with_capacity(p.len());
         let mut last_was_slash = false;
@@ -153,14 +159,20 @@ impl VirtualFilesystem {
     fn create_file_internal(&self, path: &str, content: Vec<u8>) {
         let path = Self::normalize_path(path);
         let size = content.len() as u64;
-        self.entries.write().insert(path, VfsEntry::File { content, size });
+        self.entries
+            .write()
+            .insert(path, VfsEntry::File { content, size });
     }
 
     /// List entries in a directory. Returns (name, is_dir, size) tuples.
     pub fn list(&self, path: &str) -> Vec<(String, bool, u64)> {
         let path = Self::normalize_path(path);
         let entries = self.entries.read();
-        let prefix = if path == "/" { "/".to_string() } else { format!("{}/", path) };
+        let prefix = if path == "/" {
+            "/".to_string()
+        } else {
+            format!("{}/", path)
+        };
 
         let mut results = Vec::new();
         for (key, entry) in entries.iter() {
@@ -171,11 +183,7 @@ impl VirtualFilesystem {
                 // Only direct children (no further slashes after prefix)
                 let rest = &key[prefix.len()..];
                 if !rest.contains('/') && !rest.is_empty() {
-                    results.push((
-                        rest.to_string(),
-                        entry.is_dir(),
-                        entry.size(),
-                    ));
+                    results.push((rest.to_string(), entry.is_dir(), entry.size()));
                 }
             }
         }
@@ -215,13 +223,28 @@ impl VirtualFilesystem {
         self.entries.read().contains_key(&path)
     }
 
-    /// Rename / move an entry
+    /// Rename / move an entry (updates children for directory renames)
     pub fn rename(&self, from: &str, to: &str) -> bool {
         let from = Self::normalize_path(from);
         let to = Self::normalize_path(to);
         let mut entries = self.entries.write();
         if let Some(entry) = entries.remove(&from) {
-            entries.insert(to, entry);
+            let is_dir = entry.is_dir();
+            entries.insert(to.clone(), entry);
+            // Re-key all children under the old prefix
+            if is_dir {
+                let from_prefix = format!("{}/", from);
+                let children: Vec<(String, VfsEntry)> = entries
+                    .iter()
+                    .filter(|(k, _)| k.starts_with(&from_prefix))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                for (old_key, child_entry) in children {
+                    entries.remove(&old_key);
+                    let new_key = format!("{}/{}", to, &old_key[from_prefix.len()..]);
+                    entries.insert(new_key, child_entry);
+                }
+            }
             true
         } else {
             false

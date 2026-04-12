@@ -47,7 +47,13 @@ impl DummyHandler {
         let len = data.len().min(self.max_bytes);
         let preview: String = data[..len.min(64)]
             .iter()
-            .map(|b| if b.is_ascii_graphic() || *b == b' ' { *b as char } else { '.' })
+            .map(|b| {
+                if b.is_ascii_graphic() || *b == b' ' {
+                    *b as char
+                } else {
+                    '.'
+                }
+            })
             .collect();
         tracing::info!("Dummy received {} bytes: {}", data.len(), preview);
         Vec::new() // Sink: no response

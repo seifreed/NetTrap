@@ -8,6 +8,7 @@ use crate::nat::NatEntry;
 
 pub struct NatTable {
     entries: DashMap<FlowKey, NatEntry>,
+    translated_index: DashMap<FlowKey, FlowKey>,
     port_pool: RwLock<PortPool>,
 }
 
@@ -24,15 +25,21 @@ impl PortPool {
         }
     }
 
-    fn allocate(&mut self, key: FlowKey) -> u16 {
-        let port = self.next_port;
-        self.next_port = if self.next_port == u16::MAX {
-            40000
-        } else {
-            self.next_port + 1
-        };
-        self.allocated.insert(port, key);
-        port
+    fn allocate(&mut self, key: FlowKey) -> Result<u16> {
+        const MAX_ATTEMPTS: u16 = (u16::MAX - 40000) + 1;
+        for _ in 0..MAX_ATTEMPTS {
+            let port = self.next_port;
+            self.next_port = if self.next_port == u16::MAX {
+                40000
+            } else {
+                self.next_port + 1
+            };
+            if let std::collections::hash_map::Entry::Vacant(e) = self.allocated.entry(port) {
+                e.insert(key);
+                return Ok(port);
+            }
+        }
+        Err(Error::Nat("Port pool exhausted".to_string()))
     }
 
     fn release(&mut self, port: u16) {
@@ -44,12 +51,13 @@ impl NatTable {
     pub fn new() -> Self {
         Self {
             entries: DashMap::new(),
+            translated_index: DashMap::new(),
             port_pool: RwLock::new(PortPool::new()),
         }
     }
 
-    pub fn create_nat(&self, five_tuple: FiveTuple) -> FiveTuple {
-        let port = self.port_pool.write().allocate(five_tuple.to_flow_key());
+    pub fn create_nat(&self, five_tuple: FiveTuple) -> Result<FiveTuple> {
+        let port = self.port_pool.write().allocate(five_tuple.to_flow_key())?;
 
         let translated = FiveTuple::new(
             std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 100, 1)),
@@ -60,9 +68,12 @@ impl NatTable {
         );
 
         let entry = NatEntry::new(five_tuple, translated);
-        self.entries.insert(five_tuple.to_flow_key(), entry);
+        let original_key = five_tuple.to_flow_key();
+        self.translated_index
+            .insert(translated.to_flow_key(), original_key);
+        self.entries.insert(original_key, entry);
 
-        translated
+        Ok(translated)
     }
 
     pub fn translate_outbound(&self, five_tuple: &FiveTuple) -> Option<FiveTuple> {
@@ -72,14 +83,15 @@ impl NatTable {
     }
 
     pub fn translate_inbound(&self, five_tuple: &FiveTuple) -> Option<FiveTuple> {
-        let reverse = five_tuple.reverse();
-        self.entries
-            .get(&reverse.to_flow_key())
-            .map(|e| e.original)
+        let translated_key = five_tuple.reverse().to_flow_key();
+        let original_key = *self.translated_index.get(&translated_key)?;
+        self.entries.get(&original_key).map(|e| e.original)
     }
 
     pub fn remove(&self, key: &FlowKey) {
         if let Some((_, entry)) = self.entries.remove(key) {
+            self.translated_index
+                .remove(&entry.translated.to_flow_key());
             self.port_pool.write().release(entry.translated.src_port);
         }
     }
@@ -105,6 +117,7 @@ impl NatTable {
 
     pub fn clear(&self) {
         self.entries.clear();
+        self.translated_index.clear();
         self.port_pool.write().allocated.clear();
     }
 }
@@ -112,5 +125,36 @@ impl NatTable {
 impl Default for NatTable {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn translate_inbound_resolves_via_translated_tuple() {
+        let table = NatTable::new();
+        let original = FiveTuple::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 10)),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(93, 184, 216, 34)),
+            42424,
+            443,
+            Protocol::Tcp,
+        );
+
+        let translated = table
+            .create_nat(original)
+            .expect("nat entry should be created");
+        let inbound = FiveTuple::new(
+            translated.dst_ip,
+            translated.src_ip,
+            translated.dst_port,
+            translated.src_port,
+            translated.protocol,
+        );
+
+        assert_eq!(table.translate_outbound(&original), Some(translated));
+        assert_eq!(table.translate_inbound(&inbound), Some(original));
     }
 }

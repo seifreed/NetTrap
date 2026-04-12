@@ -81,9 +81,7 @@ impl TelnetHandler {
         }
 
         let output = match cmd.split_whitespace().next().unwrap_or("") {
-            "ls" => {
-                "bin   dev   etc   lib   mnt   proc  root  sbin  sys   tmp   usr   var\n"
-            }
+            "ls" => "bin   dev   etc   lib   mnt   proc  root  sbin  sys   tmp   usr   var\n",
             "id" => "uid=0(root) gid=0(root)\n",
             "whoami" => "root\n",
             "uname" => "Linux\n",
@@ -101,7 +99,9 @@ impl TelnetHandler {
             "cd" => "", // silent
             "echo" => {
                 let arg = cmd.strip_prefix("echo ").unwrap_or("");
-                let echo_output = format!("{}\n", arg);
+                // Limit echo output to 4KB to prevent memory exhaustion
+                let truncated = if arg.len() > 4096 { &arg[..4096] } else { arg };
+                let echo_output = format!("{}\n", truncated);
                 return self.build_response(&echo_output, cmd);
             }
             "wget" | "curl" | "tftp" | "ftpget" => {
@@ -123,9 +123,7 @@ impl TelnetHandler {
             "free" => {
                 "             total       used       free     shared    buffers     cached\nMem:         61632      12928      48704          0       2292       5828\n"
             }
-            "uptime" => {
-                " 00:00:00 up 1 day,  0:00,  1 user,  load average: 0.00, 0.01, 0.05\n"
-            }
+            "uptime" => " 00:00:00 up 1 day,  0:00,  1 user,  load average: 0.00, 0.01, 0.05\n",
             "enable" | "system" | "shell" | "linuxshell" => {
                 // Common IoT device shell escape commands
                 tracing::info!("TELNET IoT shell escape attempt: {}", cmd);

@@ -19,7 +19,7 @@ nettrap config --defaults > config.toml
 | `output_path` | string | - | Event output file path |
 | `network_mode` | string | `"auto"` | Network mode: singlehost, multihost, auto |
 | `log_hexdump` | bool | `false` | Enable hexdump in logs |
-| `redirect_all_traffic` | bool | `false` | Redirect unbound ports |
+| `redirect_all_traffic` | bool | `false` | Redirect unbound ports to the configured default listener |
 
 ## Listener Options (`[[listeners]]`)
 
@@ -49,10 +49,14 @@ nettrap config --defaults > config.toml
 | `enabled` | bool | `false` | Enable distributed mode |
 | `node_region` | string | `"default"` | Node region tag |
 | `node_tags` | [string] | `[]` | Node labels |
-| `health_bind` | string | - | Health endpoint bind address |
+| `health_bind` | string | - | Health/readiness endpoint bind address (`/health`, `/ready`) |
+| `metrics_bind` | string | - | Metrics endpoint bind address (`/metrics`) |
 | `heartbeat_interval_secs` | u64 | `0` | Heartbeat interval (0=disabled) |
 | `control_plane_url` | string | - | Control plane API URL |
 | `control_plane_token` | string | - | API authentication token |
+
+All distributed features are gated by `distributed.enabled = true`. If it is `false`, health,
+metrics, heartbeat, and event sinks remain disabled even if their sub-options are present.
 
 ### Event Sink Options (`[[distributed.event_sinks]]`)
 

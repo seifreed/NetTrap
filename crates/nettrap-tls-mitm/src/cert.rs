@@ -1,15 +1,19 @@
-use std::io::BufReader;
+use nettrap_core::error::{Error, Result};
+use rustls_pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use std::sync::Arc;
 use tokio_rustls::rustls;
-use nettrap_core::error::{Error, Result};
 
 /// Build a rustls ServerConfig from PEM cert + key strings
-pub fn build_server_config(cert_pem: &str, key_pem: &str, ca_cert_pem: &str) -> Result<Arc<rustls::ServerConfig>> {
-    let certs = rustls_pemfile::certs(&mut BufReader::new(cert_pem.as_bytes()))
+pub fn build_server_config(
+    cert_pem: &str,
+    key_pem: &str,
+    ca_cert_pem: &str,
+) -> Result<Arc<rustls::ServerConfig>> {
+    let certs: Vec<CertificateDer<'_>> = CertificateDer::pem_slice_iter(cert_pem.as_bytes())
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|e| Error::Tls(format!("Failed to parse cert: {}", e)))?;
 
-    let ca_certs = rustls_pemfile::certs(&mut BufReader::new(ca_cert_pem.as_bytes()))
+    let ca_certs: Vec<CertificateDer<'_>> = CertificateDer::pem_slice_iter(ca_cert_pem.as_bytes())
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|e| Error::Tls(format!("Failed to parse CA cert: {}", e)))?;
 
@@ -17,9 +21,8 @@ pub fn build_server_config(cert_pem: &str, key_pem: &str, ca_cert_pem: &str) -> 
     let mut full_chain = certs;
     full_chain.extend(ca_certs);
 
-    let key = rustls_pemfile::private_key(&mut BufReader::new(key_pem.as_bytes()))
-        .map_err(|e| Error::Tls(format!("Failed to parse key: {}", e)))?
-        .ok_or_else(|| Error::Tls("No private key found in PEM".into()))?;
+    let key = PrivateKeyDer::from_pem_slice(key_pem.as_bytes())
+        .map_err(|e| Error::Tls(format!("Failed to parse key: {}", e)))?;
 
     // Install ring as the crypto provider if not already set
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -57,42 +60,68 @@ pub fn extract_sni(data: &[u8]) -> Option<String> {
     let mut pos = 38;
 
     // Session ID
-    if pos >= handshake.len() { return None; }
+    if pos >= handshake.len() {
+        return None;
+    }
     let session_id_len = handshake[pos] as usize;
+    if pos + 1 + session_id_len > handshake.len() {
+        return None;
+    }
     pos += 1 + session_id_len;
 
     // Cipher suites
-    if pos + 2 > handshake.len() { return None; }
+    if pos + 2 > handshake.len() {
+        return None;
+    }
     let cipher_len = u16::from_be_bytes([handshake[pos], handshake[pos + 1]]) as usize;
+    if pos + 2 + cipher_len > handshake.len() {
+        return None;
+    }
     pos += 2 + cipher_len;
 
     // Compression methods
-    if pos >= handshake.len() { return None; }
+    if pos >= handshake.len() {
+        return None;
+    }
     let comp_len = handshake[pos] as usize;
+    if pos + 1 + comp_len > handshake.len() {
+        return None;
+    }
     pos += 1 + comp_len;
 
     // Extensions
-    if pos + 2 > handshake.len() { return None; }
+    if pos + 2 > handshake.len() {
+        return None;
+    }
     let ext_len = u16::from_be_bytes([handshake[pos], handshake[pos + 1]]) as usize;
     pos += 2;
 
-    let ext_end = pos + ext_len;
+    let ext_end = (pos + ext_len).min(handshake.len());
     while pos + 4 <= ext_end && pos + 4 <= handshake.len() {
         let ext_type = u16::from_be_bytes([handshake[pos], handshake[pos + 1]]);
         let ext_data_len = u16::from_be_bytes([handshake[pos + 2], handshake[pos + 3]]) as usize;
         pos += 4;
 
-        if ext_type == 0x0000 { // SNI extension
-            if pos + 2 > handshake.len() { return None; }
+        if ext_type == 0x0000 {
+            // SNI extension
+            if pos + 2 > handshake.len() {
+                return None;
+            }
             let _sni_list_len = u16::from_be_bytes([handshake[pos], handshake[pos + 1]]) as usize;
             pos += 2;
-            if pos >= handshake.len() { return None; }
+            if pos >= handshake.len() {
+                return None;
+            }
             let _sni_type = handshake[pos];
             pos += 1;
-            if pos + 2 > handshake.len() { return None; }
+            if pos + 2 > handshake.len() {
+                return None;
+            }
             let name_len = u16::from_be_bytes([handshake[pos], handshake[pos + 1]]) as usize;
             pos += 2;
-            if pos + name_len > handshake.len() { return None; }
+            if pos + name_len > handshake.len() {
+                return None;
+            }
             return String::from_utf8(handshake[pos..pos + name_len].to_vec()).ok();
         }
 

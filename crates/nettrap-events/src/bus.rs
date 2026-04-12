@@ -47,7 +47,14 @@ impl EventBus {
             stats: parking_lot::RwLock::new(EventBusStats::default()),
         }
     }
-    
+
+    /// Creates an unbounded event bus.
+    ///
+    /// # Warning
+    /// Unbounded channels can grow without limit if producers outpace consumers,
+    /// potentially causing memory exhaustion. Prefer `new()` with a bounded buffer
+    /// for production use, or ensure consumers process events at least as fast as
+    /// producers generate them.
     pub fn new_unbounded() -> Self {
         let (sender, receiver) = crossbeam::channel::unbounded();
         Self {
@@ -58,16 +65,28 @@ impl EventBus {
             stats: parking_lot::RwLock::new(EventBusStats::default()),
         }
     }
-    
+
     pub fn emit(&self, event: Event) {
-        if self.config.drop_on_full {
-            let _ = self.sender.try_send(event);
-        } else {
-            let _ = self.sender.send(event);
+        // Always use try_send to avoid blocking the async runtime.
+        // crossbeam send() is a blocking call unsafe in async context.
+        let result = self.sender.try_send(event).map_err(|_| ());
+
+        match result {
+            Ok(()) => {
+                self.stats.write().events_emitted += 1;
+            }
+            Err(()) => {
+                let mut stats = self.stats.write();
+                stats.events_dropped += 1;
+                // Log periodically to avoid log flooding
+                if stats.events_dropped % 1000 == 1 {
+                    drop(stats);
+                    tracing::warn!("Event bus dropping events — channel full or closed");
+                }
+            }
         }
-        self.stats.write().events_emitted += 1;
     }
-    
+
     pub fn try_emit(&self, event: Event) -> bool {
         if self.sender.try_send(event).is_ok() {
             self.stats.write().events_emitted += 1;
@@ -77,25 +96,25 @@ impl EventBus {
             false
         }
     }
-    
+
     pub fn subscribe(&self) -> EventReceiver {
         self.receiver.clone()
     }
-    
+
     pub fn sender(&self) -> EventSender {
         self.sender.clone()
     }
-    
+
     pub fn register_handler(&self, handler: EventHandler) -> EventHandlerId {
         let id = EventHandlerId::new_v4();
         self.handlers.write().insert(id, handler);
         id
     }
-    
+
     pub fn unregister_handler(&self, id: EventHandlerId) {
         self.handlers.write().remove(&id);
     }
-    
+
     pub async fn process(&self) -> Result<()> {
         while let Ok(event) = self.receiver.recv() {
             self.dispatch_to_handlers(&event)?;
@@ -103,7 +122,7 @@ impl EventBus {
         }
         Ok(())
     }
-    
+
     pub fn process_blocking(&self) -> Result<()> {
         while let Ok(event) = self.receiver.recv() {
             self.dispatch_to_handlers(&event)?;
@@ -111,7 +130,7 @@ impl EventBus {
         }
         Ok(())
     }
-    
+
     fn dispatch_to_handlers(&self, event: &Event) -> Result<()> {
         let handlers = self.handlers.read();
         for handler in handlers.values() {
@@ -123,11 +142,11 @@ impl EventBus {
         }
         Ok(())
     }
-    
+
     pub fn stats(&self) -> EventBusStats {
         self.stats.read().clone()
     }
-    
+
     pub fn clear_handlers(&self) {
         self.handlers.write().clear();
     }
@@ -156,19 +175,19 @@ impl BufferedEventBus {
             inner: std::sync::Arc::new(EventBus::new(config)),
         }
     }
-    
+
     pub fn emit(&self, event: Event) {
         self.inner.try_emit(event);
     }
-    
+
     pub fn subscribe(&self) -> EventReceiver {
         self.inner.subscribe()
     }
-    
+
     pub fn sender(&self) -> EventSender {
         self.inner.sender()
     }
-    
+
     pub fn stats(&self) -> EventBusStats {
         self.inner.stats()
     }

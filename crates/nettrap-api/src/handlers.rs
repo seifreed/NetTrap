@@ -1,15 +1,29 @@
-use axum::{
-    Router,
-    routing::get,
-    response::Json,
-    extract::State,
-};
+use axum::{Router, extract::State, response::Json, routing::get};
 use std::sync::Arc;
 
-use nettrap_flow::Flow;
+use nettrap_flow::FlowManager;
+
+use crate::health::RuntimeHealth;
 
 pub struct ApiState {
-    pub flows: parking_lot::RwLock<Vec<Flow>>,
+    pub flow_manager: Arc<FlowManager>,
+    pub runtime_health: Arc<RuntimeHealth>,
+}
+
+impl ApiState {
+    pub fn new(flow_manager: Arc<FlowManager>) -> Self {
+        Self::with_runtime_health(flow_manager, Arc::new(RuntimeHealth::new()))
+    }
+
+    pub fn with_runtime_health(
+        flow_manager: Arc<FlowManager>,
+        runtime_health: Arc<RuntimeHealth>,
+    ) -> Self {
+        Self {
+            flow_manager,
+            runtime_health,
+        }
+    }
 }
 
 pub fn create_router(state: ApiState) -> Router {
@@ -20,17 +34,13 @@ pub fn create_router(state: ApiState) -> Router {
         .with_state(Arc::new(state))
 }
 
-pub async fn health_handler() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "status": "ok",
-        "version": "0.1.0"
-    }))
+pub async fn health_handler(State(state): State<Arc<ApiState>>) -> Json<serde_json::Value> {
+    let health = state.runtime_health.snapshot();
+    Json(crate::runtime_health_payload(&health))
 }
 
-pub async fn flows_handler(
-    State(state): State<Arc<ApiState>>
-) -> Json<serde_json::Value> {
-    let flows = state.flows.read();
+pub async fn flows_handler(State(state): State<Arc<ApiState>>) -> Json<serde_json::Value> {
+    let flows: Vec<_> = state.flow_manager.iter().collect();
     Json(serde_json::json!({
         "flows": flows.iter().map(|f| {
             serde_json::json!({
@@ -45,12 +55,91 @@ pub async fn flows_handler(
     }))
 }
 
-pub async fn stats_handler(
-    State(state): State<Arc<ApiState>>
-) -> Json<serde_json::Value> {
-    let flows = state.flows.read();
+pub async fn stats_handler(State(state): State<Arc<ApiState>>) -> Json<serde_json::Value> {
+    let flows: Vec<_> = state.flow_manager.iter().collect();
     Json(serde_json::json!({
-        "total_flows": flows.len(),
+        "total_flows": state.flow_manager.active_count(),
         "total_bytes": flows.iter().map(|f| f.metadata.bytes_sent + f.metadata.bytes_received).sum::<u64>(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::Arc;
+
+    use super::*;
+    use nettrap_core::prelude::{FiveTuple, Protocol};
+
+    fn test_state() -> (Arc<ApiState>, Arc<FlowManager>, Arc<RuntimeHealth>) {
+        let manager = Arc::new(FlowManager::default());
+        let runtime_health = Arc::new(RuntimeHealth::new());
+        let state = Arc::new(ApiState::with_runtime_health(
+            Arc::clone(&manager),
+            Arc::clone(&runtime_health),
+        ));
+        (state, manager, runtime_health)
+    }
+
+    fn insert_flow(
+        manager: &Arc<FlowManager>,
+        src_port: u16,
+        dst_port: u16,
+        sent: u64,
+        received: u64,
+    ) {
+        let flow = manager.get_or_create(FiveTuple::new(
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)),
+            src_port,
+            dst_port,
+            Protocol::Tcp,
+        ));
+        manager
+            .update(&flow.key(), |flow| {
+                flow.metadata.bytes_sent = sent;
+                flow.metadata.bytes_received = received;
+            })
+            .expect("flow should exist");
+    }
+
+    #[tokio::test]
+    async fn flows_handler_reads_live_flow_manager_state() {
+        let (state, manager, _) = test_state();
+
+        insert_flow(&manager, 53000, 443, 128, 256);
+
+        let response = flows_handler(State(state)).await.0;
+        let flows = response["flows"].as_array().expect("flows array");
+
+        assert_eq!(flows.len(), 1);
+        assert_eq!(flows[0]["bytes_sent"], 128);
+        assert_eq!(flows[0]["bytes_received"], 256);
+    }
+
+    #[tokio::test]
+    async fn stats_handler_reflects_flows_added_after_state_creation() {
+        let (state, manager, _) = test_state();
+
+        insert_flow(&manager, 53001, 80, 10, 20);
+        insert_flow(&manager, 53002, 53, 30, 40);
+
+        let response = stats_handler(State(state)).await.0;
+
+        assert_eq!(response["total_flows"], 2);
+        assert_eq!(response["total_bytes"], 100);
+    }
+
+    #[tokio::test]
+    async fn health_handler_reports_listener_failure() {
+        let (state, _, runtime_health) = test_state();
+        runtime_health.register_listener("dns", "udp", 53);
+        runtime_health.mark_listener_failed("dns", "bind failed");
+
+        let response = health_handler(State(state)).await.0;
+
+        assert_eq!(response["status"], "error");
+        assert_eq!(response["fatal_error"], "bind failed");
+        assert_eq!(response["listeners"][0]["state"], "failed");
+    }
 }

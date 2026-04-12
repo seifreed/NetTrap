@@ -8,9 +8,9 @@
 mod tests {
     #[cfg(target_os = "linux")]
     mod linux_tests {
-        use nettrap_interceptor::platform::DefaultInterceptor;
         use nettrap_interceptor::Interceptor;
         use nettrap_interceptor::InterceptorConfig;
+        use nettrap_interceptor::platform::DefaultInterceptor;
 
         #[test]
         fn test_interceptor_creation() {
@@ -35,9 +35,9 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     mod macos_tests {
-        use nettrap_interceptor::platform::DefaultInterceptor;
         use nettrap_interceptor::Interceptor;
         use nettrap_interceptor::InterceptorConfig;
+        use nettrap_interceptor::platform::DefaultInterceptor;
 
         #[test]
         fn test_pcap_creation() {
@@ -62,9 +62,9 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     mod windows_tests {
-        use nettrap_interceptor::platform::DefaultInterceptor;
         use nettrap_interceptor::Interceptor;
         use nettrap_interceptor::InterceptorConfig;
+        use nettrap_interceptor::platform::DefaultInterceptor;
 
         #[test]
         fn test_interceptor_creation() {
