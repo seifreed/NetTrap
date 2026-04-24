@@ -98,19 +98,11 @@ impl CustomResponseConfig {
 
     /// Find matching rule for a request
     pub fn find_match(&self, host: &str, uri: &str) -> Option<&CustomResponseRule> {
-        let host_lower = host.to_lowercase();
-
         for rule in &self.rules {
-            let host_match = rule.hosts.is_empty()
-                || rule
-                    .hosts
-                    .iter()
-                    .any(|h| h == "*" || host_lower.contains(h));
-            let uri_match = rule.uris.is_empty()
-                || rule
-                    .uris
-                    .iter()
-                    .any(|u| u == "*" || uri.ends_with(u) || uri.contains(u));
+            let host_match =
+                rule.hosts.is_empty() || rule.hosts.iter().any(|h| host_matches_pattern(host, h));
+            let uri_match =
+                rule.uris.is_empty() || rule.uris.iter().any(|u| uri_matches_pattern(uri, u));
 
             // If both specified, both must match (conjunctive)
             // If only one specified, that one must match
@@ -127,13 +119,24 @@ impl CustomResponseConfig {
 
     /// Build HTTP response from matched rule
     pub fn build_response(&self, host: &str, uri: &str) -> Option<Vec<u8>> {
-        let rule = self.find_match(host, uri)?;
+        self.build_response_for_request(host, uri, uri)
+    }
+
+    /// Build an HTTP response using a normalized routing URI while preserving the
+    /// original request target for template variables.
+    pub fn build_response_for_request(
+        &self,
+        host: &str,
+        route_uri: &str,
+        request_target: &str,
+    ) -> Option<Vec<u8>> {
+        let rule = self.find_match(host, route_uri)?;
         let date = crate::faketime::fake_now().format("%a, %d %b %Y %H:%M:%S GMT");
 
         // Build template variables for the template engine
         let mut vars = std::collections::HashMap::new();
         vars.insert("host".to_string(), host.to_string());
-        vars.insert("uri".to_string(), uri.to_string());
+        vars.insert("uri".to_string(), request_target.to_string());
         vars.insert("server".to_string(), "NetTrap".to_string());
 
         match &rule.response {
@@ -179,5 +182,84 @@ impl CustomResponseConfig {
                 Some(response)
             }
         }
+    }
+}
+
+pub(crate) fn host_matches_pattern(host: &str, pattern: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+
+    let host = normalize_http_host(host);
+    let pattern = pattern.trim().trim_end_matches('.').to_ascii_lowercase();
+    host == pattern || host.ends_with(&format!(".{}", pattern))
+}
+
+fn normalize_http_host(host: &str) -> String {
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+
+    if let Some(stripped) = host.strip_prefix('[') {
+        if let Some(end_bracket) = stripped.find(']') {
+            return stripped[..end_bracket].to_string();
+        }
+    }
+
+    if let Some((base, port)) = host.rsplit_once(':') {
+        if !base.contains(':') && !base.is_empty() && port.chars().all(|ch| ch.is_ascii_digit()) {
+            return base.to_string();
+        }
+    }
+
+    host
+}
+
+fn uri_matches_pattern(uri: &str, pattern: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+
+    if pattern.starts_with('.') {
+        return uri.ends_with(pattern);
+    }
+
+    uri == pattern
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CustomResponseConfig, host_matches_pattern, uri_matches_pattern};
+
+    #[test]
+    fn host_matches_are_exact_or_subdomain_only() {
+        assert!(host_matches_pattern("evil.com", "evil.com"));
+        assert!(host_matches_pattern("api.evil.com", "evil.com"));
+        assert!(host_matches_pattern("evil.com:8080", "evil.com"));
+        assert!(!host_matches_pattern("notevil.com", "evil.com"));
+        assert!(!host_matches_pattern("evil.com.attacker.test", "evil.com"));
+    }
+
+    #[test]
+    fn uri_matches_use_exact_paths_or_suffix_patterns() {
+        assert!(uri_matches_pattern("/gate", "/gate"));
+        assert!(!uri_matches_pattern("/delegate", "/gate"));
+        assert!(uri_matches_pattern("/dropper.exe", ".exe"));
+        assert!(!uri_matches_pattern("/dropper.dll", ".exe"));
+    }
+
+    #[test]
+    fn custom_response_matching_uses_safe_host_and_uri_semantics() {
+        let config = CustomResponseConfig::parse(
+            "host=evil.com;uri=/gate;type=static;body=OK||host=*;uri=.exe;type=static;body=BIN",
+        );
+
+        let exact = config.find_match("evil.com", "/gate");
+        assert!(exact.is_some());
+
+        let subdomain = config.find_match("api.evil.com", "/gate");
+        assert!(subdomain.is_some());
+
+        assert!(config.find_match("notevil.com", "/gate").is_none());
+        assert!(config.find_match("evil.com", "/delegate").is_none());
+        assert!(config.find_match("evil.com", "/payload.exe").is_some());
     }
 }

@@ -9,7 +9,9 @@
 //! - [`dump_http_post`]: Dump HTTP POST data to file
 //! - [`extract_http_host`]: Extract Host header from HTTP request
 //! - [`extract_http_method`]: Extract HTTP method from request
+//! - [`extract_http_target`]: Extract the original request target from HTTP request
 //! - [`extract_http_path`]: Extract path from HTTP request
+//! - [`extract_http_body`]: Extract HTTP body bytes from a complete request
 //! - [`build_http_response_with_version`]: Build simple HTTP 200 response
 //! - [`build_http_response_with_fakefile`]: Build HTTP response with fake file content
 
@@ -141,7 +143,7 @@ pub fn extract_http_method(data: &[u8]) -> String {
 /// # Returns
 ///
 /// The request path (defaults to "/" if parsing fails).
-pub fn extract_http_path(data: &[u8]) -> String {
+pub fn extract_http_target(data: &[u8]) -> String {
     let text = std::str::from_utf8(data).unwrap_or("");
     if let Some(first_line) = text.lines().next() {
         let parts: Vec<&str> = first_line.split_whitespace().collect();
@@ -150,6 +152,114 @@ pub fn extract_http_path(data: &[u8]) -> String {
         }
     }
     "/".to_string()
+}
+
+pub fn extract_http_path(data: &[u8]) -> String {
+    normalize_http_path(&extract_http_target(data))
+}
+
+/// Extract the HTTP body from a complete request.
+///
+/// Returns `None` when the request is incomplete or uses invalid body framing.
+/// Requests without explicit body framing are treated as headers-only and
+/// return an empty body.
+pub fn extract_http_body(data: &[u8]) -> Option<Vec<u8>> {
+    let header_end = find_subslice(data, b"\r\n\r\n")?;
+    let body_start = header_end + 4;
+    let headers = &data[..body_start];
+
+    if let Some(transfer_encoding) = find_header_value(headers, "Transfer-Encoding") {
+        if !transfer_encoding
+            .split(',')
+            .any(|value| value.trim().eq_ignore_ascii_case("chunked"))
+        {
+            return None;
+        }
+        return decode_chunked_body(&data[body_start..]).map(|(_, body)| body);
+    }
+
+    if let Some(content_length_raw) = find_header_value(headers, "Content-Length") {
+        let content_length = content_length_raw.parse::<usize>().ok()?;
+        let body_end = body_start.checked_add(content_length)?;
+        if data.len() < body_end {
+            return None;
+        }
+        return Some(data[body_start..body_end].to_vec());
+    }
+
+    Some(Vec::new())
+}
+
+fn normalize_http_path(target: &str) -> String {
+    let path = if let Some(rest) = target
+        .strip_prefix("http://")
+        .or_else(|| target.strip_prefix("https://"))
+    {
+        rest.find('/').map(|pos| &rest[pos..]).unwrap_or("/")
+    } else {
+        target
+    };
+
+    let path = path.split('#').next().unwrap_or(path);
+    let path = path.split('?').next().unwrap_or(path);
+
+    if path.is_empty() {
+        "/".to_string()
+    } else {
+        path.to_string()
+    }
+}
+
+fn find_header_value<'a>(headers: &'a [u8], name: &str) -> Option<&'a str> {
+    let headers = std::str::from_utf8(headers).ok()?;
+    headers.lines().find_map(|line| {
+        let (header_name, value) = line.split_once(':')?;
+        if header_name.trim().eq_ignore_ascii_case(name) {
+            Some(value.trim())
+        } else {
+            None
+        }
+    })
+}
+
+fn decode_chunked_body(data: &[u8]) -> Option<(usize, Vec<u8>)> {
+    let mut pos = 0usize;
+    let mut body = Vec::new();
+
+    loop {
+        let line_end = pos + find_subslice(&data[pos..], b"\r\n")?;
+        let chunk_header = std::str::from_utf8(&data[pos..line_end]).ok()?;
+        let chunk_size = usize::from_str_radix(chunk_header.split(';').next()?.trim(), 16).ok()?;
+        pos = line_end + 2;
+
+        if chunk_size == 0 {
+            let trailers = &data[pos..];
+            if trailers.starts_with(b"\r\n") {
+                return Some((pos + 2, body));
+            }
+
+            let trailer_end = find_subslice(trailers, b"\r\n\r\n")?;
+            return Some((pos + trailer_end + 4, body));
+        }
+
+        let data_end = pos.checked_add(chunk_size)?;
+        if data.len() < data_end + 2 {
+            return None;
+        }
+
+        if &data[data_end..data_end + 2] != b"\r\n" {
+            return None;
+        }
+
+        body.extend_from_slice(&data[pos..data_end]);
+        pos = data_end + 2;
+    }
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 /// Build a simple HTTP 200 OK response with server version header.
@@ -295,14 +405,48 @@ mod tests {
     #[test]
     fn test_extract_http_path() {
         let data = b"GET /path/to/resource?q=1 HTTP/1.1\r\n\r\n";
-        assert_eq!(extract_http_path(data), "/path/to/resource?q=1");
+        assert_eq!(extract_http_target(data), "/path/to/resource?q=1");
+        assert_eq!(extract_http_path(data), "/path/to/resource");
 
         let data2 = b"GET / HTTP/1.1\r\n\r\n";
         assert_eq!(extract_http_path(data2), "/");
 
+        let data2b = b"GET /wpad.dat?x=1 HTTP/1.1\r\n\r\n";
+        assert_eq!(extract_http_path(data2b), "/wpad.dat");
+
+        let data2c = b"GET http://example.test/index.html?v=1#frag HTTP/1.1\r\n\r\n";
+        assert_eq!(extract_http_path(data2c), "/index.html");
+
         let data3 = b"GET\r\n\r\n";
         let result = extract_http_path(data3);
         assert!(result.is_empty() || result == "/");
+    }
+
+    #[test]
+    fn test_extract_http_body() {
+        let request =
+            b"POST /upload HTTP/1.1\r\nHost: example.test\r\nContent-Length: 5\r\n\r\nhello";
+        assert_eq!(extract_http_body(request), Some(b"hello".to_vec()));
+
+        let chunked =
+            b"POST /upload HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\n\r\n4\r\ntest\r\n0\r\n\r\n";
+        assert_eq!(extract_http_body(chunked), Some(b"test".to_vec()));
+
+        let truncated =
+            b"POST /upload HTTP/1.1\r\nHost: example.test\r\nContent-Length: 5\r\n\r\nhel";
+        assert!(extract_http_body(truncated).is_none());
+
+        let invalid_length =
+            b"POST /upload HTTP/1.1\r\nHost: example.test\r\nContent-Length: abc\r\n\r\nhello";
+        assert!(extract_http_body(invalid_length).is_none());
+
+        let unsupported_encoding =
+            b"POST /upload HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: gzip\r\n\r\nhello";
+        assert!(extract_http_body(unsupported_encoding).is_none());
+
+        let coalesced =
+            b"GET /a HTTP/1.1\r\nHost: example.test\r\n\r\nGET /b HTTP/1.1\r\nHost: example.test\r\n\r\n";
+        assert_eq!(extract_http_body(coalesced), Some(Vec::new()));
     }
 
     #[test]

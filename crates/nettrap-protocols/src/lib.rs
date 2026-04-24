@@ -55,6 +55,7 @@ pub mod tcp {
     pub use nettrap_proto_irc::IrcHandler;
     pub use nettrap_proto_ldap::LdapHandler;
     pub use nettrap_proto_memcached::MemcachedHandler;
+    pub use nettrap_proto_mqtt::MqttHandler;
     pub use nettrap_proto_mysql::MysqlHandler;
     pub use nettrap_proto_nkn::NknHandler;
     pub use nettrap_proto_pop3::Pop3Handler;
