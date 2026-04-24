@@ -299,6 +299,16 @@ impl DnsHandler {
                 .into_iter()
                 .filter_map(|ip| ip.parse().ok())
                 .collect::<Vec<_>>()
+        } else if let Some(ref default_ip) = self.default_response_ip {
+            if let Ok(ip) = default_ip.parse::<std::net::IpAddr>() {
+                vec![ip]
+            } else if self.wildcard_response {
+                vec![std::net::IpAddr::V6(std::net::Ipv6Addr::new(
+                    0xfd00, 0, 0, 0, 0, 0, 0, 1,
+                ))]
+            } else {
+                vec![]
+            }
         } else if self.wildcard_response {
             vec![std::net::IpAddr::V6(std::net::Ipv6Addr::new(
                 0xfd00, 0, 0, 0, 0, 0, 0, 1,

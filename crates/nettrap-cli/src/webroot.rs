@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 const MAX_FILE_RESPONSE_BYTES: u64 = 10 * 1024 * 1024;
@@ -7,6 +8,12 @@ enum WebrootServeResult {
     Found { content: Vec<u8>, mime: String },
     TooLarge,
     NotFound,
+}
+
+enum LimitedFileRead {
+    Content(Vec<u8>),
+    TooLarge,
+    NotFile,
 }
 
 /// Serves files from a webroot directory with MIME type detection
@@ -117,24 +124,20 @@ impl WebrootServer {
     }
 
     fn read_candidate(&self, candidate: &Path) -> WebrootServeResult {
-        match candidate.metadata() {
-            Ok(meta) if meta.len() > MAX_FILE_RESPONSE_BYTES => {
+        match read_limited_file(candidate, MAX_FILE_RESPONSE_BYTES) {
+            Ok(LimitedFileRead::Content(content)) => WebrootServeResult::Found {
+                mime: self.mime_for_path(candidate),
+                content,
+            },
+            Ok(LimitedFileRead::TooLarge) => {
                 tracing::warn!(
-                    "Webroot file {:?} exceeds response size limit ({} > {})",
+                    "Webroot file {:?} exceeds response size limit (>{})",
                     candidate,
-                    meta.len(),
                     MAX_FILE_RESPONSE_BYTES
                 );
                 WebrootServeResult::TooLarge
             }
-            Ok(meta) if meta.is_file() => match std::fs::read(candidate) {
-                Ok(content) => WebrootServeResult::Found {
-                    mime: self.mime_for_path(candidate),
-                    content,
-                },
-                Err(_) => WebrootServeResult::NotFound,
-            },
-            _ => WebrootServeResult::NotFound,
+            Ok(LimitedFileRead::NotFile) | Err(_) => WebrootServeResult::NotFound,
         }
     }
 
@@ -236,6 +239,26 @@ fn simple_http_response(code: u16, reason: &str, body: &str) -> Vec<u8> {
         body
     )
     .into_bytes()
+}
+
+fn read_limited_file(path: &Path, max_bytes: u64) -> std::io::Result<LimitedFileRead> {
+    let file = std::fs::File::open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Ok(LimitedFileRead::NotFile);
+    }
+    if metadata.len() > max_bytes {
+        return Ok(LimitedFileRead::TooLarge);
+    }
+
+    let mut limited = file.take(max_bytes + 1);
+    let mut content = Vec::new();
+    limited.read_to_end(&mut content)?;
+    if content.len() as u64 > max_bytes {
+        return Ok(LimitedFileRead::TooLarge);
+    }
+
+    Ok(LimitedFileRead::Content(content))
 }
 
 /// Generate a fake file with appropriate content and MIME type for a given extension.
@@ -534,6 +557,22 @@ mod tests {
         let response = WebrootServer::new(&root).build_http_response("/large.bin");
 
         assert!(response.starts_with(b"HTTP/1.1 413 Payload Too Large"));
+        std::fs::remove_dir_all(root).expect("cleanup temp root");
+    }
+
+    #[test]
+    fn build_http_response_allows_webroot_file_at_size_limit() {
+        let root = unique_temp_dir("nettrap-webroot-limit-ok");
+        std::fs::create_dir_all(&root).expect("create temp root");
+        let path = root.join("limit.bin");
+        let file = std::fs::File::create(&path).expect("create sparse file");
+        file.set_len(MAX_FILE_RESPONSE_BYTES)
+            .expect("extend sparse file");
+
+        let response = WebrootServer::new(&root).build_http_response("/limit.bin");
+
+        assert!(response.starts_with(b"HTTP/1.1 200 OK"));
+        assert!(String::from_utf8_lossy(&response[..128]).contains("Content-Length: 10485760"));
         std::fs::remove_dir_all(root).expect("cleanup temp root");
     }
 

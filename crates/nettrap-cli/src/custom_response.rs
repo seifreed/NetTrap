@@ -1,5 +1,8 @@
-/// Custom response configuration for HTTP listeners.
-/// Supports matching by host and/or URI, with multiple response types.
+//! Custom response configuration for HTTP listeners.
+//! Supports matching by host and/or URI, with multiple response types.
+use std::io::Read;
+use std::path::Path;
+
 const MAX_CUSTOM_RESPONSE_FILE_BYTES: u64 = 10 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
@@ -27,6 +30,12 @@ pub enum CustomResponseType {
     HttpStaticString(String),
     /// Base64-decoded binary response
     HttpBase64(Vec<u8>),
+}
+
+enum LimitedFileRead {
+    Content(Vec<u8>),
+    TooLarge,
+    NotFile,
 }
 
 impl CustomResponseConfig {
@@ -142,35 +151,24 @@ impl CustomResponseConfig {
         vars.insert("server".to_string(), "NetTrap".to_string());
 
         match &rule.response {
-            CustomResponseType::HttpRawFile(path) => match std::fs::metadata(path) {
-                Ok(meta) if meta.len() > MAX_CUSTOM_RESPONSE_FILE_BYTES => {
-                    tracing::warn!(
-                        "Custom response file {} exceeds response size limit ({} > {})",
-                        path,
-                        meta.len(),
-                        MAX_CUSTOM_RESPONSE_FILE_BYTES
-                    );
-                    Some(payload_too_large_response(&date.to_string()))
-                }
-                Ok(meta) if meta.is_file() => match std::fs::read(path) {
-                    Ok(content) => {
-                        let content_str = String::from_utf8_lossy(&content);
-                        // Support both legacy <RAW-DATE> and new {{date:...}} templates
-                        let replaced = content_str.replace("<RAW-DATE>", &date.to_string());
-                        let rendered = crate::template::render_template(&replaced, &vars);
-                        Some(rendered.into_bytes())
+            CustomResponseType::HttpRawFile(path) => {
+                match read_limited_file(Path::new(path), MAX_CUSTOM_RESPONSE_FILE_BYTES) {
+                    Ok(LimitedFileRead::Content(content)) => Some(content),
+                    Ok(LimitedFileRead::TooLarge) => {
+                        tracing::warn!(
+                            "Custom response file {} exceeds response size limit (>{})",
+                            path,
+                            MAX_CUSTOM_RESPONSE_FILE_BYTES
+                        );
+                        Some(payload_too_large_response(&date.to_string()))
                     }
+                    Ok(LimitedFileRead::NotFile) => None,
                     Err(e) => {
                         tracing::warn!("Failed to read custom response file {}: {}", path, e);
                         None
                     }
-                },
-                Ok(_) => None,
-                Err(e) => {
-                    tracing::warn!("Failed to inspect custom response file {}: {}", path, e);
-                    None
                 }
-            },
+            }
             CustomResponseType::HttpStaticString(body) => {
                 let ct = rule.content_type.as_deref().unwrap_or("text/html");
                 // Support both legacy <RAW-DATE> and new {{date:...}} templates
@@ -210,6 +208,26 @@ fn payload_too_large_response(date: &str) -> Vec<u8> {
         body
     )
     .into_bytes()
+}
+
+fn read_limited_file(path: &Path, max_bytes: u64) -> std::io::Result<LimitedFileRead> {
+    let file = std::fs::File::open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Ok(LimitedFileRead::NotFile);
+    }
+    if metadata.len() > max_bytes {
+        return Ok(LimitedFileRead::TooLarge);
+    }
+
+    let mut limited = file.take(max_bytes + 1);
+    let mut content = Vec::new();
+    limited.read_to_end(&mut content)?;
+    if content.len() as u64 > max_bytes {
+        return Ok(LimitedFileRead::TooLarge);
+    }
+
+    Ok(LimitedFileRead::Content(content))
 }
 
 pub(crate) fn host_matches_pattern(host: &str, pattern: &str) -> bool {
@@ -312,6 +330,27 @@ mod tests {
             .expect("matching file rule should respond");
 
         assert!(response.starts_with(b"HTTP/1.1 413 Payload Too Large"));
+        std::fs::remove_dir_all(root).expect("cleanup temp root");
+    }
+
+    #[test]
+    fn custom_response_file_preserves_raw_bytes() {
+        let root = std::env::temp_dir().join(format!(
+            "nettrap-custom-response-raw-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).expect("create temp root");
+        let path = root.join("raw.http");
+        let content = b"HTTP/1.1 200 OK\r\nContent-Length: 18\r\n\r\n\xff<RAW-DATE>{{host}}";
+        std::fs::write(&path, content).expect("write raw response");
+        let config =
+            CustomResponseConfig::parse(&format!("host=*;uri=*;type=file;path={}", path.display()));
+
+        let response = config
+            .build_response_for_request("example.com", "/", "/")
+            .expect("matching file rule should respond");
+
+        assert_eq!(response, content);
         std::fs::remove_dir_all(root).expect("cleanup temp root");
     }
 }

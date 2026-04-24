@@ -66,11 +66,11 @@ fn client_hello_version(data: &[u8]) -> Option<u16> {
     Some(u16::from_be_bytes([data[9], data[10]]))
 }
 
-/// Compute the byte offset where TLS extensions begin in a ClientHello.
+/// Compute the byte range containing TLS extensions in a ClientHello.
 /// Layout: record_header(5) + handshake_header(4) + client_version(2) + random(32)
 ///         + session_id_len(1) + session_id(var) + cipher_suites_len(2) + cipher_suites(var)
 ///         + compression_len(1) + compression(var) + extensions_len(2)
-fn find_extensions_start(data: &[u8]) -> Option<usize> {
+fn find_extensions_range(data: &[u8]) -> Option<std::ops::Range<usize>> {
     if data.len() < 44 || data[0] != 0x16 || data[1] != 0x03 || data[5] != 0x01 {
         return None;
     }
@@ -105,68 +105,99 @@ fn find_extensions_start(data: &[u8]) -> Option<usize> {
     if pos + 2 > data.len() {
         return None;
     }
-    let _extensions_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+    let extensions_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
     pos += 2; // now pos points to the first extension
 
-    Some(pos)
+    let end = pos.checked_add(extensions_len)?;
+    if end > data.len() {
+        return None;
+    }
+
+    Some(pos..end)
 }
 
 pub fn extract_sni(data: &[u8]) -> Option<String> {
-    let mut pos = find_extensions_start(data)?;
+    let extensions = find_extensions_range(data)?;
+    let mut pos = extensions.start;
 
-    while pos + 4 <= data.len() {
+    while pos + 4 <= extensions.end {
         let ext_type = u16::from_be_bytes([data[pos], data[pos + 1]]);
         let ext_len = u16::from_be_bytes([data[pos + 2], data[pos + 3]]) as usize;
+        let ext_data_start = pos + 4;
+        let ext_data_end = ext_data_start.checked_add(ext_len)?;
+        if ext_data_end > extensions.end {
+            return None;
+        }
 
         if ext_type == 0x0000 {
-            let inner_start = pos + 4;
-            if inner_start + 5 > data.len() {
+            let ext_data = &data[ext_data_start..ext_data_end];
+            if ext_data.len() < 5 {
                 return None;
             }
-            let _sni_len = u16::from_be_bytes([data[inner_start], data[inner_start + 1]]) as usize;
-            let _hostname_type = data[inner_start + 2];
-            let hostname_len =
-                u16::from_be_bytes([data[inner_start + 3], data[inner_start + 4]]) as usize;
-            let hostname_start = inner_start + 5;
 
-            if hostname_start + hostname_len <= data.len() {
-                return std::str::from_utf8(&data[hostname_start..hostname_start + hostname_len])
-                    .ok()
-                    .map(|s| s.to_string());
+            let sni_len = u16::from_be_bytes([ext_data[0], ext_data[1]]) as usize;
+            if 2 + sni_len > ext_data.len() || sni_len < 3 {
+                return None;
+            }
+
+            let hostname_type = ext_data[2];
+            if hostname_type != 0 {
+                return None;
+            }
+
+            let hostname_len = u16::from_be_bytes([ext_data[3], ext_data[4]]) as usize;
+            let hostname_start = 5;
+
+            if hostname_start + hostname_len <= ext_data.len() {
+                return std::str::from_utf8(
+                    &ext_data[hostname_start..hostname_start + hostname_len],
+                )
+                .ok()
+                .map(|s| s.to_string());
             }
         }
 
-        pos += 4 + ext_len;
+        pos = ext_data_end;
     }
 
     None
 }
 
 pub fn extract_alpn(data: &[u8]) -> Option<String> {
-    let mut pos = find_extensions_start(data)?;
+    let extensions = find_extensions_range(data)?;
+    let mut pos = extensions.start;
 
-    while pos + 4 <= data.len() {
+    while pos + 4 <= extensions.end {
         let ext_type = u16::from_be_bytes([data[pos], data[pos + 1]]);
         let ext_len = u16::from_be_bytes([data[pos + 2], data[pos + 3]]) as usize;
+        let ext_data_start = pos + 4;
+        let ext_data_end = ext_data_start.checked_add(ext_len)?;
+        if ext_data_end > extensions.end {
+            return None;
+        }
 
         if ext_type == 0x0010 {
-            let inner_start = pos + 4;
-            if inner_start + 3 > data.len() {
+            let ext_data = &data[ext_data_start..ext_data_end];
+            if ext_data.len() < 3 {
                 return None;
             }
-            let _alpn_ext_len =
-                u16::from_be_bytes([data[inner_start], data[inner_start + 1]]) as usize;
-            let str_len = data[inner_start + 2] as usize;
-            let str_start = inner_start + 3;
 
-            if str_start + str_len <= data.len() {
-                return std::str::from_utf8(&data[str_start..str_start + str_len])
+            let alpn_ext_len = u16::from_be_bytes([ext_data[0], ext_data[1]]) as usize;
+            if 2 + alpn_ext_len > ext_data.len() || alpn_ext_len == 0 {
+                return None;
+            }
+
+            let str_len = ext_data[2] as usize;
+            let str_start = 3;
+
+            if str_len > 0 && str_start + str_len <= ext_data.len() {
+                return std::str::from_utf8(&ext_data[str_start..str_start + str_len])
                     .ok()
                     .map(|s| s.to_string());
             }
         }
 
-        pos += 4 + ext_len;
+        pos = ext_data_end;
     }
 
     None
@@ -222,66 +253,45 @@ pub fn parse_tls_handshake(data: &[u8]) -> Option<TlsFingerprint> {
         }
     }
 
-    // Parse compression methods to find extensions start
-    // Use ciphers_end if valid, otherwise fall back to after cipher_suites_length field
-    let mut pos = if ciphers_end <= data.len() {
-        ciphers_end
-    } else {
-        ciphers_start + 2
-    };
-    if pos < data.len() {
-        let comp_len = data[pos] as usize;
-        if pos + 1 + comp_len > data.len() {
-            return Some(fingerprint);
-        }
-        pos += 1 + comp_len;
+    if let Some(extensions) = find_extensions_range(data) {
+        let mut pos = extensions.start;
 
-        // Parse extensions
-        if pos + 2 <= data.len() {
-            let ext_total_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
-            pos += 2;
-            let ext_end = match pos.checked_add(ext_total_len) {
-                Some(end) => end.min(data.len()),
-                None => data.len(),
+        while pos + 4 <= extensions.end {
+            let ext_type = u16::from_be_bytes([data[pos], data[pos + 1]]);
+            let ext_len = u16::from_be_bytes([data[pos + 2], data[pos + 3]]) as usize;
+            let ext_data_start = pos + 4;
+            let Some(ext_data_end) = ext_data_start.checked_add(ext_len) else {
+                break;
             };
-
-            while pos + 4 <= ext_end {
-                let ext_type = u16::from_be_bytes([data[pos], data[pos + 1]]);
-                let ext_len = u16::from_be_bytes([data[pos + 2], data[pos + 3]]) as usize;
-                let ext_data_start = pos + 4;
-                let Some(ext_data_end) = ext_data_start.checked_add(ext_len) else {
-                    break;
-                };
-                if ext_data_end > ext_end {
-                    break;
-                }
-                fingerprint.extensions.push(ext_type);
-                let ext_data = &data[ext_data_start..ext_data_end];
-
-                if ext_type == 0x000a && ext_data.len() >= 2 {
-                    // supported_groups
-                    let list_len = u16::from_be_bytes([ext_data[0], ext_data[1]]) as usize;
-                    if 2 + list_len <= ext_data.len() {
-                        for group in ext_data[2..2 + list_len].chunks_exact(2) {
-                            fingerprint
-                                .supported_groups
-                                .push(u16::from_be_bytes([group[0], group[1]]));
-                        }
-                    }
-                }
-
-                if ext_type == 0x000b && !ext_data.is_empty() {
-                    // ec_point_formats
-                    let fmt_len = ext_data[0] as usize;
-                    if fmt_len < ext_data.len() {
-                        fingerprint
-                            .ec_point_formats
-                            .extend(ext_data[1..1 + fmt_len].iter().map(|&format| format as u16));
-                    }
-                }
-
-                pos = ext_data_end;
+            if ext_data_end > extensions.end {
+                break;
             }
+            fingerprint.extensions.push(ext_type);
+            let ext_data = &data[ext_data_start..ext_data_end];
+
+            if ext_type == 0x000a && ext_data.len() >= 2 {
+                // supported_groups
+                let list_len = u16::from_be_bytes([ext_data[0], ext_data[1]]) as usize;
+                if 2 + list_len <= ext_data.len() {
+                    for group in ext_data[2..2 + list_len].chunks_exact(2) {
+                        fingerprint
+                            .supported_groups
+                            .push(u16::from_be_bytes([group[0], group[1]]));
+                    }
+                }
+            }
+
+            if ext_type == 0x000b && !ext_data.is_empty() {
+                // ec_point_formats
+                let fmt_len = ext_data[0] as usize;
+                if fmt_len < ext_data.len() {
+                    fingerprint
+                        .ec_point_formats
+                        .extend(ext_data[1..1 + fmt_len].iter().map(|&format| format as u16));
+                }
+            }
+
+            pos = ext_data_end;
         }
     }
 
@@ -321,6 +331,35 @@ mod tests {
         data
     }
 
+    fn sni_extension(hostname: &str) -> Vec<u8> {
+        let hostname = hostname.as_bytes();
+        let server_name_list_len = 1 + 2 + hostname.len();
+        let ext_len = 2 + server_name_list_len;
+
+        let mut extension = Vec::new();
+        extension.extend_from_slice(&0x0000u16.to_be_bytes());
+        extension.extend_from_slice(&(ext_len as u16).to_be_bytes());
+        extension.extend_from_slice(&(server_name_list_len as u16).to_be_bytes());
+        extension.push(0);
+        extension.extend_from_slice(&(hostname.len() as u16).to_be_bytes());
+        extension.extend_from_slice(hostname);
+        extension
+    }
+
+    fn alpn_extension(protocol: &str) -> Vec<u8> {
+        let protocol = protocol.as_bytes();
+        let protocol_list_len = 1 + protocol.len();
+        let ext_len = 2 + protocol_list_len;
+
+        let mut extension = Vec::new();
+        extension.extend_from_slice(&0x0010u16.to_be_bytes());
+        extension.extend_from_slice(&(ext_len as u16).to_be_bytes());
+        extension.extend_from_slice(&(protocol_list_len as u16).to_be_bytes());
+        extension.push(protocol.len() as u8);
+        extension.extend_from_slice(protocol);
+        extension
+    }
+
     #[test]
     fn parse_tls_handshake_uses_client_hello_version_for_ja3() {
         let data = build_client_hello(0x0301, &[]);
@@ -346,6 +385,33 @@ mod tests {
         assert_eq!(fingerprint.versions, vec![0x0303]);
         assert_eq!(fingerprint.ja3, ja3);
         assert_eq!(fingerprint.ja3_hash, hash);
+    }
+
+    #[test]
+    fn tls_metadata_extractors_ignore_bytes_outside_declared_extensions() {
+        let mut data = build_client_hello(0x0303, &[]);
+        data.extend_from_slice(&sni_extension("outside.example"));
+        data.extend_from_slice(&alpn_extension("h2"));
+
+        let fingerprint = parse_tls_handshake(&data).expect("handshake should parse");
+
+        assert_eq!(extract_sni(&data), None);
+        assert_eq!(extract_alpn(&data), None);
+        assert_eq!(fingerprint.sni, None);
+        assert_eq!(fingerprint.alpn, None);
+    }
+
+    #[test]
+    fn tls_metadata_extractors_accept_values_inside_declared_extensions() {
+        let mut extensions = sni_extension("inside.example");
+        extensions.extend_from_slice(&alpn_extension("h2"));
+        let data = build_client_hello(0x0303, &extensions);
+        let fingerprint = parse_tls_handshake(&data).expect("handshake should parse");
+
+        assert_eq!(extract_sni(&data).as_deref(), Some("inside.example"));
+        assert_eq!(extract_alpn(&data).as_deref(), Some("h2"));
+        assert_eq!(fingerprint.sni.as_deref(), Some("inside.example"));
+        assert_eq!(fingerprint.alpn.as_deref(), Some("h2"));
     }
 
     #[test]

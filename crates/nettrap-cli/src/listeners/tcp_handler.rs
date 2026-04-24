@@ -134,6 +134,10 @@ fn tcp_frame_mode(
         return TcpFrameMode::Http;
     }
 
+    if listener == "upnp" || listener.starts_with("upnp") {
+        return TcpFrameMode::Http;
+    }
+
     if listener == "smtp"
         || listener.starts_with("smtp")
         || matches!(destination_port, 25 | 465 | 587 | 2525)
@@ -262,6 +266,7 @@ fn tcp_frame_mode(
             "ldap" => TcpFrameMode::Ldap,
             "mqtt" => TcpFrameMode::Mqtt,
             "tls" => TcpFrameMode::Tls,
+            "upnp" => TcpFrameMode::Http,
             "redis" => TcpFrameMode::Redis,
             "memcached" => TcpFrameMode::Memcached,
             _ => TcpFrameMode::Immediate,
@@ -1820,6 +1825,8 @@ async fn dispatch_named_tcp_protocol(
         Some(nettrap_proto_mqtt::MqttHandler::new().handle_packet(data))
     } else if name == "tls" || name.starts_with("tls") {
         Some(handle_tls_plain(ctx, data, peer, destination, output_path).await)
+    } else if name == "upnp" || name.starts_with("upnp") {
+        Some(handle_upnp_tcp(ctx, data, peer, destination, output_path).await)
     } else if name == "nkn" || name.starts_with("nkn") {
         let handler = nettrap_proto_nkn::NknHandler::new();
         crate::protocol_handlers::log_tcp_event(
@@ -2001,6 +2008,41 @@ async fn handle_tls_plain(
     ctx.runtime.nbi_collector.record(&nbi).await;
 
     build_tls_response()
+}
+
+async fn handle_upnp_tcp(
+    ctx: &Arc<ListenerContext>,
+    data: &[u8],
+    peer: &std::net::SocketAddr,
+    destination: &SessionDestination,
+    output_path: Option<&std::path::Path>,
+) -> Vec<u8> {
+    let response = nettrap_proto_upnp::UpnpHandler::new()
+        .with_listen_ip(destination.ip.clone())
+        .handle_http(data);
+    if response.is_empty() {
+        return response;
+    }
+
+    log_event(
+        output_path,
+        ctx.name(),
+        peer,
+        "upnp_http_request",
+        &format!("{} bytes", data.len()),
+    )
+    .await;
+    let nbi = crate::nbi::raw_nbi(
+        ctx.name(),
+        &peer.ip().to_string(),
+        peer.port(),
+        destination,
+        data.len(),
+        "upnp",
+    );
+    ctx.runtime.nbi_collector.record(&nbi).await;
+
+    response
 }
 
 async fn handle_ssh(
@@ -2426,6 +2468,11 @@ async fn handle_http_response(
             let dump_prefix = ctx.dump_prefix().map(|s| s.to_string());
             dump_http_post(&body, &dump_prefix, peer).await;
         }
+    }
+
+    let upnp_response = handle_upnp_tcp(ctx, data, peer, destination, output_path).await;
+    if !upnp_response.is_empty() {
+        return upnp_response;
     }
 
     // DynDNS checkip emulation

@@ -1,3 +1,5 @@
+use std::io::Read;
+
 /// Raw protocol handler supporting multiple response modes
 pub struct RawHandler {
     mode: RawResponseMode,
@@ -19,6 +21,12 @@ pub enum RawResponseMode {
 
 pub struct RawResponse {
     pub data: Vec<u8>,
+}
+
+enum LimitedFileRead {
+    Content(Vec<u8>),
+    TooLarge,
+    NotFile,
 }
 
 impl RawResponse {
@@ -112,23 +120,21 @@ impl RawHandler {
             RawResponseMode::RawFile(path) => {
                 // Limit file reads to 10MB to prevent OOM
                 const MAX_RAW_FILE_SIZE: u64 = 10 * 1024 * 1024;
-                match std::fs::metadata(path) {
-                    Ok(meta) if meta.len() > MAX_RAW_FILE_SIZE => {
+                match read_limited_file(path, MAX_RAW_FILE_SIZE) {
+                    Ok(LimitedFileRead::Content(content)) => RawResponse::new(content),
+                    Ok(LimitedFileRead::TooLarge) => {
                         tracing::warn!(
-                            "Raw file {} exceeds size limit ({} bytes > {})",
+                            "Raw file {} exceeds size limit (>{} bytes)",
                             path.display(),
-                            meta.len(),
                             MAX_RAW_FILE_SIZE,
                         );
                         RawResponse::new(b"ERROR\n".to_vec())
                     }
-                    _ => match std::fs::read(path) {
-                        Ok(content) => RawResponse::new(content),
-                        Err(e) => {
-                            tracing::warn!("Failed to read raw file {}: {}", path.display(), e);
-                            RawResponse::new(b"ERROR\n".to_vec())
-                        }
-                    },
+                    Ok(LimitedFileRead::NotFile) => RawResponse::new(b"ERROR\n".to_vec()),
+                    Err(e) => {
+                        tracing::warn!("Failed to read raw file {}: {}", path.display(), e);
+                        RawResponse::new(b"ERROR\n".to_vec())
+                    }
                 }
             }
             RawResponseMode::StaticBase64(decoded) => RawResponse::new(decoded.clone()),
@@ -176,5 +182,65 @@ impl RawHandler {
 impl Default for RawHandler {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn read_limited_file(path: &std::path::Path, max_bytes: u64) -> std::io::Result<LimitedFileRead> {
+    let file = std::fs::File::open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Ok(LimitedFileRead::NotFile);
+    }
+    if metadata.len() > max_bytes {
+        return Ok(LimitedFileRead::TooLarge);
+    }
+
+    let mut limited = file.take(max_bytes + 1);
+    let mut content = Vec::new();
+    limited.read_to_end(&mut content)?;
+    if content.len() as u64 > max_bytes {
+        return Ok(LimitedFileRead::TooLarge);
+    }
+
+    Ok(LimitedFileRead::Content(content))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RawHandler;
+
+    const MAX_RAW_FILE_SIZE: u64 = 10 * 1024 * 1024;
+
+    #[test]
+    fn raw_file_response_rejects_oversized_file() {
+        let root = unique_temp_dir("nettrap-raw-limit");
+        std::fs::create_dir_all(&root).expect("create temp root");
+        let path = root.join("large.bin");
+        let file = std::fs::File::create(&path).expect("create sparse file");
+        file.set_len(MAX_RAW_FILE_SIZE + 1)
+            .expect("extend sparse file");
+
+        let response = RawHandler::new().with_raw_file(&path).handle(b"ignored");
+
+        assert_eq!(response.to_bytes(), b"ERROR\n");
+        std::fs::remove_dir_all(root).expect("cleanup temp root");
+    }
+
+    #[test]
+    fn raw_file_response_allows_file_at_size_limit() {
+        let root = unique_temp_dir("nettrap-raw-limit-ok");
+        std::fs::create_dir_all(&root).expect("create temp root");
+        let path = root.join("limit.bin");
+        let file = std::fs::File::create(&path).expect("create sparse file");
+        file.set_len(MAX_RAW_FILE_SIZE).expect("extend sparse file");
+
+        let response = RawHandler::new().with_raw_file(&path).handle(b"ignored");
+
+        assert_eq!(response.to_bytes().len() as u64, MAX_RAW_FILE_SIZE);
+        std::fs::remove_dir_all(root).expect("cleanup temp root");
+    }
+
+    fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("{}-{}", prefix, std::process::id()))
     }
 }

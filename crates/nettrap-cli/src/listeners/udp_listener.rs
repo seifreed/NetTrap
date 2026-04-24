@@ -1111,7 +1111,9 @@ async fn handle_detected_udp(
                     .await;
                 }
                 "upnp" => {
-                    let response = nettrap_proto_upnp::UpnpHandler::new().handle(packet.query_data);
+                    let response = nettrap_proto_upnp::UpnpHandler::new()
+                        .with_listen_ip(packet.destination.ip.clone())
+                        .handle_ssdp(packet.query_data);
                     crate::protocol_handlers::handle_udp_generic(
                         ctx,
                         socket,

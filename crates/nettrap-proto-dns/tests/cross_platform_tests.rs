@@ -81,6 +81,30 @@ mod tests {
         assert!(response_has_no_answers(&response));
     }
 
+    #[tokio::test]
+    async fn test_dns_default_response_ip_supports_aaaa_ipv6() {
+        let handler = DnsHandler::new().with_default_response_ip("2001:db8::10");
+        let query = build_dns_query("example.com", 28);
+        let response = handler
+            .handle_query(&query, "127.0.0.1:53".parse().unwrap())
+            .await
+            .unwrap();
+
+        assert!(response_has_aaaa_record(&response, "2001:db8::10"));
+    }
+
+    #[tokio::test]
+    async fn test_dns_default_response_ip_does_not_synthesize_aaaa_from_ipv4() {
+        let handler = DnsHandler::new().with_default_response_ip("192.0.2.10");
+        let query = build_dns_query("example.com", 28);
+        let response = handler
+            .handle_query(&query, "127.0.0.1:53".parse().unwrap())
+            .await
+            .unwrap();
+
+        assert!(response_has_no_answers(&response));
+    }
+
     fn build_dns_query(domain: &str, qtype: u16) -> Vec<u8> {
         use hickory_proto::op::{Message, MessageType, OpCode, Query};
         use hickory_proto::rr::{Name, RecordType};
@@ -110,6 +134,18 @@ mod tests {
         let message = Message::from_vec(response).unwrap();
         message.answers().iter().any(|record| match record.data() {
             RData::A(a) => a.0 == expected,
+            _ => false,
+        })
+    }
+
+    fn response_has_aaaa_record(response: &[u8], ip: &str) -> bool {
+        use hickory_proto::op::Message;
+        use hickory_proto::rr::RData;
+
+        let expected: std::net::Ipv6Addr = ip.parse().unwrap();
+        let message = Message::from_vec(response).unwrap();
+        message.answers().iter().any(|record| match record.data() {
+            RData::AAAA(aaaa) => aaaa.0 == expected,
             _ => false,
         })
     }
