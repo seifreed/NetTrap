@@ -838,6 +838,11 @@ impl NbiCollector {
             .collect();
     }
 
+    #[cfg(test)]
+    pub(crate) fn listener_protocol_count(&self) -> usize {
+        self.listener_protocols.read().len()
+    }
+
     fn note_worker_restart(
         &self,
         worker_name: &str,

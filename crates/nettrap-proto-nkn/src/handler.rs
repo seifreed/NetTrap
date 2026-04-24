@@ -19,9 +19,12 @@ impl NknHandler {
             if let Some(method_start) = text.find("\"method\"") {
                 let rest = &text[method_start..];
                 if let Some(colon) = rest.find(':') {
-                    let value = rest[colon + 1..].trim().trim_matches('"').trim_matches(',');
-                    let method_end = value.find('"').unwrap_or(value.len());
-                    tracing::warn!("NKN method: {}", &value[..method_end]);
+                    let after_colon = rest[colon + 1..].trim();
+                    if let Some(start) = after_colon.find('"') {
+                        let inner = &after_colon[start + 1..];
+                        let end = inner.find('"').unwrap_or(inner.len());
+                        tracing::warn!("NKN method: {}", &inner[..end]);
+                    }
                 }
             }
 

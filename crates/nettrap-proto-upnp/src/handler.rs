@@ -19,7 +19,10 @@ impl UpnpHandler {
 
         if text.contains("M-SEARCH") {
             tracing::warn!("SSDP M-SEARCH discovery attempt");
-            let resp = format!("HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=1800\r\nST: upnp:rootdevice\r\nUSN: uuid:nettrap::upnp:rootdevice\r\nLOCATION: http://{}:49152/desc.xml\r\nSERVER: Linux/3.14 UPnP/1.1 NetTrap/1.0\r\n\r\n", self.listen_ip);
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=1800\r\nST: upnp:rootdevice\r\nUSN: uuid:nettrap::upnp:rootdevice\r\nLOCATION: http://{}:49152/desc.xml\r\nSERVER: Linux/3.14 UPnP/1.1 NetTrap/1.0\r\n\r\n",
+                self.listen_ip
+            );
             resp.into_bytes()
         } else if text.contains("DeletePortMapping") {
             tracing::warn!(

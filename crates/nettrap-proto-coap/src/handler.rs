@@ -82,7 +82,13 @@ impl CoapHandler {
             }
             _ => {
                 // Unknown method - respond with 4.00 Bad Request
-                self.build_response(msg_id, confirmable, 0x80, token, b"{\"error\":\"bad request\"}")
+                self.build_response(
+                    msg_id,
+                    confirmable,
+                    0x80,
+                    token,
+                    b"{\"error\":\"bad request\"}",
+                )
             }
         }
     }
@@ -107,9 +113,11 @@ impl CoapHandler {
         // Token (must match request token per RFC 7252)
         resp.extend_from_slice(token);
 
-        // Payload marker and content
-        resp.push(0xFF);
-        resp.extend_from_slice(payload);
+        // Payload marker and content (RFC 7252: omit marker if no payload)
+        if !payload.is_empty() {
+            resp.push(0xFF);
+            resp.extend_from_slice(payload);
+        }
 
         resp
     }

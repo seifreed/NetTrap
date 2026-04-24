@@ -26,7 +26,7 @@ impl LogEventHandler {
 impl EventHandlerTrait for LogEventHandler {
     fn handle(&self, event: &Event) -> Result<()> {
         if let Some(ref filter) = self.filter {
-            if !filter.iter().any(|f| event.event_type().contains(f)) {
+            if !filter.iter().any(|f| event.event_type() == f) {
                 return Ok(());
             }
         }
@@ -67,8 +67,12 @@ impl EventHandlerTrait for LogEventHandler {
         self.name
     }
 
-    fn handles_event_type(&self, _event_type: &str) -> bool {
-        true
+    fn handles_event_type(&self, event_type: &str) -> bool {
+        if let Some(ref filter) = self.filter {
+            filter.iter().any(|f| event_type == f)
+        } else {
+            true
+        }
     }
 }
 
@@ -149,7 +153,7 @@ where
 {
     fn handle(&self, event: &Event) -> Result<()> {
         if let Some(ref filter) = self.filter {
-            if !filter.iter().any(|f| event.event_type().contains(f)) {
+            if !filter.iter().any(|f| event.event_type() == f) {
                 return Ok(());
             }
         }
@@ -162,7 +166,7 @@ where
 
     fn handles_event_type(&self, event_type: &str) -> bool {
         if let Some(ref filter) = self.filter {
-            filter.iter().any(|f| event_type.contains(f))
+            filter.iter().any(|f| event_type == f)
         } else {
             true
         }
@@ -185,4 +189,67 @@ where
     F: Fn(&Event) -> Result<()> + Send + Sync + 'static,
 {
     Arc::new(CallbackEventHandler::new(name, callback))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::{CallbackEventHandler, EventHandlerTrait, LogEventHandler};
+    use crate::event::{Event, WarningEvent};
+
+    #[test]
+    fn callback_handler_filter_rejects_partial_event_type_matches() {
+        let hits = AtomicUsize::new(0);
+        let handler = CallbackEventHandler::with_filter(
+            "callback",
+            |_: &Event| {
+                hits.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            vec!["warn".to_string()],
+        );
+
+        handler
+            .handle(&warning_event())
+            .expect("filtered handle should succeed");
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+        assert!(!handler.handles_event_type("warning"));
+        assert!(handler.handles_event_type("warn"));
+    }
+
+    #[test]
+    fn callback_handler_filter_allows_exact_event_type_matches() {
+        let hits = AtomicUsize::new(0);
+        let handler = CallbackEventHandler::with_filter(
+            "callback",
+            |_: &Event| {
+                hits.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            vec!["warning".to_string()],
+        );
+
+        handler
+            .handle(&warning_event())
+            .expect("exact filter should match");
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert!(handler.handles_event_type("warning"));
+    }
+
+    #[test]
+    fn log_handler_filter_uses_exact_event_type_matching() {
+        let handler = LogEventHandler::with_filter(vec!["warning".to_string()]);
+
+        assert!(handler.handles_event_type("warning"));
+        assert!(!handler.handles_event_type("warn"));
+    }
+
+    fn warning_event() -> Event {
+        Event::Warning(WarningEvent {
+            timestamp: chrono::Utc::now(),
+            message: "warn".to_string(),
+            flow_id: None,
+        })
+    }
 }

@@ -58,28 +58,53 @@ impl TlsFingerprint {
     }
 }
 
+fn client_hello_version(data: &[u8]) -> Option<u16> {
+    if data.len() < 11 || data[0] != 0x16 || data[5] != 0x01 {
+        return None;
+    }
+
+    Some(u16::from_be_bytes([data[9], data[10]]))
+}
+
 /// Compute the byte offset where TLS extensions begin in a ClientHello.
 /// Layout: record_header(5) + handshake_header(4) + client_version(2) + random(32)
 ///         + session_id_len(1) + session_id(var) + cipher_suites_len(2) + cipher_suites(var)
 ///         + compression_len(1) + compression(var) + extensions_len(2)
 fn find_extensions_start(data: &[u8]) -> Option<usize> {
-    if data.len() < 44 || data[0] != 0x16 || data[1] != 0x03 {
+    if data.len() < 44 || data[0] != 0x16 || data[1] != 0x03 || data[5] != 0x01 {
         return None;
     }
     let mut pos = 43; // session_id_length byte
-    if pos >= data.len() { return None; }
+    if pos >= data.len() {
+        return None;
+    }
     let session_id_len = data[pos] as usize;
-    pos += 1 + session_id_len; // skip session_id_length + session_id
+    if pos + 1 + session_id_len > data.len() {
+        return None;
+    }
+    pos += 1 + session_id_len;
 
-    if pos + 2 > data.len() { return None; }
+    if pos + 2 > data.len() {
+        return None;
+    }
     let cipher_suites_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
-    pos += 2 + cipher_suites_len; // skip cipher_suites_length + cipher_suites
+    if pos + 2 + cipher_suites_len > data.len() {
+        return None;
+    }
+    pos += 2 + cipher_suites_len;
 
-    if pos >= data.len() { return None; }
+    if pos >= data.len() {
+        return None;
+    }
     let compression_len = data[pos] as usize;
-    pos += 1 + compression_len; // skip compression_length + compression_methods
+    if pos + 1 + compression_len > data.len() {
+        return None;
+    }
+    pos += 1 + compression_len;
 
-    if pos + 2 > data.len() { return None; }
+    if pos + 2 > data.len() {
+        return None;
+    }
     let _extensions_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
     pos += 2; // now pos points to the first extension
 
@@ -161,11 +186,12 @@ pub fn parse_tls_handshake(data: &[u8]) -> Option<TlsFingerprint> {
         return None;
     }
 
+    let client_version = client_hello_version(data)?;
     let mut fingerprint = TlsFingerprint {
         ja3: String::new(),
         ja3_hash: String::new(),
         ja4: String::new(),
-        versions: vec![0x0303],
+        versions: vec![client_version],
         cipher_suites: Vec::new(),
         extensions: Vec::new(),
         supported_groups: Vec::new(),
@@ -176,6 +202,9 @@ pub fn parse_tls_handshake(data: &[u8]) -> Option<TlsFingerprint> {
     };
 
     let session_id_len = data[43] as usize;
+    if 44 + session_id_len > data.len() {
+        return Some(fingerprint);
+    }
     let ciphers_start = 44 + session_id_len;
 
     if ciphers_start + 2 > data.len() {
@@ -195,9 +224,16 @@ pub fn parse_tls_handshake(data: &[u8]) -> Option<TlsFingerprint> {
 
     // Parse compression methods to find extensions start
     // Use ciphers_end if valid, otherwise fall back to after cipher_suites_length field
-    let mut pos = if ciphers_end <= data.len() { ciphers_end } else { ciphers_start + 2 };
+    let mut pos = if ciphers_end <= data.len() {
+        ciphers_end
+    } else {
+        ciphers_start + 2
+    };
     if pos < data.len() {
         let comp_len = data[pos] as usize;
+        if pos + 1 + comp_len > data.len() {
+            return Some(fingerprint);
+        }
         pos += 1 + comp_len;
 
         // Parse extensions
@@ -217,7 +253,9 @@ pub fn parse_tls_handshake(data: &[u8]) -> Option<TlsFingerprint> {
                     let mut gp = pos + 6;
                     let ge = (gp + list_len).min(data.len());
                     while gp + 2 <= ge {
-                        fingerprint.supported_groups.push(u16::from_be_bytes([data[gp], data[gp + 1]]));
+                        fingerprint
+                            .supported_groups
+                            .push(u16::from_be_bytes([data[gp], data[gp + 1]]));
                         gp += 2;
                     }
                 }
@@ -240,4 +278,63 @@ pub fn parse_tls_handshake(data: &[u8]) -> Option<TlsFingerprint> {
     fingerprint.compute_ja3();
     fingerprint.ja4 = crate::ja3::ja4_from_handshake(data).unwrap_or_default();
     Some(fingerprint)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build_client_hello(client_version: u16, extensions: &[u8]) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&client_version.to_be_bytes());
+        body.extend_from_slice(&[0u8; 32]);
+        body.push(0);
+        body.extend_from_slice(&2u16.to_be_bytes());
+        body.extend_from_slice(&0x1301u16.to_be_bytes());
+        body.push(1);
+        body.push(0);
+        body.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+        body.extend_from_slice(extensions);
+
+        let handshake_len = body.len() as u32;
+        let record_len = (4 + body.len()) as u16;
+
+        let mut data = Vec::new();
+        data.push(0x16);
+        data.extend_from_slice(&0x0301u16.to_be_bytes());
+        data.extend_from_slice(&record_len.to_be_bytes());
+        data.push(0x01);
+        data.push(((handshake_len >> 16) & 0xff) as u8);
+        data.push(((handshake_len >> 8) & 0xff) as u8);
+        data.push((handshake_len & 0xff) as u8);
+        data.extend_from_slice(&body);
+        data
+    }
+
+    #[test]
+    fn parse_tls_handshake_uses_client_hello_version_for_ja3() {
+        let data = build_client_hello(0x0301, &[]);
+        let fingerprint = parse_tls_handshake(&data).expect("handshake should parse");
+
+        assert_eq!(fingerprint.versions, vec![0x0301]);
+        assert!(fingerprint.ja3.starts_with("769,"));
+        assert_eq!(
+            fingerprint.ja3,
+            crate::ja3::ja3_from_handshake(&data)
+                .expect("ja3 parser should succeed")
+                .0
+        );
+    }
+
+    #[test]
+    fn parse_tls_handshake_stays_consistent_with_ja3_parser_for_tls13_clienthello() {
+        let supported_versions = [0x00, 0x2b, 0x00, 0x03, 0x02, 0x03, 0x04];
+        let data = build_client_hello(0x0303, &supported_versions);
+        let fingerprint = parse_tls_handshake(&data).expect("handshake should parse");
+        let (ja3, hash) = crate::ja3::ja3_from_handshake(&data).expect("ja3 parser should succeed");
+
+        assert_eq!(fingerprint.versions, vec![0x0303]);
+        assert_eq!(fingerprint.ja3, ja3);
+        assert_eq!(fingerprint.ja3_hash, hash);
+    }
 }

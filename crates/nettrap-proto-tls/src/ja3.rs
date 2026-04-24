@@ -57,7 +57,11 @@ pub fn ja3_from_handshake(data: &[u8]) -> Option<(String, String)> {
         return None;
     }
 
-    let version = u16::from_be_bytes([data[1], data[2]]);
+    // Use ClientHello version (offset 9-10), not record-layer version (offset 1-2)
+    if data.len() < 11 {
+        return None;
+    }
+    let version = u16::from_be_bytes([data[9], data[10]]);
 
     let mut pos = 43usize;
     if pos >= data.len() {
@@ -65,6 +69,9 @@ pub fn ja3_from_handshake(data: &[u8]) -> Option<(String, String)> {
     }
 
     let session_id_len = data[pos] as usize;
+    if pos + 1 + session_id_len > data.len() {
+        return None;
+    }
     pos += 1 + session_id_len;
 
     if pos + 2 > data.len() {
@@ -72,10 +79,13 @@ pub fn ja3_from_handshake(data: &[u8]) -> Option<(String, String)> {
     }
 
     let ciphers_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+    if pos + 2 + ciphers_len > data.len() {
+        return None;
+    }
     pos += 2;
 
     let mut cipher_suites = Vec::new();
-    if pos + ciphers_len <= data.len() && ciphers_len % 2 == 0 {
+    if ciphers_len % 2 == 0 {
         for i in (pos..pos + ciphers_len).step_by(2) {
             cipher_suites.push(u16::from_be_bytes([data[i], data[i + 1]]));
         }
@@ -87,6 +97,9 @@ pub fn ja3_from_handshake(data: &[u8]) -> Option<(String, String)> {
     }
 
     let compressions_len = data[pos] as usize;
+    if pos + 1 + compressions_len > data.len() {
+        return None;
+    }
     pos += 1 + compressions_len;
 
     if pos + 2 > data.len() {
@@ -196,10 +209,10 @@ pub fn calculate_ja4(
         })
         .unwrap_or_else(|| "00".to_string());
 
-    // JA4_a: first section
+    // JA4_a: first section (includes ALPN per FoxIO spec)
     let ja4_a = format!(
-        "{}{}{}{:02}{:02}",
-        proto, version, sni_flag, cipher_count, ext_count
+        "{}{}{}{:02}{:02}{}",
+        proto, version, sni_flag, cipher_count, ext_count, alpn_str
     );
 
     // JA4_b: sorted cipher suites hash (excluding GREASE values)
@@ -236,7 +249,7 @@ pub fn calculate_ja4(
     let ext_hash = format!("{:x}", hasher.finalize());
     let ja4_c = &ext_hash[..12.min(ext_hash.len())];
 
-    format!("{}_{}_{}_{}", ja4_a, alpn_str, ja4_b, ja4_c)
+    format!("{}_{}_{}", ja4_a, ja4_b, ja4_c)
 }
 
 /// Check if a value is a TLS GREASE value
@@ -247,11 +260,12 @@ fn is_grease(value: u16) -> bool {
 
 /// Calculate JA4 from raw ClientHello bytes
 pub fn ja4_from_handshake(data: &[u8]) -> Option<String> {
-    if data.len() < 6 || data[0] != 0x16 || data[5] != 0x01 {
+    if data.len() < 11 || data[0] != 0x16 || data[5] != 0x01 {
         return None;
     }
 
-    let tls_version = u16::from_be_bytes([data[1], data[2]]);
+    // Use ClientHello version (offset 9-10), not record-layer version (offset 1-2)
+    let tls_version = u16::from_be_bytes([data[9], data[10]]);
 
     // Parse the same way as ja3_from_handshake
     let mut pos = 43usize;
@@ -260,16 +274,22 @@ pub fn ja4_from_handshake(data: &[u8]) -> Option<String> {
     }
 
     let session_id_len = data[pos] as usize;
+    if pos + 1 + session_id_len > data.len() {
+        return None;
+    }
     pos += 1 + session_id_len;
     if pos + 2 > data.len() {
         return None;
     }
 
     let ciphers_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+    if pos + 2 + ciphers_len > data.len() {
+        return None;
+    }
     pos += 2;
 
     let mut cipher_suites = Vec::new();
-    if pos + ciphers_len <= data.len() && ciphers_len % 2 == 0 {
+    if ciphers_len % 2 == 0 {
         for i in (pos..pos + ciphers_len).step_by(2) {
             cipher_suites.push(u16::from_be_bytes([data[i], data[i + 1]]));
         }
@@ -280,6 +300,9 @@ pub fn ja4_from_handshake(data: &[u8]) -> Option<String> {
         return None;
     }
     let compressions_len = data[pos] as usize;
+    if pos + 1 + compressions_len > data.len() {
+        return None;
+    }
     pos += 1 + compressions_len;
     if pos + 2 > data.len() {
         return None;

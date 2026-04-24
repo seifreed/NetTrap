@@ -108,7 +108,6 @@ pub async fn run_tcp_listener(
 
                 if !process_allowed {
                     tracing::debug!("Process blocked by filter on {}", ctx.name());
-                    ctx.remove_session(&peer, "TCP", &destination);
                     conn_counter.fetch_sub(1, Ordering::AcqRel);
                     continue;
                 }
@@ -203,7 +202,8 @@ mod tests {
                 ),
                 Vec::new(),
                 Vec::new(),
-            ),
+            )
+            .expect("host rules should compile"),
             ListenerRuntime::new(
                 None,
                 Arc::new(nettrap_proxy::ProtocolRouter::new()),

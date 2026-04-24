@@ -70,7 +70,10 @@ impl LdapHandler {
     fn parse_message_id(data: &[u8]) -> (u32, usize) {
         // Skip sequence tag + length
         let mut pos = 1;
-        let (_seq_len, len_bytes) = Self::parse_ber_length(&data[pos..]);
+        let (_seq_len, len_bytes) = match Self::parse_ber_length(&data[pos..]) {
+            Some(v) => v,
+            None => return (0, pos),
+        };
         pos += len_bytes;
 
         // Message ID: INTEGER tag (0x02) + length + value
@@ -78,7 +81,10 @@ impl LdapHandler {
             return (0, pos);
         }
         pos += 1;
-        let (id_len, len_bytes) = Self::parse_ber_length(&data[pos..]);
+        let (id_len, len_bytes) = match Self::parse_ber_length(&data[pos..]) {
+            Some(v) => v,
+            None => return (0, pos),
+        };
         pos += len_bytes;
 
         // Validate id_len won't move pos past data boundary
@@ -95,27 +101,27 @@ impl LdapHandler {
     /// Maximum allowed BER length (16MB) to prevent memory exhaustion attacks
     const MAX_BER_LENGTH: usize = 16 * 1024 * 1024;
 
-    fn parse_ber_length(data: &[u8]) -> (usize, usize) {
+    fn parse_ber_length(data: &[u8]) -> Option<(usize, usize)> {
         if data.is_empty() {
-            return (0, 0);
+            return None;
         }
         if data[0] & 0x80 == 0 {
             // Short form: length in lower 7 bits
             let len = data[0] as usize;
-            (len.min(Self::MAX_BER_LENGTH), 1)
+            Some((len.min(Self::MAX_BER_LENGTH), 1))
         } else {
             // Long form: lower 7 bits = number of following length bytes
             let num_bytes = (data[0] & 0x7F) as usize;
             // Ensure all length bytes are present and limit to reasonable size
-            if num_bytes > 4 || data.len() < 1 + num_bytes {
-                return (0, 0);
+            if num_bytes == 0 || num_bytes > 4 || data.len() < 1 + num_bytes {
+                return None;
             }
             let mut len = 0usize;
             for i in 0..num_bytes {
                 len = (len << 8) | data[i + 1] as usize;
             }
             // Cap length to prevent memory exhaustion
-            (len.min(Self::MAX_BER_LENGTH), 1 + num_bytes)
+            Some((len.min(Self::MAX_BER_LENGTH), 1 + num_bytes))
         }
     }
 
@@ -124,14 +130,14 @@ impl LdapHandler {
         if pos >= data.len() {
             return None;
         }
-        let (_, len_bytes) = Self::parse_ber_length(&data[pos..]);
+        let (_, len_bytes) = Self::parse_ber_length(&data[pos..])?;
         pos += len_bytes;
         // Skip version INTEGER
         if pos >= data.len() || data[pos] != 0x02 {
             return None;
         }
         pos += 1;
-        let (ver_len, len_bytes) = Self::parse_ber_length(&data[pos..]);
+        let (ver_len, len_bytes) = Self::parse_ber_length(&data[pos..])?;
         let advance = len_bytes.saturating_add(ver_len);
         if pos + advance > data.len() {
             return None;
@@ -142,7 +148,7 @@ impl LdapHandler {
             return None;
         }
         pos += 1;
-        let (dn_len, len_bytes) = Self::parse_ber_length(&data[pos..]);
+        let (dn_len, len_bytes) = Self::parse_ber_length(&data[pos..])?;
         pos += len_bytes;
         if pos + dn_len > data.len() {
             return None;

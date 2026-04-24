@@ -8,6 +8,7 @@ pub mod execute;
 pub mod faketime;
 pub mod handler_registry;
 pub mod hexdump;
+pub(crate) mod host_filter;
 pub mod i18n;
 pub mod listener_config;
 pub mod listener_context;

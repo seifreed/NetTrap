@@ -74,6 +74,7 @@ fn export_jsonl(events: &[NetworkBehaviorIndicator], path: &Path) -> std::io::Re
 // ─── SARIF v2.1.0 ───────────────────────────────────────────────────────────
 
 fn export_sarif(events: &[NetworkBehaviorIndicator], path: &Path) -> std::io::Result<()> {
+    let (start_time_utc, end_time_utc) = event_time_bounds(events);
     let results: Vec<SarifResult> = events
         .iter()
         .map(|e| {
@@ -165,8 +166,8 @@ fn export_sarif(events: &[NetworkBehaviorIndicator], path: &Path) -> std::io::Re
             },
             invocations: vec![SarifInvocation {
                 execution_successful: true,
-                start_time_utc: events.first().map(|e| e.timestamp.clone()).unwrap_or_default(),
-                end_time_utc: events.last().map(|e| e.timestamp.clone()).unwrap_or_default(),
+                start_time_utc,
+                end_time_utc,
             }],
             results,
         }],
@@ -270,16 +271,17 @@ struct SarifProperties {
 fn export_toon(events: &[NetworkBehaviorIndicator], path: &Path) -> std::io::Result<()> {
     use std::io::Write;
     let mut file = std::fs::File::create(path)?;
+    let (start, end) = event_time_bounds(events);
 
     // Header
     writeln!(file, "capture:")?;
     writeln!(file, "  tool: NetTrap")?;
     writeln!(file, "  version: 0.1.0")?;
-    if let Some(first) = events.first() {
-        writeln!(file, "  start: {}", first.timestamp)?;
+    if !start.is_empty() {
+        writeln!(file, "  start: {}", start)?;
     }
-    if let Some(last) = events.last() {
-        writeln!(file, "  end: {}", last.timestamp)?;
+    if !end.is_empty() {
+        writeln!(file, "  end: {}", end)?;
     }
     writeln!(file, "  total_events: {}", events.len())?;
 
@@ -361,6 +363,55 @@ fn export_toon(events: &[NetworkBehaviorIndicator], path: &Path) -> std::io::Res
     Ok(())
 }
 
+fn event_time_bounds(events: &[NetworkBehaviorIndicator]) -> (String, String) {
+    let mut earliest_parsed: Option<(chrono::DateTime<chrono::FixedOffset>, &str)> = None;
+    let mut latest_parsed: Option<(chrono::DateTime<chrono::FixedOffset>, &str)> = None;
+    let mut all_parsed = true;
+
+    for event in events {
+        let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&event.timestamp) else {
+            all_parsed = false;
+            break;
+        };
+
+        match &earliest_parsed {
+            Some((current, _)) if parsed >= *current => {}
+            _ => earliest_parsed = Some((parsed, event.timestamp.as_str())),
+        }
+
+        match &latest_parsed {
+            Some((current, _)) if parsed <= *current => {}
+            _ => latest_parsed = Some((parsed, event.timestamp.as_str())),
+        }
+    }
+
+    if all_parsed {
+        return (
+            earliest_parsed
+                .map(|(_, timestamp)| timestamp.to_string())
+                .unwrap_or_default(),
+            latest_parsed
+                .map(|(_, timestamp)| timestamp.to_string())
+                .unwrap_or_default(),
+        );
+    }
+
+    let start = events
+        .iter()
+        .map(|event| event.timestamp.as_str())
+        .min()
+        .unwrap_or_default()
+        .to_string();
+    let end = events
+        .iter()
+        .map(|event| event.timestamp.as_str())
+        .max()
+        .unwrap_or_default()
+        .to_string();
+
+    (start, end)
+}
+
 // ─── CSV ─────────────────────────────────────────────────────────────────────
 
 fn export_csv(events: &[NetworkBehaviorIndicator], path: &Path) -> std::io::Result<()> {
@@ -392,7 +443,9 @@ fn export_csv(events: &[NetworkBehaviorIndicator], path: &Path) -> std::io::Resu
         "process_pid",
     ];
     let escaped_keys: Vec<String> = all_keys.iter().map(|s| csv_escape(s)).collect();
-    let header_line: Vec<&str> = header_parts.iter().copied()
+    let header_line: Vec<&str> = header_parts
+        .iter()
+        .copied()
         .chain(escaped_keys.iter().map(|s| s.as_str()))
         .collect();
     writeln!(file, "{}", header_line.join(","))?;
@@ -423,8 +476,16 @@ fn export_csv(events: &[NetworkBehaviorIndicator], path: &Path) -> std::io::Resu
 
 fn csv_escape(value: &str) -> String {
     // Sanitize CSV formula injection (values starting with =, +, -, @)
-    let needs_formula_guard = value.starts_with('=') || value.starts_with('+') || value.starts_with('-') || value.starts_with('@');
-    if needs_formula_guard || value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r') {
+    let needs_formula_guard = value.starts_with('=')
+        || value.starts_with('+')
+        || value.starts_with('-')
+        || value.starts_with('@');
+    if needs_formula_guard
+        || value.contains(',')
+        || value.contains('"')
+        || value.contains('\n')
+        || value.contains('\r')
+    {
         if needs_formula_guard {
             format!("\"'{}\"", value.replace('"', "\"\""))
         } else {
@@ -509,6 +570,64 @@ mod tests {
         assert_eq!(loaded.invalid_lines, 1);
         assert!(loaded.read_error.is_none());
         assert!(loaded.has_integrity_issues());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn sarif_uses_real_timestamp_bounds_for_unsorted_events() {
+        let path = std::env::temp_dir().join(format!(
+            "nettrap-output-sarif-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let destination = SessionDestination::unknown(8080);
+        let mut oldest = raw_nbi("raw", "127.0.0.1", 1111, &destination, 4, "");
+        let mut newest = raw_nbi("raw", "127.0.0.1", 2222, &destination, 4, "");
+        let mut middle = raw_nbi("raw", "127.0.0.1", 3333, &destination, 4, "");
+
+        oldest.timestamp = "2026-04-13T09:00:00Z".to_string();
+        newest.timestamp = "2026-04-13T11:00:00Z".to_string();
+        middle.timestamp = "2026-04-13T10:00:00Z".to_string();
+
+        export_nbis(
+            &[middle.clone(), newest.clone(), oldest.clone()],
+            OutputFormat::Sarif,
+            &path,
+        )
+        .unwrap();
+
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let invocation = &json["runs"][0]["invocations"][0];
+        assert_eq!(invocation["startTimeUtc"], oldest.timestamp);
+        assert_eq!(invocation["endTimeUtc"], newest.timestamp);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn toon_uses_real_timestamp_bounds_for_unsorted_events() {
+        let path =
+            std::env::temp_dir().join(format!("nettrap-output-toon-{}.toon", uuid::Uuid::new_v4()));
+        let destination = SessionDestination::unknown(8080);
+        let mut oldest = raw_nbi("raw", "127.0.0.1", 1111, &destination, 4, "");
+        let mut newest = raw_nbi("raw", "127.0.0.1", 2222, &destination, 4, "");
+        let mut middle = raw_nbi("raw", "127.0.0.1", 3333, &destination, 4, "");
+
+        oldest.timestamp = "2026-04-13T09:00:00Z".to_string();
+        newest.timestamp = "2026-04-13T11:00:00Z".to_string();
+        middle.timestamp = "2026-04-13T10:00:00Z".to_string();
+
+        export_nbis(
+            &[middle.clone(), newest.clone(), oldest.clone()],
+            OutputFormat::Toon,
+            &path,
+        )
+        .unwrap();
+
+        let output = std::fs::read_to_string(&path).unwrap();
+        assert!(output.contains(&format!("  start: {}", oldest.timestamp)));
+        assert!(output.contains(&format!("  end: {}", newest.timestamp)));
 
         let _ = std::fs::remove_file(path);
     }

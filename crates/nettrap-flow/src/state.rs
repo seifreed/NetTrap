@@ -85,7 +85,9 @@ impl FlowStateMachine {
 
         if elapsed > timeout {
             FlowLifeCycle::Expired
-        } else if flow.metadata.last_seen == flow.metadata.first_seen && flow.metadata.total_bytes() == 0 {
+        } else if flow.metadata.last_seen == flow.metadata.first_seen
+            && flow.metadata.total_bytes() == 0
+        {
             FlowLifeCycle::Idle
         } else {
             FlowLifeCycle::Active

@@ -56,8 +56,14 @@ impl WebrootServer {
                     if candidate.is_file() {
                         // Verify the resolved path doesn't escape the root via symlinks
                         if let Ok(canon) = candidate.canonicalize() {
-                            if !canon.starts_with(&self.root) {
-                                tracing::warn!("Symlink escape blocked: {:?} -> {:?}", candidate, canon);
+                            let abs_root =
+                                std::path::absolute(&self.root).unwrap_or(self.root.clone());
+                            if !canon.starts_with(&abs_root) {
+                                tracing::warn!(
+                                    "Symlink escape blocked: {:?} -> {:?}",
+                                    candidate,
+                                    canon
+                                );
                                 return None;
                             }
                         }
@@ -79,22 +85,23 @@ impl WebrootServer {
                 return None;
             }
         };
-        let canonical_path = match file_path.canonicalize() {
-            Ok(p) => p,
-            Err(_) => return None, // file doesn't exist or can't be resolved
-        };
-        if !canonical_path.starts_with(&canonical_root) {
-            tracing::warn!("Path traversal attempt blocked: {}", path);
-            return None;
-        }
-
         // Try exact path, then with index.html
+        // Each candidate is canonicalized individually in the loop below
         let candidates = vec![file_path.clone(), file_path.join("index.html")];
 
         for candidate in candidates {
             if candidate.is_file() {
-                if let Ok(content) = std::fs::read(&candidate) {
-                    let ext = candidate
+                // Canonicalize each candidate individually to prevent symlink escapes
+                let canonical_candidate = match candidate.canonicalize() {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+                if !canonical_candidate.starts_with(&canonical_root) {
+                    tracing::warn!("Path traversal attempt blocked: {:?}", candidate);
+                    continue;
+                }
+                if let Ok(content) = std::fs::read(&canonical_candidate) {
+                    let ext = canonical_candidate
                         .extension()
                         .and_then(|e| e.to_str())
                         .unwrap_or("")

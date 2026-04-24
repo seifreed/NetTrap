@@ -685,14 +685,21 @@ async fn handle_tftp(
         ctx.record_nbi(&nbi).await;
         match tftp_handler.handle_packet(&packet).await {
             Ok(responses) => {
+                let mut sent_bytes = 0u64;
                 ctx.apply_response_delay().await;
                 for resp in responses {
                     let resp_bytes = resp.to_bytes();
                     ctx.write_pcap_response_udp_for_destination(&resp_bytes, src, destination);
-                    if let Err(e) = socket.send_to(&resp_bytes, *src).await {
-                        tracing::warn!("Failed to send TFTP response to {}: {}", src, e);
+                    match socket.send_to(&resp_bytes, *src).await {
+                        Ok(_) => {
+                            sent_bytes += resp_bytes.len() as u64;
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to send TFTP response to {}: {}", src, e);
+                        }
                     }
                 }
+                ctx.update_session_bytes(src, "UDP", destination, _len as u64, sent_bytes);
             }
             Err(e) => tracing::warn!("TFTP handler error: {}", e),
         }
@@ -952,7 +959,8 @@ mod tests {
                 ),
                 Vec::new(),
                 Vec::new(),
-            ),
+            )
+            .expect("host rules should compile"),
             ListenerRuntime::new(
                 None,
                 Arc::new(nettrap_proxy::ProtocolRouter::new()),
@@ -999,7 +1007,8 @@ mod tests {
                 ),
                 Vec::new(),
                 Vec::new(),
-            ),
+            )
+            .expect("host rules should compile"),
             ListenerRuntime::new(
                 None,
                 Arc::new(nettrap_proxy::ProtocolRouter::new()),
@@ -1099,7 +1108,8 @@ mod tests {
             .name("raw")
             .port(listener_port)
             .build(
-                ListenerSecurity::new(ProcessFilter::default(), Vec::new(), Vec::new()),
+                ListenerSecurity::new(ProcessFilter::default(), Vec::new(), Vec::new())
+                    .expect("empty host rules should compile"),
                 ListenerRuntime::new(
                     None,
                     Arc::new(nettrap_proxy::ProtocolRouter::new()),

@@ -224,8 +224,12 @@ impl FlowManager {
             }
         }
         if !removed_ids.is_empty() {
-            self.flow_order.write().retain(|id| !removed_ids.contains(id));
-            self.recent_flows.write().retain(|id| !removed_ids.contains(id));
+            self.flow_order
+                .write()
+                .retain(|id| !removed_ids.contains(id));
+            self.recent_flows
+                .write()
+                .retain(|id| !removed_ids.contains(id));
             let mut stats = self.stats.write();
             stats.total_flows_closed += removed_ids.len() as u64;
             stats.active_flows = self.flows.len() as u64;

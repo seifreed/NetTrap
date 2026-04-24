@@ -1,17 +1,80 @@
+# ─── Build artifacts ──────────────────────────────────────────────────────────
 target/
 Cargo.lock
+
+# ─── AI/Editor assistants ─────────────────────────────────────────────────────
+CLAUDE.md
+.claude/
+.cursor/
+.cursorrules
+.copilot/
+.github/copilot-instructions.md
+.planning/
+.aider*
+
+# ─── Editor/IDE ───────────────────────────────────────────────────────────────
 *.swp
 *.swo
 *~
 .vim/
 .idea/
 .vscode/
+*.iml
+.project
+.settings/
+
+# ─── OS files ─────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ─── Runtime output ───────────────────────────────────────────────────────────
 *.log
 logs/
 *.pcap
 *.pcapng
 *.jsonl
+*.sarif.json
+*.toon
+*_nbi.*
+*.csv
+
+# ─── Secrets and credentials ─────────────────────────────────────────────────
 .env
 .env.*
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# ─── Databases ────────────────────────────────────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+
+# ─── FakeNet-NG reference (not part of this project) ─────────────────────────
+flare-fakenet-ng/
+
+# ─── Test/coverage artifacts ──────────────────────────────────────────────────
 coverage/
 benches/results/
+*.profraw
+*.profdata
+lcov.info
+tarpaulin-report.html
+
+# ─── Docker artifacts ─────────────────────────────────────────────────────────
+docker-compose.override.yml
+
+# ─── TLS/mkcert generated certs (runtime, not source) ────────────────────────
+certs/
+
+# ─── PCAP and capture data ────────────────────────────────────────────────────
+captures/
+http_post_*.bin
+
+# ─── Temporary files ─────────────────────────────────────────────────────────
+/tmp/
+*.tmp
+*.bak

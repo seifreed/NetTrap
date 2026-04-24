@@ -78,7 +78,13 @@ impl RedisHandler {
                             "bind" => "0.0.0.0",
                             _ => "",
                         };
-                        format!("*2\r\n${}\r\n{}\r\n${}\r\n{}\r\n", key.len(), key, value.len(), value)
+                        format!(
+                            "*2\r\n${}\r\n{}\r\n${}\r\n{}\r\n",
+                            key.len(),
+                            key,
+                            value.len(),
+                            value
+                        )
                     } else {
                         "+OK\r\n".to_string()
                     }
@@ -166,6 +172,9 @@ impl RedisHandler {
                             }
                             i += 1;
                         }
+                    } else {
+                        // Non-bulk element in array — skip to avoid infinite loop
+                        i += 1;
                     }
                 }
                 if !parts.is_empty() {

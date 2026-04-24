@@ -61,10 +61,13 @@ impl MqttHandler {
                     // Packet ID follows topic_length(2) + topic(var) in the variable header
                     let remaining_start = Self::remaining_length_end(data);
                     if remaining_start + 2 <= data.len() {
-                        let topic_len = u16::from_be_bytes([data[remaining_start], data[remaining_start + 1]]) as usize;
+                        let topic_len =
+                            u16::from_be_bytes([data[remaining_start], data[remaining_start + 1]])
+                                as usize;
                         let packet_id_pos = remaining_start + 2 + topic_len;
                         if packet_id_pos + 2 <= data.len() {
-                            let packet_id = u16::from_be_bytes([data[packet_id_pos], data[packet_id_pos + 1]]);
+                            let packet_id =
+                                u16::from_be_bytes([data[packet_id_pos], data[packet_id_pos + 1]]);
                             return vec![
                                 (MQTT_PUBACK << 4),
                                 2,
@@ -188,22 +191,38 @@ impl MqttHandler {
         if flags & 0x04 != 0 {
             // Will Topic (length-prefixed string)
             if pos + 2 > payload.len() {
-                return Some(MqttConnectInfo { client_id, username, password });
+                return Some(MqttConnectInfo {
+                    client_id,
+                    username,
+                    password,
+                });
             }
             let will_topic_len = u16::from_be_bytes([payload[pos], payload[pos + 1]]) as usize;
             pos += 2;
             if pos + will_topic_len > payload.len() {
-                return Some(MqttConnectInfo { client_id, username, password });
+                return Some(MqttConnectInfo {
+                    client_id,
+                    username,
+                    password,
+                });
             }
             pos += will_topic_len;
             // Will Message (length-prefixed bytes)
             if pos + 2 > payload.len() {
-                return Some(MqttConnectInfo { client_id, username, password });
+                return Some(MqttConnectInfo {
+                    client_id,
+                    username,
+                    password,
+                });
             }
             let will_msg_len = u16::from_be_bytes([payload[pos], payload[pos + 1]]) as usize;
             pos += 2;
             if pos + will_msg_len > payload.len() {
-                return Some(MqttConnectInfo { client_id, username, password });
+                return Some(MqttConnectInfo {
+                    client_id,
+                    username,
+                    password,
+                });
             }
             pos += will_msg_len;
         }

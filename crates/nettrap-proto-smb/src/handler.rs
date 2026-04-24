@@ -135,7 +135,7 @@ impl SmbHandler {
         resp.extend_from_slice(&0u32.to_le_bytes()); // Status: SUCCESS
         resp.extend_from_slice(&0u16.to_le_bytes()); // Command: NEGOTIATE
         resp.extend_from_slice(&1u16.to_le_bytes()); // Credits granted
-        resp.extend_from_slice(&[0; 4]); // Flags
+        resp.extend_from_slice(&1u32.to_le_bytes()); // Flags: SMB2_FLAGS_SERVER_TO_REDIR
         resp.extend_from_slice(&[0; 4]); // Next command
         resp.extend_from_slice(&[0; 8]); // Message ID
         resp.extend_from_slice(&[0; 4]); // Reserved
@@ -176,7 +176,7 @@ impl SmbHandler {
         resp.extend_from_slice(&status.to_le_bytes());
         resp.extend_from_slice(&[0; 2]); // Command
         resp.extend_from_slice(&1u16.to_le_bytes()); // Credits
-        resp.extend_from_slice(&[0; 4]); // Flags (response)
+        resp.extend_from_slice(&1u32.to_le_bytes()); // Flags: SMB2_FLAGS_SERVER_TO_REDIR
         resp.extend_from_slice(&[0; 60]); // Rest of header + minimal body
         let smb_len = (resp.len() - 4) as u32;
         Self::set_netbios_length(&mut resp, smb_len);
@@ -189,7 +189,9 @@ impl SmbHandler {
         resp.extend_from_slice(b"\xffSMB");
         resp.push(0); // Command
         resp.extend_from_slice(&status.to_le_bytes());
-        resp.extend_from_slice(&[0; 27]); // Rest of SMB1 header
+        resp.extend_from_slice(&[0; 23]); // Rest of SMB1 header (32 - magic(4) - cmd(1) - status(4) = 23)
+        resp.push(0); // WordCount = 0
+        resp.extend_from_slice(&0u16.to_le_bytes()); // ByteCount = 0
         let smb_len = (resp.len() - 4) as u32;
         Self::set_netbios_length(&mut resp, smb_len);
         resp

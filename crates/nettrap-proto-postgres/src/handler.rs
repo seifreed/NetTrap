@@ -28,11 +28,13 @@ impl PostgresHandler {
         }
         match data[0] {
             b'Q' => {
-                // Simple query
-                if data.len() < 6 {
+                // Simple query: 'Q'(1) + length(4) + query_string
+                if data.len() < 5 {
                     return Vec::new();
                 }
-                let raw_query = String::from_utf8_lossy(&data[5..]);
+                let msg_len = u32::from_be_bytes([data[1], data[2], data[3], data[4]]) as usize;
+                let query_end = (1 + msg_len).min(data.len());
+                let raw_query = String::from_utf8_lossy(&data[5..query_end]);
                 let query = raw_query.trim_end_matches('\0');
                 tracing::warn!("POSTGRES QUERY (v{}): {}", self.version, query);
                 // CommandComplete + ReadyForQuery
@@ -48,24 +50,41 @@ impl PostgresHandler {
                 resp
             }
             b'X' => Vec::new(), // Terminate
-            _ if data.len() >= 4 => {
-                // Startup message (no type byte, starts with length)
+            // Post-auth commands: Parse, Bind, Describe, Execute, Close, Flush, Sync, FunctionCall
+            b'P' | b'B' | b'D' | b'E' | b'C' | b'H' | b'S' | b'F' => {
+                tracing::info!("POSTGRES command: 0x{:02x}", data[0]);
+                // Respond with ReadyForQuery (idle)
+                let mut resp = Vec::new();
+                resp.push(b'Z');
+                resp.extend_from_slice(&5u32.to_be_bytes());
+                resp.push(b'I'); // Idle
+                resp
+            }
+            _ if data.len() >= 8 => {
+                // Startup message (no type byte, starts with length + version)
                 let len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-                if len > 8 && data.len() >= 8 {
-                    let pg_version = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
+                let pg_version = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
+                if pg_version == 80877103 {
+                    // SSLRequest → respond 'N' (no SSL), client will retry with normal startup
+                    tracing::info!("POSTGRES SSLRequest from client, declining");
+                    vec![b'N']
+                } else if pg_version == 196608 {
+                    // Normal 3.0 startup
                     tracing::info!(
                         "POSTGRES startup (server v{}): client version=0x{:08x}",
                         self.version,
                         pg_version
                     );
-                    if pg_version == 196608 {
-                        // 3.0
-                        // Parse user/database from key=value pairs
-                        let params = String::from_utf8_lossy(&data[8..]);
+                    if len > 8 {
+                        let msg_end = (len as usize).min(data.len());
+                        let params = String::from_utf8_lossy(&data[8..msg_end]);
                         tracing::info!("POSTGRES params: {}", params.replace('\0', " "));
                     }
+                    self.get_handshake_response()
+                } else {
+                    tracing::info!("POSTGRES unknown message: first_byte=0x{:02x}", data[0]);
+                    Vec::new()
                 }
-                self.get_handshake_response()
             }
             _ => Vec::new(),
         }

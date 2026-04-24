@@ -32,6 +32,12 @@ pub struct StartupContext {
     pub global_process_blacklist: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartupMode {
+    Standard,
+    ApiOnly,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct ValidatedRedirectDefaults {
     tcp: Option<ValidatedDefaultListener>,
@@ -47,24 +53,44 @@ struct ValidatedDefaultListener {
 pub fn create_startup_context(
     config: &EngineConfig,
     output_override: Option<PathBuf>,
+    mode: StartupMode,
 ) -> crate::Result<StartupContext> {
-    let redirect_defaults = validate_redirect_defaults(config)?;
-    let ca = init_tls_ca(config)?;
+    let listener_driven_outputs_enabled = matches!(mode, StartupMode::Standard);
+    let distributed_enabled = matches!(mode, StartupMode::Standard) && config.distributed.enabled;
+    let redirect_defaults = if matches!(mode, StartupMode::Standard) {
+        validate_redirect_defaults(config)?
+    } else {
+        ValidatedRedirectDefaults::default()
+    };
+    let ca = if matches!(mode, StartupMode::Standard) {
+        init_tls_ca(config)?
+    } else {
+        None
+    };
     let router = init_protocol_router(&redirect_defaults);
     let attribution = init_attribution(config);
-    let pcap_writer = init_pcap_writer(config)?;
+    let pcap_writer = if listener_driven_outputs_enabled {
+        init_pcap_writer(config)?
+    } else {
+        None
+    };
 
-    let output_path = output_override
-        .clone()
-        .or_else(|| config.output_path.clone().map(PathBuf::from));
+    let output_path = if listener_driven_outputs_enabled {
+        output_override
+            .clone()
+            .or_else(|| config.output_path.clone().map(PathBuf::from))
+    } else {
+        None
+    };
 
-    let nbi_path = output_path.as_ref().map(|p| {
-        let stem = p.file_stem().unwrap_or_default().to_string_lossy();
-        p.with_file_name(format!("{}_nbi.jsonl", stem))
-    });
-    if let Some(ref nbi_path) = nbi_path {
-        validate_nbi_output_path(nbi_path)?;
-    }
+    let nbi_path = if listener_driven_outputs_enabled {
+        if let Some(ref output_path) = output_path {
+            validate_output_file_path(output_path)?;
+        }
+        output_path.clone()
+    } else {
+        None
+    };
 
     let node_identity = Arc::new(crate::distributed::NodeIdentity::generate(
         config.distributed.node_id.clone(),
@@ -77,7 +103,7 @@ pub fn create_startup_context(
     let runtime_health = Arc::new(nettrap_api::RuntimeHealth::new());
     let nbi_collector = Arc::new(crate::nbi::NbiCollector::new(nbi_path.clone()));
     nbi_collector.attach_runtime_health(Arc::clone(&runtime_health));
-    if config.distributed.enabled {
+    if distributed_enabled {
         let fanout = Arc::new(crate::distributed::build_event_fanout(&config.distributed)?);
         fanout.attach_runtime_health(Arc::clone(&runtime_health));
         nbi_collector.attach_fanout(fanout);
@@ -95,13 +121,15 @@ pub fn create_startup_context(
     } else {
         None
     };
-    let listener_protocols = config
-        .listeners
-        .iter()
-        .map(|listener| (listener.name.clone(), listener.protocol))
-        .collect();
     nbi_collector.attach_session_tracker(Arc::clone(&session_tracker));
-    nbi_collector.attach_listener_protocols(listener_protocols);
+    if listener_driven_outputs_enabled {
+        let listener_protocols = config
+            .listeners
+            .iter()
+            .map(|listener| (listener.name.clone(), listener.protocol))
+            .collect();
+        nbi_collector.attach_listener_protocols(listener_protocols);
+    }
 
     Ok(StartupContext {
         ca,
@@ -128,10 +156,10 @@ pub fn create_startup_context(
     })
 }
 
-fn validate_nbi_output_path(path: &PathBuf) -> crate::Result<()> {
+fn validate_output_file_path(path: &PathBuf) -> crate::Result<()> {
     if path.is_dir() {
         return Err(crate::Error::Config(format!(
-            "NBI output path {} is a directory, expected a writable file",
+            "output path {} is a directory, expected a writable file",
             path.display()
         )));
     }
@@ -142,7 +170,7 @@ fn validate_nbi_output_path(path: &PathBuf) -> crate::Result<()> {
     {
         std::fs::create_dir_all(parent).map_err(|err| {
             crate::Error::Config(format!(
-                "failed to create NBI output directory {}: {}",
+                "failed to create output directory {}: {}",
                 parent.display(),
                 err
             ))
@@ -156,7 +184,7 @@ fn validate_nbi_output_path(path: &PathBuf) -> crate::Result<()> {
         .map(|_| ())
         .map_err(|err| {
             crate::Error::Config(format!(
-                "failed to validate writable NBI output path {}: {}",
+                "failed to validate writable output path {}: {}",
                 path.display(),
                 err
             ))
@@ -408,7 +436,7 @@ pub fn build_listener_context(
     listener: &crate::config::ListenerConfig,
     startup: &StartupContext,
     smtp_dir_override: Option<std::path::PathBuf>,
-) -> ListenerContext {
+) -> crate::Result<ListenerContext> {
     let smtp_dir = smtp_dir_override.or_else(|| {
         startup
             .output_path
@@ -427,7 +455,7 @@ pub fn build_listener_context(
         process_filter.clone(),
         listener.host_whitelist.clone(),
         listener.host_blacklist.clone(),
-    );
+    )?;
 
     let runtime = ListenerRuntime::new(
         startup.ca.clone(),
@@ -440,7 +468,7 @@ pub fn build_listener_context(
         Arc::clone(&startup.flow_manager),
     );
 
-    ListenerContext::builder()
+    Ok(ListenerContext::builder()
         .name(listener.name.clone())
         .port(listener.port)
         .banner(listener.banner.clone())
@@ -473,7 +501,7 @@ pub fn build_listener_context(
         .process_filter(process_filter)
         .host_whitelist(listener.host_whitelist.clone())
         .host_blacklist(listener.host_blacklist.clone())
-        .build(security, runtime)
+        .build(security, runtime))
 }
 
 pub fn init_windows_network(config: &EngineConfig) {
@@ -615,7 +643,7 @@ mod tests {
         config.database.backend = "sqlite".to_string();
         config.database.sqlite_path = Some(db_path.to_string_lossy().to_string());
 
-        let startup = create_startup_context(&config, None).unwrap();
+        let startup = create_startup_context(&config, None, StartupMode::Standard).unwrap();
         let startup = with_database(startup, &config).await.unwrap();
 
         let db = startup
@@ -651,7 +679,7 @@ mod tests {
         config.database.backend = "sqlite".to_string();
         config.database.sqlite_path = Some(bad_path.to_string_lossy().to_string());
 
-        let startup = create_startup_context(&config, None).unwrap();
+        let startup = create_startup_context(&config, None, StartupMode::Standard).unwrap();
         let err = match with_database(startup, &config).await {
             Ok(_) => panic!("invalid sqlite target should fail startup"),
             Err(err) => err,
@@ -667,7 +695,7 @@ mod tests {
         let mut config = EngineConfig::default();
         config.database.backend = "postgres".to_string();
 
-        let startup = create_startup_context(&config, None).unwrap();
+        let startup = create_startup_context(&config, None, StartupMode::Standard).unwrap();
         let err = match with_database(startup, &config).await {
             Ok(_) => panic!("missing postgres url should fail startup"),
             Err(err) => err,
@@ -682,7 +710,7 @@ mod tests {
         let mut config = EngineConfig::default();
         config.distributed.node_id = Some("configured-node".to_string());
 
-        let startup = create_startup_context(&config, None).unwrap();
+        let startup = create_startup_context(&config, None, StartupMode::Standard).unwrap();
 
         assert_eq!(startup.node_identity.node_id, "configured-node");
     }
@@ -708,7 +736,7 @@ mod tests {
         config.database.sqlite_path = Some(db_path.to_string_lossy().to_string());
         config.database.node_id = Some("db-node".to_string());
 
-        let startup = create_startup_context(&config, None).unwrap();
+        let startup = create_startup_context(&config, None, StartupMode::Standard).unwrap();
         let startup = with_database(startup, &config).await.unwrap();
         assert_eq!(startup.database_node_id.as_deref(), Some("db-node"));
 
@@ -752,14 +780,14 @@ mod tests {
         let bad_output = bad_parent.join("events.log");
         config.output_path = Some(bad_output.to_string_lossy().to_string());
 
-        let err = match create_startup_context(&config, None) {
+        let err = match create_startup_context(&config, None, StartupMode::Standard) {
             Ok(_) => panic!("unwritable output path should fail startup"),
             Err(err) => err,
         };
 
         assert!(
             err.to_string()
-                .contains("failed to create NBI output directory")
+                .contains("failed to create output directory")
         );
 
         let _ = std::fs::remove_file(&bad_parent);
@@ -769,10 +797,10 @@ mod tests {
     fn build_listener_context_propagates_log_hexdump() {
         let mut config = EngineConfig::default();
         config.log_hexdump = true;
-        let startup = create_startup_context(&config, None).unwrap();
+        let startup = create_startup_context(&config, None, StartupMode::Standard).unwrap();
         let listener = config.listeners.first().unwrap();
 
-        let ctx = build_listener_context(listener, &startup, None);
+        let ctx = build_listener_context(listener, &startup, None).expect("build listener context");
 
         assert!(ctx.config.log_hexdump);
     }
@@ -794,12 +822,99 @@ mod tests {
         config.redirect_all_traffic = true;
         config.default_tcp_listener = Some("missing".into());
 
-        let err = match create_startup_context(&config, None) {
+        let err = match create_startup_context(&config, None, StartupMode::Standard) {
             Ok(_) => panic!("startup should fail"),
             Err(err) => err,
         };
 
         assert!(err.to_string().contains("missing"));
+    }
+
+    #[test]
+    fn create_startup_context_api_only_skips_redirect_validation() {
+        let mut config = EngineConfig::default();
+        config.redirect_all_traffic = true;
+        config.default_tcp_listener = Some("missing".into());
+
+        create_startup_context(&config, None, StartupMode::ApiOnly)
+            .expect("api-only startup should ignore listener redirect defaults");
+    }
+
+    #[test]
+    fn create_startup_context_api_only_skips_tls_ca_initialization() {
+        let mut config = EngineConfig::default();
+        config.listeners = vec![crate::config::ListenerConfig::https()];
+        config.tls_ca_cert = Some("/definitely/missing/nettrap-ca.pem".into());
+        config.tls_ca_key = Some("/definitely/missing/nettrap-ca-key.pem".into());
+
+        let startup = create_startup_context(&config, None, StartupMode::ApiOnly)
+            .expect("api-only startup should skip TLS CA setup");
+
+        assert!(startup.ca.is_none());
+    }
+
+    #[test]
+    fn create_startup_context_api_only_skips_listener_driven_outputs_and_metadata() {
+        let mut config = EngineConfig::default();
+        config.pcap_enabled = true;
+        config.output_path = Some("events.jsonl".into());
+        config.listeners = vec![
+            crate::config::ListenerConfig::new("dup", 80),
+            crate::config::ListenerConfig::new("dup", 81),
+        ];
+
+        let startup = create_startup_context(&config, None, StartupMode::ApiOnly)
+            .expect("api-only startup should skip capture outputs");
+
+        assert!(startup.pcap_writer.is_none());
+        assert!(startup.output_path.is_none());
+        assert!(startup.nbi_path.is_none());
+        assert_eq!(startup.nbi_collector.listener_protocol_count(), 0);
+    }
+
+    #[test]
+    fn create_startup_context_api_only_disables_distributed_export_even_when_configured() {
+        let mut config = EngineConfig::default();
+        config.distributed.enabled = true;
+        config
+            .distributed
+            .event_sinks
+            .push(crate::config::EventSinkConfig {
+                sink_type: "bogus".into(),
+                target: "127.0.0.1:1".into(),
+                auth: None,
+                batch_size: 1,
+                flush_interval_ms: 1000,
+                request_timeout_ms: 1000,
+            });
+
+        let startup = create_startup_context(&config, None, StartupMode::ApiOnly)
+            .expect("api-only startup should ignore distributed export config");
+
+        assert_eq!(
+            startup.runtime_health.snapshot().distributed_export.state,
+            nettrap_api::ComponentState::Disabled
+        );
+    }
+
+    #[test]
+    fn create_startup_context_preserves_exact_output_path_for_nbi() {
+        let mut config = EngineConfig::default();
+        config.output_path = Some(
+            std::env::temp_dir()
+                .join(format!(
+                    "nettrap-output-preserve-{}.jsonl",
+                    uuid::Uuid::new_v4()
+                ))
+                .to_string_lossy()
+                .to_string(),
+        );
+
+        let startup = create_startup_context(&config, None, StartupMode::Standard)
+            .expect("startup should initialize with explicit output path");
+
+        assert!(startup.output_path.is_some());
+        assert_eq!(startup.output_path, startup.nbi_path);
     }
 
     #[test]
@@ -818,7 +933,7 @@ mod tests {
                 request_timeout_ms: 1000,
             });
 
-        let err = match create_startup_context(&config, None) {
+        let err = match create_startup_context(&config, None, StartupMode::Standard) {
             Ok(_) => panic!("startup should fail"),
             Err(err) => err,
         };
@@ -833,7 +948,7 @@ mod tests {
     async fn create_startup_context_starts_session_cleanup_and_attaches_tracker() {
         let config = EngineConfig::default();
 
-        let startup = create_startup_context(&config, None).unwrap();
+        let startup = create_startup_context(&config, None, StartupMode::Standard).unwrap();
 
         assert!(startup.session_cleanup_task.is_some());
         assert_eq!(startup.session_tracker.active_count(), 0);

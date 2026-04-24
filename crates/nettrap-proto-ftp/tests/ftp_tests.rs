@@ -51,7 +51,13 @@ mod tests {
     fn test_ftp_list() {
         let handler = FtpHandler::new();
         let response = handler.handle("LIST");
-        assert_eq!(response.code, 150);
+        assert_eq!(response.code, 0); // raw response with full listing
+        assert!(
+            response
+                .message
+                .contains("150 Here comes the directory listing")
+        );
+        assert!(response.message.contains("226 Directory send OK"));
     }
 
     #[test]

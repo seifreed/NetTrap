@@ -73,7 +73,8 @@ impl TlsWrapper {
         stream: TcpStream,
         peeked: &[u8],
     ) -> Result<(WrappedStream, Option<String>)> {
-        let is_tls = peeked.len() >= 3 && peeked[0] == 0x16 && peeked[1] == 0x03 && peeked[2] <= 0x04;
+        let is_tls =
+            peeked.len() >= 3 && peeked[0] == 0x16 && peeked[1] == 0x03 && peeked[2] <= 0x04;
 
         if !is_tls {
             return Ok((WrappedStream::Plain(stream), None));

@@ -12,7 +12,9 @@ pub struct ApiState {
 
 impl ApiState {
     pub fn new(flow_manager: Arc<FlowManager>) -> Self {
-        Self::with_runtime_health(flow_manager, Arc::new(RuntimeHealth::new()))
+        let runtime_health = Arc::new(RuntimeHealth::new());
+        runtime_health.set_allow_zero_listeners(true);
+        Self::with_runtime_health(flow_manager, runtime_health)
     }
 
     pub fn with_runtime_health(
@@ -141,5 +143,18 @@ mod tests {
         assert_eq!(response["status"], "error");
         assert_eq!(response["fatal_error"], "bind failed");
         assert_eq!(response["listeners"][0]["state"], "failed");
+    }
+
+    #[tokio::test]
+    async fn api_state_new_treats_zero_listener_runtime_as_api_only() {
+        let state = Arc::new(ApiState::new(Arc::new(FlowManager::default())));
+        state.runtime_health.mark_startup_complete();
+        state.runtime_health.set_api_running();
+        state.runtime_health.set_interceptor_disabled();
+        state.runtime_health.set_distributed_export_disabled();
+
+        let response = health_handler(State(state)).await.0;
+
+        assert_eq!(response["status"], "ok");
     }
 }

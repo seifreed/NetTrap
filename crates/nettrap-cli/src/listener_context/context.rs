@@ -361,7 +361,7 @@ impl ListenerContext {
         banner_delay_ms: u64,
         smtp_dir: Option<PathBuf>,
         flow_manager: Arc<nettrap_flow::FlowManager>,
-    ) -> Self {
+    ) -> crate::Result<Self> {
         let config = ListenerConfig {
             name,
             port,
@@ -390,7 +390,7 @@ impl ListenerContext {
             log_hexdump,
         };
 
-        let security = ListenerSecurity::new(process_filter, host_whitelist, host_blacklist);
+        let security = ListenerSecurity::new(process_filter, host_whitelist, host_blacklist)?;
 
         let runtime = ListenerRuntime::new(
             ca,
@@ -403,7 +403,7 @@ impl ListenerContext {
             flow_manager,
         );
 
-        Self {
+        Ok(Self {
             config: config.clone(),
             security: security.clone(),
             runtime: runtime.clone(),
@@ -443,7 +443,7 @@ impl ListenerContext {
             nbi_collector: runtime.nbi_collector,
             session_tracker: runtime.session_tracker,
             port_forward_table: runtime.port_forward_table,
-        }
+        })
     }
 
     pub fn builder() -> ListenerContextBuilder {
@@ -846,7 +846,8 @@ mod tests {
         let tracker = Arc::new(SessionTracker::new());
         let port_forward_table = Arc::new(PortForwardTable::new());
         let ctx = ListenerContext::builder().name("raw").port(9000).build(
-            ListenerSecurity::new(ProcessFilter::default(), Vec::new(), Vec::new()),
+            ListenerSecurity::new(ProcessFilter::default(), Vec::new(), Vec::new())
+                .expect("empty host rules should compile"),
             ListenerRuntime::new(
                 None,
                 Arc::new(nettrap_proxy::ProtocolRouter::new()),
@@ -881,7 +882,8 @@ mod tests {
         let tracker = Arc::new(SessionTracker::new());
         let port_forward_table = Arc::new(PortForwardTable::new());
         let ctx = ListenerContext::builder().name("raw").port(9000).build(
-            ListenerSecurity::new(ProcessFilter::default(), Vec::new(), Vec::new()),
+            ListenerSecurity::new(ProcessFilter::default(), Vec::new(), Vec::new())
+                .expect("empty host rules should compile"),
             ListenerRuntime::new(
                 None,
                 Arc::new(nettrap_proxy::ProtocolRouter::new()),
@@ -910,7 +912,8 @@ mod tests {
         let tracker = Arc::new(SessionTracker::new());
         let port_forward_table = Arc::new(PortForwardTable::new());
         let ctx = ListenerContext::builder().name("dns").port(53).build(
-            ListenerSecurity::new(ProcessFilter::default(), Vec::new(), Vec::new()),
+            ListenerSecurity::new(ProcessFilter::default(), Vec::new(), Vec::new())
+                .expect("empty host rules should compile"),
             ListenerRuntime::new(
                 None,
                 Arc::new(nettrap_proxy::ProtocolRouter::new()),
@@ -941,7 +944,8 @@ mod tests {
         let tracker = Arc::new(SessionTracker::new());
         let port_forward_table = Arc::new(PortForwardTable::new());
         let ctx = ListenerContext::builder().name("http").port(8080).build(
-            ListenerSecurity::new(ProcessFilter::default(), Vec::new(), Vec::new()),
+            ListenerSecurity::new(ProcessFilter::default(), Vec::new(), Vec::new())
+                .expect("empty host rules should compile"),
             ListenerRuntime::new(
                 None,
                 Arc::new(nettrap_proxy::ProtocolRouter::new()),
@@ -973,7 +977,8 @@ mod tests {
             .port(8080)
             .execute_cmd(Some("echo {procname}:{pid}".to_string()))
             .build(
-                ListenerSecurity::new(ProcessFilter::default(), Vec::new(), Vec::new()),
+                ListenerSecurity::new(ProcessFilter::default(), Vec::new(), Vec::new())
+                    .expect("empty host rules should compile"),
                 ListenerRuntime::new(
                     None,
                     Arc::new(nettrap_proxy::ProtocolRouter::new()),
@@ -1009,7 +1014,8 @@ mod tests {
         let port_forward_table = Arc::new(PortForwardTable::new());
         let flow_manager = Arc::new(nettrap_flow::FlowManager::default());
         let ctx = ListenerContext::builder().name("http").port(8080).build(
-            ListenerSecurity::new(ProcessFilter::default(), Vec::new(), Vec::new()),
+            ListenerSecurity::new(ProcessFilter::default(), Vec::new(), Vec::new())
+                .expect("empty host rules should compile"),
             ListenerRuntime::new(
                 None,
                 Arc::new(nettrap_proxy::ProtocolRouter::new()),
@@ -1046,5 +1052,54 @@ mod tests {
 
         ctx.remove_session(&src, "TCP", &destination);
         assert!(flow_manager.get(&key).is_none());
+    }
+
+    #[test]
+    fn legacy_constructor_returns_error_for_invalid_host_rules() {
+        let result = ListenerContext::legacy(
+            "http".to_string(),
+            80,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+            30_000,
+            false,
+            ProcessFilter::default(),
+            vec!["definitely-not-a-real-nettrap-host.invalid".to_string()],
+            Vec::new(),
+            None,
+            Arc::new(nettrap_proxy::ProtocolRouter::new()),
+            None,
+            None,
+            0,
+            None,
+            Arc::new(crate::nbi::NbiCollector::new(None)),
+            Arc::new(SessionTracker::new()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(100),
+            None,
+            Arc::new(ConnectionDedup::new()),
+            Arc::new(PortForwardTable::new()),
+            None,
+            0,
+            None,
+            Arc::new(nettrap_flow::FlowManager::default()),
+        );
+
+        let err = match result {
+            Ok(_) => panic!("invalid legacy host filters should fail"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("failed to resolve host filter"));
     }
 }

@@ -52,7 +52,7 @@ impl SmtpHandler {
     }
 
     pub fn get_welcome_banner(&self) -> String {
-        format!("{} ESMTP NetTrap Ready\r\n", self.domain)
+        format!("220 {} ESMTP NetTrap Ready\r\n", self.domain)
     }
 
     fn generate_cram_challenge() -> String {
@@ -276,11 +276,17 @@ impl SmtpHandler {
         } else if upper.starts_with("QUIT") {
             (SmtpResponse::bye(), SmtpAuthState::None)
         } else if upper.starts_with("HELP") {
-            (SmtpResponse::raw(
-                "250-This is NetTrap SMTP honeypot\r\n250-Commands: EHLO HELO MAIL RCPT DATA RSET NOOP QUIT AUTH",
-            ), SmtpAuthState::None)
+            (
+                SmtpResponse::raw(
+                    "250-This is NetTrap SMTP honeypot\r\n250 Commands: EHLO HELO MAIL RCPT DATA RSET NOOP QUIT AUTH",
+                ),
+                SmtpAuthState::None,
+            )
         } else if upper.starts_with("STARTTLS") {
-            (SmtpResponse::new(220, "Ready to start TLS"), SmtpAuthState::None)
+            (
+                SmtpResponse::new(220, "Ready to start TLS"),
+                SmtpAuthState::None,
+            )
         } else if upper.starts_with("AUTH") {
             // ── AUTH credential capture ──────────────────────────────────
             let parts: Vec<&str> = trimmed.splitn(3, ' ').collect();
@@ -305,27 +311,42 @@ impl SmtpHandler {
                         } else {
                             tracing::info!("SMTP AUTH PLAIN captured (decode failed): {}", data);
                         }
-                        (SmtpResponse::new(235, "2.7.0 Authentication successful"), SmtpAuthState::None)
+                        (
+                            SmtpResponse::new(235, "2.7.0 Authentication successful"),
+                            SmtpAuthState::None,
+                        )
                     } else {
                         (SmtpResponse::new(334, ""), SmtpAuthState::PlainContinuation)
                     }
                 }
-                "LOGIN" => (SmtpResponse::new(334, "VXNlcm5hbWU6"), SmtpAuthState::LoginUsername),
+                "LOGIN" => (
+                    SmtpResponse::new(334, "VXNlcm5hbWU6"),
+                    SmtpAuthState::LoginUsername,
+                ),
                 "CRAM-MD5" => {
                     let fresh_challenge = Self::generate_cram_challenge();
                     let challenge_b64 = BASE64.encode(fresh_challenge.as_bytes());
                     tracing::debug!("SMTP CRAM-MD5 challenge: {}", fresh_challenge);
-                    (SmtpResponse::new(334, challenge_b64), SmtpAuthState::CramResponse("CRAM-MD5".to_string()))
+                    (
+                        SmtpResponse::new(334, challenge_b64),
+                        SmtpAuthState::CramResponse("CRAM-MD5".to_string()),
+                    )
                 }
                 "CRAM-SHA1" => {
                     let fresh_challenge = Self::generate_cram_challenge();
                     let challenge_b64 = BASE64.encode(fresh_challenge.as_bytes());
                     tracing::debug!("SMTP CRAM-SHA1 challenge: {}", fresh_challenge);
-                    (SmtpResponse::new(334, challenge_b64), SmtpAuthState::CramResponse("CRAM-SHA1".to_string()))
+                    (
+                        SmtpResponse::new(334, challenge_b64),
+                        SmtpAuthState::CramResponse("CRAM-SHA1".to_string()),
+                    )
                 }
                 _ => {
                     tracing::info!("SMTP AUTH unknown mechanism: {}", mechanism);
-                    (SmtpResponse::new(504, "5.5.4 Unrecognized authentication type"), SmtpAuthState::None)
+                    (
+                        SmtpResponse::new(504, "5.5.4 Unrecognized authentication type"),
+                        SmtpAuthState::None,
+                    )
                 }
             }
         } else if upper.starts_with("X-EXPS")
@@ -334,7 +355,10 @@ impl SmtpHandler {
         {
             (SmtpResponse::ok(), SmtpAuthState::None)
         } else {
-            (SmtpResponse::error("Command not recognized"), SmtpAuthState::None)
+            (
+                SmtpResponse::error("Command not recognized"),
+                SmtpAuthState::None,
+            )
         }
     }
 }

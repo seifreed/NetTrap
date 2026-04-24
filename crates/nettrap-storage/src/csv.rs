@@ -29,15 +29,17 @@ impl CsvStorage {
 
         let file = File::create(path)?;
         *self.writer.write() = Some(BufWriter::new(file));
+        *self.header_written.write() = false;
 
         Ok(())
     }
 
     pub fn close(&self) {
-        if let Some(ref mut writer) = *self.writer.write() {
-            let _ = writer.flush();
+        let mut writer = self.writer.write();
+        if let Some(ref mut w) = *writer {
+            let _ = w.flush();
         }
-        *self.writer.write() = None;
+        *writer = None;
     }
 
     fn ensure_header(&self, w: &mut BufWriter<File>) -> Result<()> {
@@ -56,8 +58,14 @@ impl CsvStorage {
     /// Escape a field for CSV (quote if it contains comma, quote, or newline)
     fn csv_escape(s: &str) -> String {
         // Sanitize CSV formula injection (values starting with =, +, -, @)
-        let needs_formula_guard = s.starts_with('=') || s.starts_with('+') || s.starts_with('-') || s.starts_with('@');
-        if needs_formula_guard || s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
+        let needs_formula_guard =
+            s.starts_with('=') || s.starts_with('+') || s.starts_with('-') || s.starts_with('@');
+        if needs_formula_guard
+            || s.contains(',')
+            || s.contains('"')
+            || s.contains('\n')
+            || s.contains('\r')
+        {
             if needs_formula_guard {
                 format!("\"'{}\"", s.replace('"', "\"\""))
             } else {
@@ -152,5 +160,63 @@ impl Storage for CsvStorage {
         }
         *writer = None;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::CsvStorage;
+    use crate::storage::Storage;
+    use nettrap_core::Packet;
+
+    fn temp_csv_path() -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        std::env::temp_dir().join(format!("nettrap-csv-reopen-{unique}.csv"))
+    }
+
+    #[tokio::test]
+    async fn reopen_rewrites_header_after_truncate() {
+        let path = temp_csv_path();
+        let storage = CsvStorage::new(path.to_string_lossy().into_owned());
+
+        storage.open().expect("first open should succeed");
+        storage
+            .store_packet(&Packet::default())
+            .await
+            .expect("first write should succeed");
+        storage.flush().await.expect("first flush should succeed");
+        Storage::close(&storage)
+            .await
+            .expect("first close should succeed");
+
+        storage.open().expect("second open should succeed");
+        storage
+            .store_packet(&Packet::default())
+            .await
+            .expect("second write should succeed");
+        storage.flush().await.expect("second flush should succeed");
+        Storage::close(&storage)
+            .await
+            .expect("second close should succeed");
+
+        let contents = std::fs::read_to_string(&path).expect("csv file should be readable");
+        let lines: Vec<&str> = contents.lines().collect();
+
+        assert_eq!(
+            lines.len(),
+            2,
+            "reopened file should contain header plus one row"
+        );
+        assert_eq!(
+            lines[0],
+            "timestamp,type,src_ip,src_port,dst_ip,dst_port,protocol,direction,length,details"
+        );
+
+        let _ = std::fs::remove_file(path);
     }
 }

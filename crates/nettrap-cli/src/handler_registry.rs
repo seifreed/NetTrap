@@ -85,7 +85,8 @@ impl HandlerRegistry {
 
     fn ftp_banner(banner: Option<&str>) -> Option<Vec<u8>> {
         let handler = if let Some(b) = banner {
-            FtpHandler::new().with_banner(b)
+            FtpHandler::new()
+                .with_banner(nettrap_protocols::handlers::nettrap_proto_ftp::resolve_banner(b))
         } else {
             FtpHandler::new()
         };

@@ -53,10 +53,16 @@ pub fn generate_html_report(report: &Report) -> Result<String> {
 
     for flow in &report.flows {
         html.push_str("      <tr>\n");
-        html.push_str(&format!("        <td>{}</td>\n", html_escape(&flow.flow_id)));
+        html.push_str(&format!(
+            "        <td>{}</td>\n",
+            html_escape(&flow.flow_id)
+        ));
         html.push_str(&format!("        <td>{}</td>\n", html_escape(&flow.src)));
         html.push_str(&format!("        <td>{}</td>\n", html_escape(&flow.dst)));
-        html.push_str(&format!("        <td>{}</td>\n", html_escape(&flow.protocol)));
+        html.push_str(&format!(
+            "        <td>{}</td>\n",
+            html_escape(&flow.protocol)
+        ));
         html.push_str(&format!("        <td>{}</td>\n", flow.bytes_sent));
         html.push_str(&format!("        <td>{}</td>\n", flow.bytes_received));
         html.push_str(&format!("        <td>{}</td>\n", flow.duration_ms));
@@ -68,6 +74,32 @@ pub fn generate_html_report(report: &Report) -> Result<String> {
     }
 
     html.push_str("    </table>\n");
+
+    html.push_str("    <h2>Events</h2>\n");
+    html.push_str("    <p>Total events: ");
+    html.push_str(&report.events.len().to_string());
+    html.push_str("</p>\n");
+
+    if !report.events.is_empty() {
+        html.push_str("    <table>\n");
+        html.push_str("      <tr><th>Timestamp</th><th>Type</th><th>Summary</th></tr>\n");
+
+        for event in &report.events {
+            html.push_str("      <tr>\n");
+            html.push_str(&format!("        <td>{}</td>\n", event.timestamp));
+            html.push_str(&format!(
+                "        <td>{}</td>\n",
+                html_escape(&event.event_type)
+            ));
+            html.push_str(&format!(
+                "        <td>{}</td>\n",
+                html_escape(&event.summary)
+            ));
+            html.push_str("      </tr>\n");
+        }
+
+        html.push_str("    </table>\n");
+    }
 
     html.push_str("    <h2>Indicators of Compromise</h2>\n");
     html.push_str("    <p>Total IoCs: ");
@@ -82,7 +114,10 @@ pub fn generate_html_report(report: &Report) -> Result<String> {
 
         for ioc in &report.iocs {
             html.push_str("      <tr>\n");
-            html.push_str(&format!("        <td>{}</td>\n", html_escape(&ioc.ioc_type)));
+            html.push_str(&format!(
+                "        <td>{}</td>\n",
+                html_escape(&ioc.ioc_type)
+            ));
             html.push_str(&format!("        <td>{}</td>\n", html_escape(&ioc.value)));
 
             let confidence_class = if ioc.confidence >= 0.8 {
@@ -109,4 +144,31 @@ pub fn generate_html_report(report: &Report) -> Result<String> {
     html.push_str("</html>\n");
 
     Ok(html)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generate_html_report_includes_events_section() {
+        let report = Report {
+            title: "NetTrap Report".to_string(),
+            generated_at: now(),
+            flows: Vec::new(),
+            events: vec![EventSummary {
+                event_type: "http_request".to_string(),
+                timestamp: now(),
+                summary: "GET /hello?<script>".to_string(),
+            }],
+            iocs: Vec::new(),
+        };
+
+        let html = generate_html_report(&report).expect("html report should render");
+
+        assert!(html.contains("Events"));
+        assert!(html.contains("Total events: 1"));
+        assert!(html.contains("http_request"));
+        assert!(html.contains("GET /hello?&lt;script&gt;"));
+    }
 }

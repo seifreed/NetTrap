@@ -95,8 +95,9 @@ impl PolicyRule {
     }
 
     pub fn with_ports(mut self, ports: impl IntoIterator<Item = u16>) -> Self {
-        for port in ports {
-            self.matchers.push(RuleMatcher::Port(port));
+        let ports: Vec<u16> = ports.into_iter().collect();
+        if !ports.is_empty() {
+            self.matchers.push(RuleMatcher::Ports(ports));
         }
         self
     }
@@ -298,4 +299,63 @@ pub fn passthrough_localhost() -> PolicyRule {
         "::1/128".parse().expect("valid CIDR"),
     ]));
     rule
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::policy::PolicyContext;
+    use nettrap_core::prelude::{FiveTuple, ProcessInfo};
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn tcp_flow(dst_port: u16) -> Flow {
+        Flow::new(FiveTuple::new(
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 10)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 20)),
+            42424,
+            dst_port,
+            Protocol::Tcp,
+        ))
+    }
+
+    #[test]
+    fn with_ports_matches_any_configured_port() {
+        let rule = PolicyRule::intercept().with_ports([80, 443]);
+        let http_flow = tcp_flow(80);
+        let https_flow = tcp_flow(443);
+        let ssh_flow = tcp_flow(22);
+        let http_ctx = PolicyContext {
+            flow: &http_flow,
+            packet: None,
+        };
+        let https_ctx = PolicyContext {
+            flow: &https_flow,
+            packet: None,
+        };
+        let ssh_ctx = PolicyContext {
+            flow: &ssh_flow,
+            packet: None,
+        };
+
+        assert!(rule.matches(&http_ctx));
+        assert!(rule.matches(&https_ctx));
+        assert!(!rule.matches(&ssh_ctx));
+    }
+
+    #[test]
+    fn with_ports_still_ands_with_other_matchers() {
+        let mut flow = tcp_flow(443);
+        flow.metadata.process = Some(ProcessInfo::new(4242, "curl"));
+
+        let rule = PolicyRule::intercept()
+            .with_ports([80, 443])
+            .with_protocol(Protocol::Tcp)
+            .with_process_name("curl");
+
+        let ctx = PolicyContext {
+            flow: &flow,
+            packet: None,
+        };
+        assert!(rule.matches(&ctx));
+    }
 }

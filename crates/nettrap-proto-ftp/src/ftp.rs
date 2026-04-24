@@ -112,20 +112,21 @@ impl FtpHandler {
             let port = {
                 let current = self
                     .pasv_port_counter
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let range = self
-                    .pasv_port_end
-                    .saturating_sub(self.pasv_port_start)
-                    .max(1);
-                // Use modulo directly on counter to handle wrap-around correctly
-                // When current wraps from u16::MAX to 0, modulo still gives valid offset
-                self.pasv_port_start + (current % range)
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    as u32;
+                let start = self.pasv_port_start as u32;
+                let end = self.pasv_port_end as u32;
+                let range = end.saturating_sub(start).saturating_add(1).max(1);
+                (start + (current % range)) as u16
             };
             let p1 = port / 256;
             let p2 = port % 256;
             FtpResponse::new(
                 227,
-                format!("Entering Passive Mode ({},{},{})", self.pasv_address, p1, p2),
+                format!(
+                    "Entering Passive Mode ({},{},{})",
+                    self.pasv_address, p1, p2
+                ),
             )
         } else if upper.starts_with("LIST") {
             if let Some(ref root) = self.root_dir {
@@ -156,11 +157,24 @@ impl FtpHandler {
                     return FtpResponse {
                         code: 0,
                         message: listing,
+                        raw: None,
                     }; // code 0 = raw response
                 }
             }
-            // No root dir configured: return simple response
-            FtpResponse::new(150, "Opening data connection")
+            // No root dir configured: return virtual listing
+            let mut listing = String::from("150 Here comes the directory listing.\r\n");
+            for (vname, vsize) in VIRTUAL_FILES {
+                listing.push_str(&format!(
+                    "-rw-r--r--    1 ftp      ftp          {} Jan 01 00:00 {}\r\n",
+                    vsize, vname
+                ));
+            }
+            listing.push_str("226 Directory send OK.\r\n");
+            FtpResponse {
+                code: 0,
+                message: listing,
+                raw: None,
+            }
         } else if upper.starts_with("RETR") {
             let filename = command.get(5..).unwrap_or("").trim();
 
@@ -197,10 +211,7 @@ impl FtpHandler {
                             .into_bytes();
                             resp.extend_from_slice(content);
                             resp.extend_from_slice(b"226 Transfer complete.\r\n");
-                            return FtpResponse {
-                                code: 0,
-                                message: String::from_utf8_lossy(&resp).to_string(),
-                            };
+                            return FtpResponse::raw(resp);
                         }
                         return FtpResponse::new(550, "File not found");
                     }
@@ -220,10 +231,7 @@ impl FtpHandler {
                         .into_bytes();
                         resp.extend_from_slice(&content);
                         resp.extend_from_slice(b"226 Transfer complete.\r\n");
-                        return FtpResponse {
-                            code: 0,
-                            message: String::from_utf8_lossy(&resp).to_string(),
-                        };
+                        return FtpResponse::raw(resp);
                     }
                 }
                 // Try extension-based fallback
@@ -237,10 +245,7 @@ impl FtpHandler {
                     .into_bytes();
                     resp.extend_from_slice(content);
                     resp.extend_from_slice(b"226 Transfer complete.\r\n");
-                    return FtpResponse {
-                        code: 0,
-                        message: String::from_utf8_lossy(&resp).to_string(),
-                    };
+                    return FtpResponse::raw(resp);
                 }
                 FtpResponse::new(550, "File not found")
             } else {
@@ -253,12 +258,19 @@ impl FtpHandler {
         } else if upper.starts_with("EPRT") {
             FtpResponse::new(200, "EPRT command successful")
         } else if upper.starts_with("EPSV") {
+            let port = {
+                let current = self
+                    .pasv_port_counter
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    as u32;
+                let start = self.pasv_port_start as u32;
+                let end = self.pasv_port_end as u32;
+                let range = end.saturating_sub(start).saturating_add(1).max(1);
+                (start + (current % range)) as u16
+            };
             FtpResponse::new(
                 229,
-                format!(
-                    "Entering Extended Passive Mode (|||{}|)",
-                    self.pasv_port_start
-                ),
+                format!("Entering Extended Passive Mode (|||{}|)", port),
             )
         } else if upper.starts_with("SYST") {
             FtpResponse::new(215, "UNIX Type: L8")
@@ -267,6 +279,7 @@ impl FtpHandler {
                 code: 0,
                 message: "211-Features:\r\n PASV\r\n UTF8\r\n SIZE\r\n MDTM\r\n211 End\r\n"
                     .to_string(),
+                raw: None,
             }
         } else if upper.starts_with("SIZE") {
             let filename = command.get(5..).unwrap_or("").trim();
@@ -325,7 +338,7 @@ impl FtpHandler {
         } else if upper.starts_with("NOOP") {
             FtpResponse::new(200, "NOOP ok")
         } else if upper.starts_with("HELP") {
-            FtpResponse { code: 0, message: "214-The following commands are recognized:\r\n USER PASS ACCT CWD CDUP SMNT QUIT REIN PORT PASV TYPE STRU\r\n MODE RETR STOR STOU APPE ALLO REST RNFR RNTO DELE RMD MKD\r\n PWD LIST NLST SITE SYST STAT HELP NOOP\r\n214 Help OK.\r\n".to_string() }
+            FtpResponse { code: 0, message: "214-The following commands are recognized:\r\n USER PASS ACCT CWD CDUP SMNT QUIT REIN PORT PASV TYPE STRU\r\n MODE RETR STOR STOU APPE ALLO REST RNFR RNTO DELE RMD MKD\r\n PWD LIST NLST SITE SYST STAT HELP NOOP\r\n214 Help OK.\r\n".to_string(), raw: None }
         } else if upper.starts_with("STAT") {
             FtpResponse::new(211, "NetTrap FTP Server status OK")
         } else if upper.starts_with("ABOR") {
@@ -342,6 +355,7 @@ impl FtpHandler {
                     return FtpResponse {
                         code: 0,
                         message: listing,
+                        raw: None,
                     };
                 }
             }
@@ -353,14 +367,19 @@ impl FtpHandler {
         }
     }
 
-    pub fn get_banner(&self) -> &[u8] {
-        self.banner.as_bytes()
+    pub fn get_banner(&self) -> Vec<u8> {
+        let mut b = self.banner.as_bytes().to_vec();
+        if !b.ends_with(b"\r\n") {
+            b.extend_from_slice(b"\r\n");
+        }
+        b
     }
 }
 
 pub struct FtpResponse {
     pub code: u16,
     pub message: String,
+    pub raw: Option<Vec<u8>>,
 }
 
 impl FtpResponse {
@@ -368,10 +387,22 @@ impl FtpResponse {
         Self {
             code,
             message: message.into(),
+            raw: None,
+        }
+    }
+
+    pub fn raw(data: Vec<u8>) -> Self {
+        Self {
+            code: 0,
+            message: String::new(),
+            raw: Some(data),
         }
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
+        if let Some(ref raw) = self.raw {
+            return raw.clone();
+        }
         if self.code == 0 {
             self.message.clone().into_bytes()
         } else {

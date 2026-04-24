@@ -11,7 +11,7 @@ pub fn get_protocol_banner(name: &str, banner: Option<&str>) -> Option<Vec<u8>> 
 
 fn fallback_get_protocol_banner(name: &str, banner: Option<&str>) -> Option<Vec<u8>> {
     match name {
-        "smtp" | _ if name.starts_with("smtp") => {
+        _ if name.starts_with("smtp") => {
             let handler = if let Some(b) = banner {
                 nettrap_proto_smtp::SmtpHandler::new().with_domain(resolve_service_name(b))
             } else {
@@ -19,15 +19,16 @@ fn fallback_get_protocol_banner(name: &str, banner: Option<&str>) -> Option<Vec<
             };
             Some(handler.get_welcome_banner().into_bytes())
         }
-        "ftp" | _ if name.starts_with("ftp") => {
+        _ if name.starts_with("ftp") => {
             let handler = if let Some(b) = banner {
-                nettrap_proto_ftp::FtpHandler::new().with_banner(b)
+                nettrap_proto_ftp::FtpHandler::new()
+                    .with_banner(nettrap_proto_ftp::resolve_banner(b))
             } else {
                 nettrap_proto_ftp::FtpHandler::new()
             };
             Some(handler.get_banner().to_vec())
         }
-        "pop3" | _ if name.starts_with("pop3") => {
+        _ if name.starts_with("pop3") => {
             let handler = if let Some(b) = banner {
                 nettrap_proto_pop3::Pop3Handler::new().with_domain(resolve_service_name(b))
             } else {
@@ -35,7 +36,7 @@ fn fallback_get_protocol_banner(name: &str, banner: Option<&str>) -> Option<Vec<
             };
             Some(handler.get_welcome_banner().into_bytes())
         }
-        "irc" | _ if name.starts_with("irc") => {
+        _ if name.starts_with("irc") => {
             let handler = if let Some(b) = banner {
                 nettrap_proto_irc::IrcHandler::new().with_server_name(resolve_service_name(b))
             } else {
@@ -145,7 +146,7 @@ pub fn init_dns_handler(ctx: &ListenerContext) -> nettrap_proto_dns::handler::Dn
 pub fn init_ftp_handler(ctx: &ListenerContext) -> nettrap_proto_ftp::FtpHandler {
     let mut ftp_handler = nettrap_proto_ftp::FtpHandler::new();
     if let Some(ref banner) = ctx.config.banner {
-        ftp_handler = ftp_handler.with_banner(banner.as_str());
+        ftp_handler = ftp_handler.with_banner(nettrap_proto_ftp::resolve_banner(banner.as_str()));
     }
     if let Some(ref root) = ctx.config.ftproot {
         ftp_handler = ftp_handler.with_root_dir(root);

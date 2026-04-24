@@ -55,7 +55,11 @@ impl StaticResponse {
     }
 
     pub fn build(&self) -> Vec<u8> {
-        let mut response = format!("HTTP/1.1 {} {}\r\n", self.status, Self::reason_phrase(self.status));
+        let mut response = format!(
+            "HTTP/1.1 {} {}\r\n",
+            self.status,
+            Self::reason_phrase(self.status)
+        );
 
         for (name, value) in &self.headers {
             response.push_str(&format!("{}: {}\r\n", name, value));

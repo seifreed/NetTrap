@@ -1,4 +1,10 @@
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
+
+use crate::host_filter::{
+    HostRule, compile_host_rules, is_host_allowed_with_rules, is_loopback_host,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListenerConfig {
@@ -26,6 +32,14 @@ pub struct ListenerConfig {
     pub host_whitelist: Vec<String>,
     #[serde(default)]
     pub host_blacklist: Vec<String>,
+    #[serde(skip)]
+    compiled_host_whitelist: Arc<Vec<HostRule>>,
+    #[serde(skip)]
+    compiled_host_blacklist: Arc<Vec<HostRule>>,
+    #[serde(skip)]
+    compiled_host_whitelist_source: Arc<Vec<String>>,
+    #[serde(skip)]
+    compiled_host_blacklist_source: Arc<Vec<String>>,
     // Custom response config
     #[serde(default)]
     pub webroot: Option<String>,
@@ -112,6 +126,10 @@ impl ListenerConfig {
             process_blacklist: Vec::new(),
             host_whitelist: Vec::new(),
             host_blacklist: Vec::new(),
+            compiled_host_whitelist: Arc::default(),
+            compiled_host_blacklist: Arc::default(),
+            compiled_host_whitelist_source: Arc::default(),
+            compiled_host_blacklist_source: Arc::default(),
             webroot: None,
             ftproot: None,
             tftproot: None,
@@ -138,50 +156,105 @@ impl ListenerConfig {
         const MAX_PORT_RANGE: u16 = 1000;
 
         if let Some(ref range_str) = self.port_range {
+            let mut seen_ports = std::collections::HashSet::new();
             let mut configs = Vec::new();
             for part in range_str.split(',') {
                 let part = part.trim();
+                if part.is_empty() {
+                    tracing::warn!(
+                        "Empty port_range entry for listener {}, skipping",
+                        self.name
+                    );
+                    continue;
+                }
+
                 if let Some((start_s, end_s)) = part.split_once('-') {
-                    if let (Ok(start), Ok(end)) =
-                        (start_s.trim().parse::<u16>(), end_s.trim().parse::<u16>())
-                    {
-                        if start > end {
+                    let Ok(start) = start_s.trim().parse::<u16>() else {
+                        tracing::warn!(
+                            "Invalid port range start '{}' for listener {}, skipping",
+                            start_s.trim(),
+                            self.name
+                        );
+                        continue;
+                    };
+                    let Ok(end) = end_s.trim().parse::<u16>() else {
+                        tracing::warn!(
+                            "Invalid port range end '{}' for listener {}, skipping",
+                            end_s.trim(),
+                            self.name
+                        );
+                        continue;
+                    };
+                    if start > end {
+                        tracing::warn!(
+                            "Port range '{}-{}' is inverted for listener {}, skipping",
+                            start,
+                            end,
+                            self.name
+                        );
+                        continue;
+                    }
+                    if end - start >= MAX_PORT_RANGE {
+                        tracing::warn!(
+                            "Port range '{}-{}' exceeds max {} for listener {}, clamping",
+                            start,
+                            end,
+                            MAX_PORT_RANGE,
+                            self.name
+                        );
+                    }
+                    let clamped_end = start.saturating_add(MAX_PORT_RANGE - 1).min(end);
+                    for port in start..=clamped_end {
+                        if !seen_ports.insert(port) {
                             tracing::warn!(
-                                "Port range '{}-{}' is inverted for listener {}, skipping",
-                                start,
-                                end,
+                                "Duplicate port {} in port_range for listener {}, skipping",
+                                port,
                                 self.name
                             );
                             continue;
                         }
-                        if end - start > MAX_PORT_RANGE {
-                            tracing::warn!(
-                                "Port range '{}-{}' exceeds max {} for listener {}, clamping",
-                                start,
-                                end,
-                                MAX_PORT_RANGE,
-                                self.name
-                            );
-                        }
-                        let clamped_end = start.saturating_add(MAX_PORT_RANGE - 1).min(end);
-                        for port in start..=clamped_end {
-                            let mut cfg = self.clone();
-                            cfg.port = port;
-                            cfg.port_range = None;
-                            cfg.name = format!("{}_{}", self.name, port);
-                            configs.push(cfg);
-                        }
+                        let mut cfg = self.clone();
+                        cfg.port = port;
+                        cfg.port_range = None;
+                        configs.push(cfg);
                     }
                 } else if let Ok(port) = part.parse::<u16>() {
+                    if !seen_ports.insert(port) {
+                        tracing::warn!(
+                            "Duplicate port {} in port_range for listener {}, skipping",
+                            port,
+                            self.name
+                        );
+                        continue;
+                    }
                     let mut cfg = self.clone();
                     cfg.port = port;
                     cfg.port_range = None;
                     configs.push(cfg);
+                } else {
+                    tracing::warn!(
+                        "Invalid port '{}' in port_range for listener {}, skipping",
+                        part,
+                        self.name
+                    );
                 }
             }
-            if !configs.is_empty() {
-                return configs;
+
+            if configs.len() > 1 {
+                for cfg in &mut configs {
+                    cfg.name = format!("{}_{}", self.name, cfg.port);
+                }
             }
+
+            if configs.is_empty() {
+                tracing::warn!(
+                    "No valid ports parsed from port_range '{}' for listener {}, skipping listener expansion",
+                    range_str,
+                    self.name
+                );
+            }
+
+            return configs;
         }
         vec![self.clone()]
     }
@@ -319,19 +392,142 @@ impl ListenerConfig {
     /// Check if a host IP is allowed by this listener's filters
     pub fn is_host_allowed(&self, host: &str) -> bool {
         // Always allow loopback (including IPv4-mapped IPv6 variants)
-        if host == "127.0.0.1"
-            || host == "::1"
-            || host.starts_with("127.")
-            || host.starts_with("::ffff:127.")
-        {
+        if is_loopback_host(host) {
             return true;
         }
-        if !self.host_whitelist.is_empty() {
-            return self.host_whitelist.iter().any(|h| h == host);
+
+        match self.compiled_host_rules() {
+            Ok((whitelist, blacklist)) => is_host_allowed_with_rules(host, &whitelist, &blacklist),
+            Err(err) => {
+                tracing::warn!(
+                    "Listener '{}': failed to evaluate host filters: {}",
+                    self.name,
+                    err
+                );
+                false
+            }
         }
-        if !self.host_blacklist.is_empty() {
-            return !self.host_blacklist.iter().any(|h| h == host);
-        }
-        true
+    }
+
+    pub(crate) fn refresh_host_filters(&mut self) -> crate::Result<()> {
+        self.compiled_host_whitelist =
+            Arc::new(compile_host_rules(&self.host_whitelist).map_err(crate::Error::Config)?);
+        self.compiled_host_blacklist =
+            Arc::new(compile_host_rules(&self.host_blacklist).map_err(crate::Error::Config)?);
+        self.compiled_host_whitelist_source = Arc::new(self.host_whitelist.clone());
+        self.compiled_host_blacklist_source = Arc::new(self.host_blacklist.clone());
+        Ok(())
+    }
+
+    fn compiled_host_rules(&self) -> crate::Result<(Vec<HostRule>, Vec<HostRule>)> {
+        let whitelist = if self.host_whitelist.is_empty() {
+            Vec::new()
+        } else if self.compiled_host_whitelist_source.as_ref() == &self.host_whitelist {
+            (*self.compiled_host_whitelist).clone()
+        } else {
+            compile_host_rules(&self.host_whitelist).map_err(crate::Error::Config)?
+        };
+
+        let blacklist = if self.host_blacklist.is_empty() {
+            Vec::new()
+        } else if self.compiled_host_blacklist_source.as_ref() == &self.host_blacklist {
+            (*self.compiled_host_blacklist).clone()
+        } else {
+            compile_host_rules(&self.host_blacklist).map_err(crate::Error::Config)?
+        };
+
+        Ok((whitelist, blacklist))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ListenerConfig;
+
+    #[test]
+    fn expand_port_range_renames_multiple_single_ports() {
+        let mut config = ListenerConfig::new("http", 80);
+        config.port_range = Some("80,81".to_string());
+
+        let expanded = config.expand_port_range();
+        assert_eq!(expanded.len(), 2);
+        assert_eq!(expanded[0].name, "http_80");
+        assert_eq!(expanded[0].port, 80);
+        assert_eq!(expanded[1].name, "http_81");
+        assert_eq!(expanded[1].port, 81);
+    }
+
+    #[test]
+    fn expand_port_range_keeps_name_when_only_one_port_is_emitted() {
+        let mut config = ListenerConfig::new("http", 80);
+        config.port_range = Some("80".to_string());
+
+        let expanded = config.expand_port_range();
+        assert_eq!(expanded.len(), 1);
+        assert_eq!(expanded[0].name, "http");
+        assert_eq!(expanded[0].port, 80);
+    }
+
+    #[test]
+    fn expand_port_range_deduplicates_repeated_ports() {
+        let mut config = ListenerConfig::new("http", 80);
+        config.port_range = Some("80-81,81,80".to_string());
+
+        let expanded = config.expand_port_range();
+        assert_eq!(expanded.len(), 2);
+        assert_eq!(expanded[0].name, "http_80");
+        assert_eq!(expanded[1].name, "http_81");
+    }
+
+    #[test]
+    fn expand_port_range_fails_closed_when_all_entries_are_invalid() {
+        let mut config = ListenerConfig::new("http", 80);
+        config.port_range = Some("abc,100-bad".to_string());
+
+        let expanded = config.expand_port_range();
+        assert!(expanded.is_empty());
+    }
+
+    #[test]
+    fn expand_port_range_keeps_valid_ports_when_mixed_with_invalid_entries() {
+        let mut config = ListenerConfig::new("http", 80);
+        config.port_range = Some("80,abc".to_string());
+
+        let expanded = config.expand_port_range();
+        assert_eq!(expanded.len(), 1);
+        assert_eq!(expanded[0].name, "http");
+        assert_eq!(expanded[0].port, 80);
+    }
+
+    #[test]
+    fn host_filters_support_cidr_ranges() {
+        let mut config = ListenerConfig::new("http", 80);
+        config.host_whitelist = vec!["10.0.0.0/8".to_string()];
+        config
+            .refresh_host_filters()
+            .expect("cidr whitelist should compile");
+
+        assert!(config.is_host_allowed("10.1.2.3"));
+        assert!(!config.is_host_allowed("192.168.1.10"));
+
+        config.host_whitelist.clear();
+        config.host_blacklist = vec!["192.168.0.0/16".to_string()];
+        config
+            .refresh_host_filters()
+            .expect("cidr blacklist should compile");
+
+        assert!(!config.is_host_allowed("192.168.1.10"));
+        assert!(config.is_host_allowed("10.1.2.3"));
+    }
+
+    #[test]
+    fn host_filters_use_compiled_hostname_snapshot() {
+        let mut config = ListenerConfig::new("http", 80);
+        config.host_whitelist = vec!["localhost".to_string()];
+        config
+            .refresh_host_filters()
+            .expect("localhost should resolve during refresh");
+
+        assert!(config.is_host_allowed("127.0.0.1"));
     }
 }

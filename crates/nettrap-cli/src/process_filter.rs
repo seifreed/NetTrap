@@ -152,10 +152,13 @@ impl ProcessFilter {
         }
 
         if !self.per_listener_whitelist.is_empty() {
-            return self
+            if !self
                 .per_listener_whitelist
                 .iter()
-                .any(|p| p.matches(process_name));
+                .any(|p| p.matches(process_name))
+            {
+                return false;
+            }
         }
 
         if !self.per_listener_blacklist.is_empty() {

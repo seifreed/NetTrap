@@ -28,7 +28,10 @@ pub fn extract_domains(data: &str) -> Vec<String> {
         .captures_iter(data)
         .filter_map(|cap| {
             let domain = cap[0].to_string();
-            if !domain.ends_with(".local") && !domain.ends_with(".localhost") && !domain.starts_with("www.") {
+            if !domain.ends_with(".local")
+                && !domain.ends_with(".localhost")
+                && !domain.starts_with("www.")
+            {
                 Some(domain)
             } else {
                 None

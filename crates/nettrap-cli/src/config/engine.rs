@@ -1,3 +1,6 @@
+use std::collections::{HashMap, HashSet};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
 use serde::{Deserialize, Serialize};
 
 use super::ListenerConfig;
@@ -230,6 +233,8 @@ pub struct EngineConfig {
     /// Language code for NBI report generation (ISO 639-1, e.g. "en", "es", "de")
     #[serde(default = "default_report_language")]
     pub report_language: String,
+    #[serde(skip)]
+    listener_name_aliases: HashMap<String, Vec<String>>,
 }
 
 fn default_report_language() -> String {
@@ -273,21 +278,37 @@ impl Default for EngineConfig {
             database: DatabaseConfig::default(),
             faketime: FakeTimeConfig::default(),
             report_language: default_report_language(),
+            listener_name_aliases: HashMap::new(),
         }
     }
 }
 
 impl EngineConfig {
     pub fn from_file(path: &std::path::Path) -> crate::Result<Self> {
-        let content = std::fs::read_to_string(path)?;
-        let mut config: Self =
-            toml::from_str(&content).map_err(|e| crate::Error::Config(e.to_string()))?;
-        config.validate();
+        let mut config = Self::from_file_declarative(path)?;
+        config.validate()?;
         Ok(config)
     }
 
-    /// Validate and fix config values, warning about problematic settings.
-    fn validate(&mut self) {
+    pub fn from_file_api(path: &std::path::Path) -> crate::Result<Self> {
+        let mut config = Self::from_file_declarative(path)?;
+        config.validate_global_settings()?;
+        Ok(config)
+    }
+
+    pub fn from_file_declarative(path: &std::path::Path) -> crate::Result<Self> {
+        let content = std::fs::read_to_string(path)?;
+        toml::from_str(&content).map_err(|e| crate::Error::Config(e.to_string()))
+    }
+
+    fn validate(&mut self) -> crate::Result<()> {
+        self.validate_global_settings()?;
+        self.prepare_listeners_for_runtime()?;
+        self.validate_runtime_global_settings()?;
+        Ok(())
+    }
+
+    fn validate_global_settings(&mut self) -> crate::Result<()> {
         if self.database.pool_size == 0 {
             tracing::warn!("database.pool_size is 0, correcting to 1");
             self.database.pool_size = 1;
@@ -298,7 +319,38 @@ impl EngineConfig {
             );
             self.attribution_timeout_ms = 100;
         }
+
+        validate_socket_addr_setting("api_bind", self.api_bind.as_deref())?;
+        validate_socket_addr_setting(
+            "distributed.health_bind",
+            self.distributed.health_bind.as_deref(),
+        )?;
+        validate_socket_addr_setting(
+            "distributed.metrics_bind",
+            self.distributed.metrics_bind.as_deref(),
+        )?;
+
+        Ok(())
+    }
+
+    fn validate_runtime_global_settings(&self) -> crate::Result<()> {
+        if self.distributed.enabled {
+            let _ = crate::distributed::build_event_fanout(&self.distributed)?;
+        }
+
+        Ok(())
+    }
+
+    fn prepare_listeners_for_runtime(&mut self) -> crate::Result<()> {
         for listener in &mut self.listeners {
+            listener.bind_address =
+                canonicalize_bind_address(&listener.bind_address).map_err(|err| match err {
+                    crate::Error::Config(message) => {
+                        crate::Error::Config(format!("Listener '{}': {}", listener.name, message))
+                    }
+                    other => other,
+                })?;
+
             if listener.port == 0 {
                 tracing::warn!(
                     "Listener '{}' has port 0, will bind to random port",
@@ -318,7 +370,36 @@ impl EngineConfig {
                     listener.dns_response_mode = None;
                 }
             }
+
+            listener.refresh_host_filters().map_err(|err| match err {
+                crate::Error::Config(message) => {
+                    crate::Error::Config(format!("Listener '{}': {}", listener.name, message))
+                }
+                other => other,
+            })?;
         }
+
+        self.expand_listeners();
+        if self.listeners.is_empty() {
+            return Err(crate::Error::Config(
+                "No valid listeners remain after port_range expansion".into(),
+            ));
+        }
+        self.finalize_listener_names()?;
+        Ok(())
+    }
+
+    pub(crate) fn prepare_runtime_defaults(&mut self) -> crate::Result<()> {
+        self.validate()
+    }
+
+    pub(crate) fn prepare_api_defaults(&mut self) -> crate::Result<()> {
+        self.validate_global_settings()
+    }
+
+    pub(crate) fn finalize_after_cli_overrides(&mut self) -> crate::Result<()> {
+        self.finalize_listener_names()?;
+        Ok(())
     }
 
     pub fn to_file(&self, path: &str) -> crate::Result<()> {
@@ -336,6 +417,265 @@ impl EngineConfig {
             .flat_map(|l| l.expand_port_range())
             .collect();
         self.listeners = expanded;
+        self.normalize_listener_names();
+    }
+
+    pub(crate) fn finalize_listener_names(&mut self) -> crate::Result<()> {
+        self.prepare_listener_names()?;
+        self.validate_socket_collisions()?;
+        Ok(())
+    }
+
+    pub(crate) fn prepare_listener_names(&mut self) -> crate::Result<()> {
+        self.normalize_listener_names();
+        self.resolve_redirect_defaults()?;
+        Ok(())
+    }
+
+    pub(crate) fn normalize_listener_names(&mut self) {
+        let mut used_names = HashSet::new();
+        self.listener_name_aliases.clear();
+
+        for listener in &mut self.listeners {
+            let normalized = listener.name.to_ascii_lowercase();
+            let original = listener.name.clone();
+
+            if !used_names.insert(normalized) {
+                let base = format!("{}_{}", original, listener.port);
+                let mut candidate = base.clone();
+                let mut suffix = 2u32;
+
+                while !used_names.insert(candidate.to_ascii_lowercase()) {
+                    candidate = format!("{}_{}", base, suffix);
+                    suffix += 1;
+                }
+
+                tracing::warn!(
+                    "Duplicate listener name '{}' detected; renaming listener on port {} to '{}'",
+                    original,
+                    listener.port,
+                    candidate
+                );
+                listener.name = candidate;
+            }
+
+            let aliases = self
+                .listener_name_aliases
+                .entry(original.to_ascii_lowercase())
+                .or_default();
+            if !aliases
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(listener.name.as_str()))
+            {
+                aliases.push(listener.name.clone());
+            }
+        }
+    }
+
+    fn resolve_redirect_defaults(&mut self) -> crate::Result<()> {
+        use nettrap_core::prelude::Protocol;
+
+        if let Some(ref listener) = self.default_tcp_listener.clone() {
+            self.default_tcp_listener =
+                Some(self.resolve_redirect_default(listener, Protocol::Tcp)?);
+        }
+        if let Some(ref listener) = self.default_udp_listener.clone() {
+            self.default_udp_listener =
+                Some(self.resolve_redirect_default(listener, Protocol::Udp)?);
+        }
+        Ok(())
+    }
+
+    fn resolve_redirect_default(
+        &self,
+        requested_name: &str,
+        protocol: nettrap_core::prelude::Protocol,
+    ) -> crate::Result<String> {
+        let alias_matches: Vec<&ListenerConfig> = self
+            .listener_name_aliases
+            .get(&requested_name.to_ascii_lowercase())
+            .into_iter()
+            .flat_map(|aliases| aliases.iter())
+            .filter_map(|alias| {
+                self.listeners.iter().find(|listener| {
+                    listener.protocol == protocol && listener.name.eq_ignore_ascii_case(alias)
+                })
+            })
+            .collect();
+
+        if alias_matches.len() > 1 {
+            return Err(crate::Error::Config(format!(
+                "redirect_all_traffic {} default listener '{}' became ambiguous after listener name normalization",
+                protocol_label(protocol),
+                requested_name
+            )));
+        }
+
+        if let Some(listener) = alias_matches.first() {
+            return Ok(listener.name.clone());
+        }
+
+        let exact_matches: Vec<&ListenerConfig> = self
+            .listeners
+            .iter()
+            .filter(|listener| {
+                listener.protocol == protocol && listener.name.eq_ignore_ascii_case(requested_name)
+            })
+            .collect();
+
+        if exact_matches.len() == 1 {
+            return Ok(exact_matches[0].name.clone());
+        }
+
+        if exact_matches.len() > 1 {
+            return Err(crate::Error::Config(format!(
+                "redirect_all_traffic {} default listener '{}' is ambiguous",
+                protocol_label(protocol),
+                requested_name
+            )));
+        }
+
+        Ok(requested_name.to_string())
+    }
+
+    fn validate_socket_collisions(&self) -> crate::Result<()> {
+        use nettrap_core::prelude::Protocol;
+
+        let mut sockets: Vec<RegisteredSocket> = Vec::new();
+
+        #[derive(Clone)]
+        struct RegisteredSocket {
+            protocol: Protocol,
+            bind_addr: IpAddr,
+            port: u16,
+            owner: String,
+        }
+
+        let mut register_socket = |protocol: Protocol,
+                                   bind_addr: IpAddr,
+                                   port: u16,
+                                   owner: String|
+         -> crate::Result<()> {
+            if let Some(existing) = sockets.iter().find(|existing| {
+                socket_bindings_overlap(
+                    existing.protocol,
+                    existing.bind_addr,
+                    existing.port,
+                    protocol,
+                    bind_addr,
+                    port,
+                )
+            }) {
+                if existing.bind_addr == bind_addr {
+                    return Err(crate::Error::Config(format!(
+                        "{} and {} both resolve to {} socket {}:{}",
+                        existing.owner,
+                        owner,
+                        protocol_label(protocol),
+                        bind_addr,
+                        port
+                    )));
+                }
+
+                return Err(crate::Error::Config(format!(
+                    "{} and {} overlap on {} socket port {} ({} vs {})",
+                    existing.owner,
+                    owner,
+                    protocol_label(protocol),
+                    port,
+                    existing.bind_addr,
+                    bind_addr
+                )));
+            }
+
+            sockets.push(RegisteredSocket {
+                protocol,
+                bind_addr,
+                port,
+                owner,
+            });
+            Ok(())
+        };
+
+        for listener in self
+            .listeners
+            .iter()
+            .filter(|l| self.listener_is_spawnable(l))
+        {
+            let bind_addr = parse_bind_address(&listener.bind_address)?;
+            register_socket(
+                listener.protocol,
+                bind_addr,
+                listener.port,
+                format!("listener '{}'", listener.name),
+            )?;
+        }
+
+        if let Some(addr) = parse_optional_socket_addr("api_bind", self.api_bind.as_deref())? {
+            register_socket(
+                Protocol::Tcp,
+                addr.ip(),
+                addr.port(),
+                "api_bind".to_string(),
+            )?;
+        }
+
+        if let Some(addr) = parse_optional_socket_addr(
+            "distributed.health_bind",
+            self.distributed.health_bind.as_deref(),
+        )? {
+            register_socket(
+                Protocol::Tcp,
+                addr.ip(),
+                addr.port(),
+                "distributed.health_bind".to_string(),
+            )?;
+        }
+
+        if let Some(addr) = parse_optional_socket_addr(
+            "distributed.metrics_bind",
+            self.distributed.metrics_bind.as_deref(),
+        )? {
+            register_socket(
+                Protocol::Tcp,
+                addr.ip(),
+                addr.port(),
+                "distributed.metrics_bind".to_string(),
+            )?;
+        }
+
+        Ok(())
+    }
+
+    fn listener_is_default_target(&self, listener: &ListenerConfig) -> bool {
+        use nettrap_core::prelude::Protocol;
+
+        match listener.protocol {
+            Protocol::Tcp => self
+                .default_tcp_listener
+                .as_deref()
+                .is_some_and(|name| name.eq_ignore_ascii_case(listener.name.as_str())),
+            Protocol::Udp => self
+                .default_udp_listener
+                .as_deref()
+                .is_some_and(|name| name.eq_ignore_ascii_case(listener.name.as_str())),
+            _ => false,
+        }
+    }
+
+    fn listener_is_spawnable(&self, listener: &ListenerConfig) -> bool {
+        use nettrap_core::prelude::Protocol;
+
+        if !listener.enabled {
+            return false;
+        }
+
+        if listener.hidden && !self.listener_is_default_target(listener) {
+            return false;
+        }
+
+        let is_tcp = listener.protocol == Protocol::Tcp;
+        !self.is_port_blacklisted(listener.port, is_tcp)
     }
 
     /// Check if a port is blacklisted
@@ -366,5 +706,468 @@ impl EngineConfig {
             }
             other => other,
         }
+    }
+}
+
+fn protocol_label(protocol: nettrap_core::prelude::Protocol) -> &'static str {
+    match protocol {
+        nettrap_core::prelude::Protocol::Tcp => "tcp",
+        nettrap_core::prelude::Protocol::Udp => "udp",
+        _ => "unsupported",
+    }
+}
+
+fn parse_bind_address(bind_address: &str) -> crate::Result<IpAddr> {
+    let trimmed = bind_address.trim();
+    trimmed.parse::<IpAddr>().map_err(|err| {
+        crate::Error::Config(format!("invalid bind_address '{}': {}", bind_address, err))
+    })
+}
+
+fn validate_socket_addr_setting(setting_name: &str, value: Option<&str>) -> crate::Result<()> {
+    parse_optional_socket_addr(setting_name, value).map(|_| ())
+}
+
+fn parse_optional_socket_addr(
+    setting_name: &str,
+    value: Option<&str>,
+) -> crate::Result<Option<std::net::SocketAddr>> {
+    match value {
+        None => Ok(None),
+        Some(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Err(crate::Error::Config(format!(
+                    "{} cannot be empty",
+                    setting_name
+                )));
+            }
+
+            trimmed
+                .parse::<std::net::SocketAddr>()
+                .map(Some)
+                .map_err(|err| {
+                    crate::Error::Config(format!("Invalid {} '{}': {}", setting_name, raw, err))
+                })
+        }
+    }
+}
+
+fn canonicalize_bind_address(bind_address: &str) -> crate::Result<String> {
+    Ok(parse_bind_address(bind_address)?.to_string())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NormalizedBindAddr {
+    V4(Ipv4Addr),
+    V6(Ipv6Addr),
+}
+
+impl NormalizedBindAddr {
+    fn is_ipv6_unspecified(self) -> bool {
+        matches!(self, Self::V6(addr) if addr.is_unspecified())
+    }
+}
+
+fn normalize_bind_addr(addr: IpAddr) -> NormalizedBindAddr {
+    match addr {
+        IpAddr::V4(addr) => NormalizedBindAddr::V4(addr),
+        IpAddr::V6(addr) => match addr.to_ipv4_mapped() {
+            Some(mapped) => NormalizedBindAddr::V4(mapped),
+            None => NormalizedBindAddr::V6(addr),
+        },
+    }
+}
+
+fn socket_bindings_overlap(
+    left_protocol: nettrap_core::prelude::Protocol,
+    left_addr: IpAddr,
+    left_port: u16,
+    right_protocol: nettrap_core::prelude::Protocol,
+    right_addr: IpAddr,
+    right_port: u16,
+) -> bool {
+    if left_protocol != right_protocol || left_port != right_port {
+        return false;
+    }
+
+    let left = normalize_bind_addr(left_addr);
+    let right = normalize_bind_addr(right_addr);
+
+    match (left, right) {
+        (NormalizedBindAddr::V4(left), NormalizedBindAddr::V4(right)) => {
+            left == right || left.is_unspecified() || right.is_unspecified()
+        }
+        (NormalizedBindAddr::V6(left), NormalizedBindAddr::V6(right)) => {
+            left == right || left.is_unspecified() || right.is_unspecified()
+        }
+        (left, right) => left.is_ipv6_unspecified() || right.is_ipv6_unspecified(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::EngineConfig;
+    use crate::config::ListenerConfig;
+
+    #[test]
+    fn normalize_listener_names_renames_case_insensitive_duplicates() {
+        let mut config = EngineConfig::default();
+        config.listeners = vec![
+            ListenerConfig::new("http", 80),
+            ListenerConfig::new("HTTP", 8080),
+        ];
+
+        config.normalize_listener_names();
+
+        assert_eq!(config.listeners[0].name, "http");
+        assert_eq!(config.listeners[1].name, "HTTP_8080");
+    }
+
+    #[test]
+    fn expand_listeners_renames_collisions_after_port_range_expansion() {
+        let mut ranged = ListenerConfig::new("http", 80);
+        ranged.port_range = Some("80,81".to_string());
+
+        let colliding = ListenerConfig::new("http_80", 9000);
+
+        let mut config = EngineConfig::default();
+        config.listeners = vec![ranged, colliding];
+
+        config.expand_listeners();
+
+        let names: Vec<&str> = config
+            .listeners
+            .iter()
+            .map(|listener| listener.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["http_80", "http_81", "http_80_9000"]);
+    }
+
+    #[test]
+    fn finalize_listener_names_rejects_ambiguous_redirect_defaults() {
+        let mut config = EngineConfig::default();
+        config.listeners = vec![
+            ListenerConfig::new("http", 80),
+            ListenerConfig::new("http", 8080),
+        ];
+        config.redirect_all_traffic = true;
+        config.default_tcp_listener = Some("http".to_string());
+
+        let err = config
+            .finalize_listener_names()
+            .expect_err("ambiguous defaults should be rejected");
+
+        assert!(
+            err.to_string().contains("became ambiguous"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn finalize_listener_names_rewrites_unique_redirect_defaults_to_final_name() {
+        let mut config = EngineConfig::default();
+        config.listeners = vec![
+            ListenerConfig::new("http", 80),
+            ListenerConfig::new("control", 8080),
+        ];
+        config.redirect_all_traffic = true;
+        config.default_tcp_listener = Some("control".to_string());
+
+        config
+            .finalize_listener_names()
+            .expect("unique default listener should remain valid");
+
+        assert_eq!(config.default_tcp_listener.as_deref(), Some("control"));
+    }
+
+    #[test]
+    fn from_file_rejects_unresolvable_hostname_filters() {
+        let path =
+            std::env::temp_dir().join(format!("nettrap-host-filter-{}.toml", std::process::id()));
+        let mut config = EngineConfig::default();
+        config.listeners = vec![ListenerConfig::new("http", 80)];
+        config.listeners[0].host_whitelist =
+            vec!["definitely-not-a-real-nettrap-host.invalid".to_string()];
+        let serialized = toml::to_string(&config).expect("serialize config");
+        fs::write(&path, serialized).expect("write temp config");
+
+        let err = EngineConfig::from_file(&path).expect_err("invalid hostname should fail");
+
+        let _ = fs::remove_file(&path);
+
+        assert!(err.to_string().contains("failed to resolve host filter"));
+    }
+
+    #[test]
+    fn finalize_listener_names_rejects_spawnable_socket_collisions() {
+        let mut config = EngineConfig::default();
+        config.listeners = vec![
+            ListenerConfig::new("http", 80),
+            ListenerConfig::new("http-alt", 80),
+        ];
+
+        let err = config
+            .finalize_listener_names()
+            .expect_err("colliding sockets should fail validation");
+
+        assert!(
+            err.to_string()
+                .contains("both resolve to tcp socket 0.0.0.0:80")
+        );
+    }
+
+    #[test]
+    fn finalize_listener_names_ignores_disabled_socket_collisions() {
+        let mut config = EngineConfig::default();
+        let mut disabled = ListenerConfig::new("http-alt", 80);
+        disabled.enabled = false;
+        config.listeners = vec![ListenerConfig::new("http", 80), disabled];
+
+        config
+            .finalize_listener_names()
+            .expect("disabled listeners should not trigger socket collisions");
+    }
+
+    #[test]
+    fn from_file_rejects_invalid_bind_address() {
+        let path =
+            std::env::temp_dir().join(format!("nettrap-bind-address-{}.toml", std::process::id()));
+        let mut config = EngineConfig::default();
+        config.listeners = vec![ListenerConfig::new("http", 80).with_bind_address("not-an-ip")];
+        let serialized = toml::to_string(&config).expect("serialize config");
+        fs::write(&path, serialized).expect("write temp config");
+
+        let err = EngineConfig::from_file(&path).expect_err("invalid bind_address should fail");
+
+        let _ = fs::remove_file(&path);
+
+        assert!(err.to_string().contains("invalid bind_address"));
+    }
+
+    #[test]
+    fn finalize_listener_names_rejects_canonical_socket_collisions() {
+        let mut config = EngineConfig::default();
+        config.listeners = vec![
+            ListenerConfig::new("http-v6-short", 80).with_bind_address("::1"),
+            ListenerConfig::new("http-v6-long", 80).with_bind_address("0:0:0:0:0:0:0:1"),
+        ];
+
+        let err = config
+            .validate()
+            .expect_err("canonicalized IPv6 collisions should fail validation");
+
+        assert!(
+            err.to_string()
+                .contains("both resolve to tcp socket ::1:80")
+        );
+    }
+
+    #[test]
+    fn from_file_rejects_configs_without_valid_expanded_listeners() {
+        let path = std::env::temp_dir().join(format!(
+            "nettrap-empty-expansion-{}.toml",
+            std::process::id()
+        ));
+        let mut config = EngineConfig::default();
+        let mut listener = ListenerConfig::new("http", 80);
+        listener.port_range = Some("not-a-port".to_string());
+        config.listeners = vec![listener];
+        let serialized = toml::to_string(&config).expect("serialize config");
+        fs::write(&path, serialized).expect("write temp config");
+
+        let err = EngineConfig::from_file(&path)
+            .expect_err("fully invalid port_range should leave no listeners");
+
+        let _ = fs::remove_file(&path);
+
+        assert!(err.to_string().contains("No valid listeners remain"));
+    }
+
+    #[test]
+    fn from_file_rejects_invalid_distributed_event_sinks_in_runtime_validation() {
+        let path = std::env::temp_dir().join(format!(
+            "nettrap-invalid-distributed-sink-{}.toml",
+            std::process::id()
+        ));
+        let mut config = EngineConfig::default();
+        config.distributed.enabled = true;
+        config
+            .distributed
+            .event_sinks
+            .push(crate::config::EventSinkConfig {
+                sink_type: "bogus".into(),
+                target: "127.0.0.1:1".into(),
+                auth: None,
+                batch_size: 1,
+                flush_interval_ms: 1000,
+                request_timeout_ms: 1000,
+            });
+        let serialized = toml::to_string(&config).expect("serialize config");
+        fs::write(&path, serialized).expect("write temp config");
+
+        let err = EngineConfig::from_file(&path)
+            .expect_err("invalid sink should fail runtime validation");
+
+        let _ = fs::remove_file(&path);
+
+        assert!(
+            err.to_string()
+                .contains("Unknown distributed event sink type")
+        );
+    }
+
+    #[test]
+    fn from_file_api_applies_global_normalization_without_expanding_listeners() {
+        let path = std::env::temp_dir().join(format!(
+            "nettrap-api-global-normalization-{}.toml",
+            std::process::id()
+        ));
+        let mut config = EngineConfig::default();
+        let mut listener = ListenerConfig::new("http", 80).with_bind_address("not-an-ip");
+        listener.port_range = Some("80,81".to_string());
+        config.listeners = vec![listener];
+        config.database.pool_size = 0;
+        config.attribution_timeout_ms = 0;
+        let serialized = toml::to_string(&config).expect("serialize config");
+        fs::write(&path, serialized).expect("write temp config");
+
+        let loaded = EngineConfig::from_file_api(&path).expect("api config should load");
+
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(loaded.database.pool_size, 1);
+        assert_eq!(loaded.attribution_timeout_ms, 100);
+        assert_eq!(loaded.listeners.len(), 1);
+        assert_eq!(loaded.listeners[0].bind_address, "not-an-ip");
+        assert_eq!(loaded.listeners[0].port_range.as_deref(), Some("80,81"));
+    }
+
+    #[test]
+    fn from_file_api_rejects_invalid_api_bind() {
+        let path = std::env::temp_dir().join(format!(
+            "nettrap-invalid-api-bind-{}.toml",
+            std::process::id()
+        ));
+        let mut config = EngineConfig::default();
+        config.api_bind = Some("not-a-socket".into());
+        let serialized = toml::to_string(&config).expect("serialize config");
+        fs::write(&path, serialized).expect("write temp config");
+
+        let err = EngineConfig::from_file_api(&path).expect_err("invalid api_bind should fail");
+
+        let _ = fs::remove_file(&path);
+
+        assert!(err.to_string().contains("Invalid api_bind"));
+    }
+
+    #[test]
+    fn from_file_api_rejects_invalid_distributed_probe_binds() {
+        let path = std::env::temp_dir().join(format!(
+            "nettrap-invalid-distributed-bind-{}.toml",
+            std::process::id()
+        ));
+        let mut config = EngineConfig::default();
+        config.distributed.health_bind = Some("still-not-a-socket".into());
+        let serialized = toml::to_string(&config).expect("serialize config");
+        fs::write(&path, serialized).expect("write temp config");
+
+        let err = EngineConfig::from_file_api(&path).expect_err("invalid health_bind should fail");
+
+        let _ = fs::remove_file(&path);
+
+        assert!(err.to_string().contains("distributed.health_bind"));
+    }
+
+    #[test]
+    fn from_file_api_rejects_empty_global_binds() {
+        let path = std::env::temp_dir().join(format!(
+            "nettrap-empty-api-bind-{}.toml",
+            std::process::id()
+        ));
+        let mut config = EngineConfig::default();
+        config.api_bind = Some("   ".into());
+        let serialized = toml::to_string(&config).expect("serialize config");
+        fs::write(&path, serialized).expect("write temp config");
+
+        let err = EngineConfig::from_file_api(&path).expect_err("empty api_bind should fail");
+
+        let _ = fs::remove_file(&path);
+
+        assert!(err.to_string().contains("api_bind cannot be empty"));
+    }
+
+    #[test]
+    fn finalize_listener_names_rejects_listener_and_api_bind_collisions() {
+        let mut config = EngineConfig::default();
+        config.listeners = vec![ListenerConfig::new("http", 8080).with_bind_address("127.0.0.1")];
+        config.api_bind = Some("127.0.0.1:8080".into());
+
+        let err = config
+            .validate()
+            .expect_err("api_bind colliding with listener should fail validation");
+
+        assert!(
+            err.to_string()
+                .contains("listener 'http' and api_bind both resolve to tcp socket 127.0.0.1:8080")
+        );
+    }
+
+    #[test]
+    fn validate_socket_collision_with_unspecified_listener_and_concrete_api_bind() {
+        let mut config = EngineConfig::default();
+        config.listeners = vec![ListenerConfig::new("http", 8080).with_bind_address("0.0.0.0")];
+        config.api_bind = Some("127.0.0.1:8080".into());
+
+        let err = config
+            .validate()
+            .expect_err("unspecified listener bind should collide with concrete api_bind");
+
+        assert!(
+            err.to_string()
+                .contains("listener 'http' and api_bind overlap on tcp socket port 8080")
+        );
+    }
+
+    #[test]
+    fn finalize_listener_names_rejects_global_endpoint_collisions() {
+        let mut config = EngineConfig::default();
+        config.listeners = vec![ListenerConfig::new("http", 8080)];
+        config.distributed.health_bind = Some("127.0.0.1:9000".into());
+        config.distributed.metrics_bind = Some("127.0.0.1:9000".into());
+
+        let err = config
+            .validate()
+            .expect_err("health and metrics bind collision should fail validation");
+
+        assert!(
+            err.to_string()
+                .contains("distributed.health_bind and distributed.metrics_bind both resolve to tcp socket 127.0.0.1:9000")
+        );
+    }
+
+    #[test]
+    fn from_file_declarative_preserves_port_range_form() {
+        let path = std::env::temp_dir().join(format!(
+            "nettrap-declarative-roundtrip-{}.toml",
+            std::process::id()
+        ));
+        let mut config = EngineConfig::default();
+        let mut listener = ListenerConfig::new("http", 80);
+        listener.port_range = Some("80,81".to_string());
+        config.listeners = vec![listener];
+        let serialized = toml::to_string(&config).expect("serialize config");
+        fs::write(&path, serialized).expect("write temp config");
+
+        let loaded =
+            EngineConfig::from_file_declarative(&path).expect("declarative config should load");
+
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(loaded.listeners.len(), 1);
+        assert_eq!(loaded.listeners[0].name, "http");
+        assert_eq!(loaded.listeners[0].port_range.as_deref(), Some("80,81"));
     }
 }

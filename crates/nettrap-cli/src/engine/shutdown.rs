@@ -401,17 +401,7 @@ fn repair_primary_jsonl_if_needed(
 }
 
 fn artifact_base_path(ctx: &ShutdownContext) -> Option<PathBuf> {
-    ctx.nbi_path
-        .clone()
-        .or_else(|| ctx.output_path.as_ref().map(derive_nbi_path_from_output))
-}
-
-fn derive_nbi_path_from_output(output_path: &PathBuf) -> PathBuf {
-    let stem = output_path
-        .file_stem()
-        .unwrap_or_default()
-        .to_string_lossy();
-    output_path.with_file_name(format!("{}_nbi.jsonl", stem))
+    ctx.nbi_path.clone().or_else(|| ctx.output_path.clone())
 }
 
 fn close_pcap_writer(ctx: &ShutdownContext) {
@@ -1250,10 +1240,9 @@ mod tests {
             "nettrap-shutdown-output-only-{}.log",
             uuid::Uuid::new_v4()
         ));
-        let base_path = derive_nbi_path_from_output(&output_path);
-        let html_path = base_path.with_extension("html");
-        let csv_path = base_path.with_extension("csv");
-        let sarif_path = base_path.with_extension("sarif.json");
+        let html_path = output_path.with_extension("html");
+        let csv_path = output_path.with_extension("csv");
+        let sarif_path = output_path.with_extension("sarif.json");
 
         let event = raw_nbi(
             "raw",

@@ -47,7 +47,9 @@ impl SnmpHandler {
         }
         pos += 1;
         let (_, lb) = Self::parse_len(&data[pos..]);
-        if lb == 0 { return None; }
+        if lb == 0 {
+            return None;
+        }
         pos += lb;
         // Version: INTEGER
         if pos >= data.len() || data[pos] != 0x02 {
@@ -55,7 +57,9 @@ impl SnmpHandler {
         }
         pos += 1;
         let (vlen, lb) = Self::parse_len(&data[pos..]);
-        if lb == 0 { return None; }
+        if lb == 0 {
+            return None;
+        }
         pos += lb + vlen;
         // Community: OCTET STRING
         if pos >= data.len() || data[pos] != 0x04 {
@@ -63,7 +67,9 @@ impl SnmpHandler {
         }
         pos += 1;
         let (clen, lb) = Self::parse_len(&data[pos..]);
-        if lb == 0 { return None; }
+        if lb == 0 {
+            return None;
+        }
         pos += lb;
         if pos > data.len() {
             return None;
@@ -78,13 +84,17 @@ impl SnmpHandler {
         let pdu_type = data[pos] & 0x1F;
         pos += 1;
         let (_, lb) = Self::parse_len(&data[pos..]);
-        if lb == 0 { return None; }
+        if lb == 0 {
+            return None;
+        }
         pos += lb;
         // Request ID
         let request_id = if pos + 4 < data.len() && data[pos] == 0x02 {
             pos += 1;
             let (rlen, lb) = Self::parse_len(&data[pos..]);
-            if lb == 0 { return None; }
+            if lb == 0 {
+                return None;
+            }
             pos += lb;
             if pos > data.len() {
                 return None;

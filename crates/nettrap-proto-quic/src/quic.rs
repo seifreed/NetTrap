@@ -86,7 +86,7 @@ impl QuicHandler {
     fn find_sni_in_payload(data: &[u8]) -> Option<String> {
         // Look for SNI extension type (0x0000) followed by SNI list
         // Pattern: 0x00 0x00 <ext_len:2> <sni_list_len:2> 0x00 <name_len:2> <hostname>
-        for i in 0..data.len().saturating_sub(9) {
+        for i in 0..data.len().saturating_sub(8) {
             if data[i] == 0x00 && data[i + 1] == 0x00 {
                 let ext_len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
                 // Need at least 5 bytes: 2 (sni_list_len) + 1 (type) + 2 (name_len)

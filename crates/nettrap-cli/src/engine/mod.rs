@@ -10,7 +10,7 @@ use crate::config::EngineConfig;
 use crate::engine::interceptor::{RunningInterceptor, spawn_interceptor};
 use crate::engine::shutdown::{ShutdownContext, execute_shutdown};
 use crate::engine::startup::{
-    StartupContext, build_listener_context, create_startup_context, init_distributed,
+    StartupContext, StartupMode, build_listener_context, create_startup_context, init_distributed,
     init_faketime, init_windows_ca_trust, init_windows_network, with_database,
 };
 use crate::listeners::{run_tcp_listener, run_udp_listener};
@@ -42,11 +42,9 @@ pub async fn handle_command(
             Ok(())
         }
         Commands::Api(args) => {
-            let mut config = load_config(config_path)?;
-            config.expand_listeners();
-            config.api_bind = Some(args.bind.clone());
+            let config = load_api_config(config_path, Some(args.bind.as_str()))?;
 
-            let engine = Engine::new(config, true, None, None, true);
+            let engine = Engine::api_only(config);
             engine.run(stop_flag).await
         }
         Commands::Tls(args) => handle_tls_command(&args),
@@ -100,9 +98,8 @@ async fn build_engine(
     config_path: Option<std::path::PathBuf>,
 ) -> crate::Result<Engine> {
     let mut config = load_config(config_path)?;
-    config.expand_listeners();
-
-    apply_cli_overrides(&mut config, args);
+    apply_cli_overrides(&mut config, args)?;
+    config.finalize_after_cli_overrides()?;
 
     Ok(Engine::new(
         config,
@@ -110,6 +107,7 @@ async fn build_engine(
         args.interface.clone(),
         args.output.clone(),
         args.intercept,
+        false,
     ))
 }
 
@@ -163,28 +161,87 @@ fn load_config(config_path: Option<std::path::PathBuf>) -> crate::Result<EngineC
         }
     }
 
-    Ok(EngineConfig::default())
+    let mut config = EngineConfig::default();
+    config.prepare_runtime_defaults()?;
+    Ok(config)
 }
 
-fn apply_cli_overrides(config: &mut EngineConfig, args: &crate::cli::RunArgs) {
+fn prepare_loaded_api_config(
+    mut config: EngineConfig,
+    api_bind_override: Option<&str>,
+) -> crate::Result<EngineConfig> {
+    if let Some(bind) = api_bind_override {
+        config.api_bind = Some(bind.to_string());
+    }
+    config.prepare_api_defaults()?;
+    Ok(config)
+}
+
+fn load_api_config(
+    config_path: Option<std::path::PathBuf>,
+    api_bind_override: Option<&str>,
+) -> crate::Result<EngineConfig> {
+    if let Some(path) = config_path {
+        return prepare_loaded_api_config(
+            EngineConfig::from_file_declarative(&path)?,
+            api_bind_override,
+        );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    let default_paths: &[&str] = &["/etc/nettrap/config.toml"];
+
+    #[cfg(target_os = "windows")]
+    let default_paths: &[&str] = &["C:\\ProgramData\\NetTrap\\config.toml", ".\\config.toml"];
+
+    for path_str in default_paths {
+        let path = std::path::Path::new(path_str);
+        if path.exists() {
+            return prepare_loaded_api_config(
+                EngineConfig::from_file_declarative(path)?,
+                api_bind_override,
+            );
+        }
+    }
+
+    prepare_loaded_api_config(EngineConfig::default(), api_bind_override)
+}
+
+fn apply_cli_overrides(config: &mut EngineConfig, args: &crate::cli::RunArgs) -> crate::Result<()> {
     if !args.ports.is_empty() {
-        // Keep configured listeners on CLI-specified ports, add cli_ listeners
-        // for any ports not already covered by config
-        let existing_ports: std::collections::HashSet<u16> = config
-            .listeners
-            .iter()
-            .map(|l| l.port)
-            .collect();
+        let mut requested_ports = Vec::new();
+        let mut seen_ports = std::collections::HashSet::new();
         for port in &args.ports {
-            if !existing_ports.contains(port) {
-                config.listeners.push(crate::config::ListenerConfig::new(
-                    format!("cli_{}", port),
-                    *port,
-                ));
+            if seen_ports.insert(*port) {
+                requested_ports.push(*port);
             }
         }
-        // Only keep listeners whose port is in the CLI list
-        config.listeners.retain(|l| args.ports.contains(&l.port));
+
+        config
+            .blacklist_ports_tcp
+            .retain(|port| !seen_ports.contains(port));
+        config
+            .blacklist_ports_udp
+            .retain(|port| !seen_ports.contains(port));
+
+        let requested_port_set: std::collections::HashSet<u16> =
+            requested_ports.iter().copied().collect();
+        let mut selected_listeners: Vec<_> = std::mem::take(&mut config.listeners)
+            .into_iter()
+            .filter(|listener| requested_port_set.contains(&listener.port))
+            .collect();
+
+        for port in requested_ports {
+            let covered_by_spawnable_listener = selected_listeners
+                .iter()
+                .any(|listener| listener.port == port && listener_should_spawn(config, listener));
+
+            if !covered_by_spawnable_listener {
+                selected_listeners.push(build_cli_listener_for_port(&selected_listeners, port)?);
+            }
+        }
+
+        config.listeners = selected_listeners;
     }
 
     if let Some(ref output) = args.output {
@@ -207,6 +264,80 @@ fn apply_cli_overrides(config: &mut EngineConfig, args: &crate::cli::RunArgs) {
     if let Some(ref fmt) = args.report_format {
         config.output_format = fmt.clone();
     }
+
+    Ok(())
+}
+
+fn build_cli_listener_for_port(
+    existing_listeners: &[crate::config::ListenerConfig],
+    port: u16,
+) -> crate::Result<crate::config::ListenerConfig> {
+    use nettrap_core::prelude::Protocol;
+
+    let matching_listeners: Vec<_> = existing_listeners
+        .iter()
+        .filter(|listener| listener.port == port)
+        .collect();
+
+    let mut matching_protocols: Vec<Protocol> = matching_listeners
+        .iter()
+        .map(|listener| listener.protocol)
+        .collect();
+    matching_protocols.sort_unstable_by_key(|protocol| match protocol {
+        Protocol::Tcp => 0,
+        Protocol::Udp => 1,
+        _ => 2,
+    });
+    matching_protocols.dedup();
+
+    if matching_protocols.len() > 1 {
+        return Err(crate::Error::Config(format!(
+            "CLI --ports {} is ambiguous: existing listeners on that port use both TCP and UDP",
+            port
+        )));
+    }
+
+    if let Some(base_listener) = matching_listeners.first() {
+        for other in matching_listeners.iter().skip(1) {
+            if !cli_listener_bases_are_compatible(base_listener, other) {
+                return Err(crate::Error::Config(format!(
+                    "CLI --ports {} is ambiguous: existing listeners on that port have incompatible settings",
+                    port
+                )));
+            }
+        }
+
+        let mut listener = (*base_listener).clone();
+        listener.name = format!("cli_{}", port);
+        listener.port = port;
+        listener.port_range = None;
+        listener.enabled = true;
+        listener.hidden = false;
+        return Ok(listener);
+    }
+
+    Ok(crate::config::ListenerConfig::new(
+        format!("cli_{}", port),
+        port,
+    ))
+}
+
+fn cli_listener_bases_are_compatible(
+    base: &crate::config::ListenerConfig,
+    other: &crate::config::ListenerConfig,
+) -> bool {
+    fn normalized_listener_signature(
+        listener: &crate::config::ListenerConfig,
+    ) -> serde_json::Value {
+        let mut normalized = listener.clone();
+        normalized.name.clear();
+        normalized.enabled = true;
+        normalized.hidden = false;
+        normalized.port_range = None;
+        serde_json::to_value(normalized).expect("listener config should serialize")
+    }
+
+    normalized_listener_signature(base) == normalized_listener_signature(other)
 }
 
 fn handle_config(
@@ -221,9 +352,11 @@ fn handle_config(
         return Ok(());
     }
 
-    let config = if let Some(ref path) = config_path {
-        EngineConfig::from_file(path)?
-    } else if args.check {
+    if args.check {
+        if let Some(ref path) = config_path {
+            return check_config_paths(std::slice::from_ref(path));
+        }
+
         let files = std::fs::read_dir(".")?
             .filter_map(|e| e.ok())
             .filter(|e| {
@@ -235,13 +368,11 @@ fn handle_config(
             .map(|e| e.path())
             .collect::<Vec<_>>();
 
-        for file in files {
-            match EngineConfig::from_file(&file) {
-                Ok(_) => println!("✓ {} is valid", file.display()),
-                Err(e) => println!("✗ {} is invalid: {}", file.display(), e),
-            }
-        }
-        return Ok(());
+        return check_config_paths(&files);
+    }
+
+    let config = if let Some(ref path) = config_path {
+        EngineConfig::from_file_declarative(path)?
     } else {
         EngineConfig::default()
     };
@@ -256,6 +387,36 @@ fn handle_config(
     }
 
     Ok(())
+}
+
+fn check_config_paths(paths: &[std::path::PathBuf]) -> crate::Result<()> {
+    let mut invalid_configs = Vec::new();
+
+    for path in paths {
+        match EngineConfig::from_file(path) {
+            Ok(_) => println!("✓ {} is valid", path.display()),
+            Err(err) => {
+                println!("✗ {} is invalid: {}", path.display(), err);
+                invalid_configs.push((path.clone(), err));
+            }
+        }
+    }
+
+    if invalid_configs.is_empty() {
+        return Ok(());
+    }
+
+    let invalid_summary = invalid_configs
+        .iter()
+        .map(|(path, _)| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    Err(crate::Error::Config(format!(
+        "Configuration validation failed for {} file(s): {}",
+        invalid_configs.len(),
+        invalid_summary
+    )))
 }
 
 fn handle_pcap(args: &crate::cli::PcapArgs, _verbose: bool) -> crate::Result<()> {
@@ -287,6 +448,8 @@ pub struct Engine {
     config: EngineConfig,
     intercept_enabled: bool,
     require_interceptor: bool,
+    allow_zero_listeners: bool,
+    api_only_mode: bool,
     interface: Option<String>,
     output_override: Option<PathBuf>,
 }
@@ -298,13 +461,28 @@ impl Engine {
         interface: Option<String>,
         output_override: Option<PathBuf>,
         require_interceptor: bool,
+        allow_zero_listeners: bool,
     ) -> Self {
         Self {
             config,
             intercept_enabled,
             require_interceptor,
+            allow_zero_listeners,
+            api_only_mode: false,
             interface,
             output_override,
+        }
+    }
+
+    pub fn api_only(config: EngineConfig) -> Self {
+        Self {
+            config,
+            intercept_enabled: false,
+            require_interceptor: false,
+            allow_zero_listeners: true,
+            api_only_mode: true,
+            interface: None,
+            output_override: None,
         }
     }
 
@@ -314,38 +492,68 @@ impl Engine {
 
     pub async fn run(&self, stop_flag: Option<std::path::PathBuf>) -> crate::Result<()> {
         tracing::info!("Starting NetTrap engine...");
+        let api_only_mode = self.api_only_mode;
 
         log_network_mode(&self.config);
-        log_redirect_mode(&self.config);
+        if !api_only_mode {
+            log_redirect_mode(&self.config);
+        }
 
-        init_windows_network(&self.config);
-        init_windows_ca_trust(&self.config);
+        validate_listener_presence(
+            &self.config,
+            self.allow_zero_listeners || self.api_only_mode,
+        )?;
 
-        let startup = create_startup_context(&self.config, self.output_override.clone())?;
-        let mut startup = with_database(startup, &self.config).await?;
+        if !api_only_mode {
+            init_windows_network(&self.config);
+            init_windows_ca_trust(&self.config);
+        }
+
+        let startup = create_startup_context(
+            &self.config,
+            self.output_override.clone(),
+            if api_only_mode {
+                StartupMode::ApiOnly
+            } else {
+                StartupMode::Standard
+            },
+        )?;
+        let mut startup = if api_only_mode {
+            startup
+        } else {
+            with_database(startup, &self.config).await?
+        };
+        startup
+            .runtime_health
+            .set_allow_zero_listeners(self.allow_zero_listeners || self.api_only_mode);
         let (fatal_runtime_tx, mut fatal_runtime_rx) = mpsc::unbounded_channel::<String>();
         let mut listener_handles: Vec<JoinHandle<crate::Result<()>>> = Vec::new();
         let mut interceptor: Option<RunningInterceptor> = None;
 
-        if let Err(err) = init_distributed(
-            &self.config,
-            &startup.node_identity,
-            &startup.runtime_health,
-            fatal_runtime_tx.clone(),
-            &mut startup.background_tasks,
-        ) {
-            startup.runtime_health.set_fatal_error(err.to_string());
-            if let Some(shutdown_err) =
-                shutdown_runtime(&mut startup, &self.config, listener_handles, interceptor).await
-            {
-                tracing::warn!(
-                    "Runtime shutdown reported an additional error after distributed startup failure: {}",
-                    shutdown_err
-                );
+        if !api_only_mode {
+            if let Err(err) = init_distributed(
+                &self.config,
+                &startup.node_identity,
+                &startup.runtime_health,
+                fatal_runtime_tx.clone(),
+                &mut startup.background_tasks,
+            ) {
+                startup.runtime_health.set_fatal_error(err.to_string());
+                if let Some(shutdown_err) =
+                    shutdown_runtime(&mut startup, &self.config, listener_handles, interceptor)
+                        .await
+                {
+                    tracing::warn!(
+                        "Runtime shutdown reported an additional error after distributed startup failure: {}",
+                        shutdown_err
+                    );
+                }
+                return Err(err);
             }
-            return Err(err);
         }
-        init_faketime(&self.config, &mut startup.background_tasks);
+        if !api_only_mode {
+            init_faketime(&self.config, &mut startup.background_tasks);
+        }
         startup.runtime_health.set_api_disabled();
         if let Some(ref bind) = self.config.api_bind {
             if let Err(err) = start_api_server(
@@ -422,29 +630,31 @@ impl Engine {
             startup.runtime_health.set_interceptor_disabled();
         }
 
-        let listener_result = spawn_listeners(
-            &self.config,
-            &startup,
-            Arc::clone(&startup.runtime_health),
-            fatal_runtime_tx.clone(),
-        )
-        .await;
-        match listener_result {
-            Ok(handles) => {
-                listener_handles = handles;
-            }
-            Err(err) => {
-                startup.runtime_health.set_fatal_error(err.to_string());
-                if let Some(shutdown_err) =
-                    shutdown_runtime(&mut startup, &self.config, listener_handles, interceptor)
-                        .await
-                {
-                    tracing::warn!(
-                        "Runtime shutdown reported an additional error after listener startup failure: {}",
-                        shutdown_err
-                    );
+        if !api_only_mode {
+            let listener_result = spawn_listeners(
+                &self.config,
+                &startup,
+                Arc::clone(&startup.runtime_health),
+                fatal_runtime_tx.clone(),
+            )
+            .await;
+            match listener_result {
+                Ok(handles) => {
+                    listener_handles = handles;
                 }
-                return Err(err);
+                Err(err) => {
+                    startup.runtime_health.set_fatal_error(err.to_string());
+                    if let Some(shutdown_err) =
+                        shutdown_runtime(&mut startup, &self.config, listener_handles, interceptor)
+                            .await
+                    {
+                        tracing::warn!(
+                            "Runtime shutdown reported an additional error after listener startup failure: {}",
+                            shutdown_err
+                        );
+                    }
+                    return Err(err);
+                }
             }
         }
         startup.runtime_health.mark_startup_complete();
@@ -498,6 +708,26 @@ fn log_redirect_mode(config: &EngineConfig) {
             );
         }
     }
+}
+
+fn has_spawnable_listeners(config: &EngineConfig) -> bool {
+    config
+        .listeners
+        .iter()
+        .any(|listener| listener_should_spawn(config, listener))
+}
+
+fn validate_listener_presence(
+    config: &EngineConfig,
+    allow_zero_listeners: bool,
+) -> crate::Result<()> {
+    if allow_zero_listeners || has_spawnable_listeners(config) {
+        return Ok(());
+    }
+
+    Err(crate::Error::Config(
+        "No spawnable listeners remain after config expansion/filtering".into(),
+    ))
 }
 
 enum PreparedListener {
@@ -615,11 +845,13 @@ async fn spawn_listeners(
             .as_ref()
             .map(|p| p.parent().unwrap_or(p).join("smtp"));
 
-        let listener_ctx = build_listener_context(listener, startup, smtp_dir);
-        let bind_addr: std::net::IpAddr = listener
-            .bind_address
-            .parse()
-            .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+        let listener_ctx = build_listener_context(listener, startup, smtp_dir)?;
+        let bind_addr: std::net::IpAddr = listener.bind_address.parse().map_err(|err| {
+            crate::Error::Config(format!(
+                "Listener '{}' has invalid bind_address '{}': {}",
+                listener.name, listener.bind_address, err
+            ))
+        })?;
 
         let output_path = startup.output_path.clone();
         let addr = std::net::SocketAddr::new(bind_addr, listener.port);
@@ -864,6 +1096,10 @@ async fn watch_stop_flag(path: Option<std::path::PathBuf>) {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use nettrap_core::prelude::Protocol;
+
     use super::*;
     use crate::cli::RunArgs;
 
@@ -887,9 +1123,467 @@ mod tests {
             report_format: None,
         };
 
-        apply_cli_overrides(&mut config, &args);
+        apply_cli_overrides(&mut config, &args).expect("CLI overrides should apply");
 
         assert!(config.attribution_enabled);
+    }
+
+    #[test]
+    fn cli_ports_are_renormalized_after_overrides() {
+        let mut config = EngineConfig::default();
+        config.listeners = vec![
+            crate::config::ListenerConfig::new("cli_80", 443),
+            crate::config::ListenerConfig::new("https", 8443),
+        ];
+
+        let args = RunArgs {
+            interface: None,
+            ports: vec![80, 443],
+            attribution: false,
+            intercept: false,
+            emulate: false,
+            output: None,
+            pcap: false,
+            pcap_path: None,
+            verbose_flows: false,
+            log_level: None,
+            json_output: false,
+            report_format: None,
+        };
+
+        apply_cli_overrides(&mut config, &args).expect("CLI overrides should apply");
+        config
+            .finalize_listener_names()
+            .expect("post-CLI listener names should normalize");
+
+        let names: Vec<&str> = config
+            .listeners
+            .iter()
+            .map(|listener| listener.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["cli_80", "cli_80_80"]);
+    }
+
+    #[test]
+    fn cli_ports_are_deduplicated_before_synthetic_listeners_are_added() {
+        let mut config = EngineConfig::default();
+        config.listeners.clear();
+
+        let args = RunArgs {
+            interface: None,
+            ports: vec![80, 80, 81],
+            attribution: false,
+            intercept: false,
+            emulate: false,
+            output: None,
+            pcap: false,
+            pcap_path: None,
+            verbose_flows: false,
+            log_level: None,
+            json_output: false,
+            report_format: None,
+        };
+
+        apply_cli_overrides(&mut config, &args).expect("CLI overrides should apply");
+
+        let mut ports: Vec<u16> = config
+            .listeners
+            .iter()
+            .map(|listener| listener.port)
+            .collect();
+        ports.sort_unstable();
+        assert_eq!(ports, vec![80, 81]);
+    }
+
+    #[test]
+    fn cli_ports_create_synthetic_listener_when_existing_port_is_not_spawnable() {
+        let mut config = EngineConfig::default();
+        let mut hidden = crate::config::ListenerConfig::new("hidden_http", 80);
+        hidden.hidden = true;
+        config.listeners = vec![hidden];
+        config
+            .finalize_listener_names()
+            .expect("listener names should normalize");
+
+        let args = RunArgs {
+            interface: None,
+            ports: vec![80],
+            attribution: false,
+            intercept: false,
+            emulate: false,
+            output: None,
+            pcap: false,
+            pcap_path: None,
+            verbose_flows: false,
+            log_level: None,
+            json_output: false,
+            report_format: None,
+        };
+
+        apply_cli_overrides(&mut config, &args).expect("CLI overrides should apply");
+
+        assert!(
+            config
+                .listeners
+                .iter()
+                .any(|listener| listener.name == "cli_80")
+        );
+        assert!(
+            config
+                .listeners
+                .iter()
+                .any(|listener| listener.name == "hidden_http")
+        );
+    }
+
+    #[test]
+    fn cli_ports_override_global_port_blacklists_for_requested_ports() {
+        let mut config = EngineConfig::default();
+        config.listeners.clear();
+        config.blacklist_ports_tcp = vec![80];
+
+        let args = RunArgs {
+            interface: None,
+            ports: vec![80],
+            attribution: false,
+            intercept: false,
+            emulate: false,
+            output: None,
+            pcap: false,
+            pcap_path: None,
+            verbose_flows: false,
+            log_level: None,
+            json_output: false,
+            report_format: None,
+        };
+
+        apply_cli_overrides(&mut config, &args).expect("CLI overrides should apply");
+
+        assert!(config.blacklist_ports_tcp.is_empty());
+        assert!(config.listeners.iter().any(|listener| listener.port == 80));
+    }
+
+    #[test]
+    fn cli_ports_inherit_protocol_from_non_spawnable_listener() {
+        let mut config = EngineConfig::default();
+        let mut hidden_dns = crate::config::ListenerConfig::new("hidden_dns", 53);
+        hidden_dns.protocol = Protocol::Udp;
+        hidden_dns.hidden = true;
+        hidden_dns.bind_address = "127.0.0.1".to_string();
+        hidden_dns.use_ssl = true;
+        config.listeners = vec![hidden_dns];
+
+        let args = RunArgs {
+            interface: None,
+            ports: vec![53],
+            attribution: false,
+            intercept: false,
+            emulate: false,
+            output: None,
+            pcap: false,
+            pcap_path: None,
+            verbose_flows: false,
+            log_level: None,
+            json_output: false,
+            report_format: None,
+        };
+
+        apply_cli_overrides(&mut config, &args).expect("CLI overrides should apply");
+
+        let synthetic = config
+            .listeners
+            .iter()
+            .find(|listener| listener.name == "cli_53")
+            .expect("synthetic listener should be created");
+        assert_eq!(synthetic.protocol, Protocol::Udp);
+        assert_eq!(synthetic.bind_address, "127.0.0.1");
+        assert!(synthetic.use_ssl);
+        assert!(synthetic.enabled);
+        assert!(!synthetic.hidden);
+    }
+
+    #[test]
+    fn cli_ports_reject_ambiguous_protocol_inheritance() {
+        let mut config = EngineConfig::default();
+        let mut hidden_tcp = crate::config::ListenerConfig::new("hidden_tcp", 5353);
+        hidden_tcp.protocol = Protocol::Tcp;
+        hidden_tcp.hidden = true;
+        let mut hidden_udp = crate::config::ListenerConfig::new("hidden_udp", 5353);
+        hidden_udp.protocol = Protocol::Udp;
+        hidden_udp.hidden = true;
+        config.listeners = vec![hidden_tcp, hidden_udp];
+
+        let args = RunArgs {
+            interface: None,
+            ports: vec![5353],
+            attribution: false,
+            intercept: false,
+            emulate: false,
+            output: None,
+            pcap: false,
+            pcap_path: None,
+            verbose_flows: false,
+            log_level: None,
+            json_output: false,
+            report_format: None,
+        };
+
+        let err = apply_cli_overrides(&mut config, &args)
+            .expect_err("mixed protocol listeners should be rejected");
+
+        assert!(err.to_string().contains("use both TCP and UDP"));
+    }
+
+    #[test]
+    fn load_api_config_ignores_invalid_listener_bind_address() {
+        let path =
+            std::env::temp_dir().join(format!("nettrap-api-raw-{}.toml", std::process::id()));
+        let mut config = EngineConfig::default();
+        config.database.pool_size = 0;
+        config.attribution_timeout_ms = 0;
+        config.listeners =
+            vec![crate::config::ListenerConfig::new("http", 80).with_bind_address("not-an-ip")];
+        let serialized = toml::to_string(&config).expect("serialize config");
+        fs::write(&path, serialized).expect("write temp config");
+
+        let loaded = load_api_config(Some(path.clone()), None)
+            .expect("API-only config loading should ignore listener bind validation");
+
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(loaded.listeners.len(), 1);
+        assert_eq!(loaded.listeners[0].bind_address, "not-an-ip");
+        assert_eq!(loaded.database.pool_size, 1);
+        assert_eq!(loaded.attribution_timeout_ms, 100);
+    }
+
+    #[test]
+    fn handle_config_check_takes_priority_over_explicit_config_output() {
+        let config_path = std::env::temp_dir().join(format!(
+            "nettrap-config-check-priority-{}.toml",
+            uuid::Uuid::new_v4()
+        ));
+        let output_path = std::env::temp_dir().join(format!(
+            "nettrap-config-check-priority-out-{}.toml",
+            uuid::Uuid::new_v4()
+        ));
+        let serialized = toml::to_string(&EngineConfig::default()).expect("serialize config");
+        fs::write(&config_path, serialized).expect("write config");
+
+        let args = crate::cli::ConfigArgs {
+            output: Some(output_path.clone()),
+            check: true,
+            defaults: false,
+        };
+
+        handle_config(&args, Some(config_path.clone())).expect("config check should succeed");
+
+        assert!(!output_path.exists());
+
+        let _ = fs::remove_file(&config_path);
+        let _ = fs::remove_file(&output_path);
+    }
+
+    #[test]
+    fn handle_config_check_returns_error_for_invalid_explicit_config() {
+        let config_path = std::env::temp_dir().join(format!(
+            "nettrap-config-check-invalid-{}.toml",
+            uuid::Uuid::new_v4()
+        ));
+        let mut config = EngineConfig::default();
+        config.api_bind = Some(" ".into());
+        let serialized = toml::to_string(&config).expect("serialize config");
+        fs::write(&config_path, serialized).expect("write config");
+
+        let args = crate::cli::ConfigArgs {
+            output: None,
+            check: true,
+            defaults: false,
+        };
+
+        let err = handle_config(&args, Some(config_path.clone()))
+            .expect_err("invalid config check should return error");
+
+        assert!(err.to_string().contains("Configuration validation failed"));
+
+        let _ = fs::remove_file(&config_path);
+    }
+
+    #[test]
+    fn load_api_config_overrides_invalid_api_bind_from_config() {
+        let path = std::env::temp_dir().join(format!(
+            "nettrap-api-override-bind-{}.toml",
+            std::process::id()
+        ));
+        let mut config = EngineConfig::default();
+        config.api_bind = Some("not-a-socket".to_string());
+        let serialized = toml::to_string(&config).expect("serialize config");
+        fs::write(&path, serialized).expect("write temp config");
+
+        let loaded = load_api_config(Some(path.clone()), Some("127.0.0.1:18888"))
+            .expect("API bind override should be applied");
+
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(loaded.api_bind.as_deref(), Some("127.0.0.1:18888"));
+    }
+
+    #[test]
+    fn check_config_paths_returns_error_if_any_file_is_invalid() {
+        let valid_path = std::env::temp_dir().join(format!(
+            "nettrap-config-check-valid-{}.toml",
+            uuid::Uuid::new_v4()
+        ));
+        let invalid_path = std::env::temp_dir().join(format!(
+            "nettrap-config-check-invalid-list-{}.toml",
+            uuid::Uuid::new_v4()
+        ));
+
+        fs::write(
+            &valid_path,
+            toml::to_string(&EngineConfig::default()).expect("serialize config"),
+        )
+        .expect("write valid config");
+
+        let mut invalid = EngineConfig::default();
+        invalid.api_bind = Some("".into());
+        fs::write(
+            &invalid_path,
+            toml::to_string(&invalid).expect("serialize invalid config"),
+        )
+        .expect("write invalid config");
+
+        let err = check_config_paths(&[valid_path.clone(), invalid_path.clone()])
+            .expect_err("mixed validity should return error");
+
+        assert!(err.to_string().contains("1 file(s)"));
+
+        let _ = fs::remove_file(&valid_path);
+        let _ = fs::remove_file(&invalid_path);
+    }
+
+    #[test]
+    fn allow_zero_listeners_does_not_enable_api_only_mode() {
+        let engine = Engine::new(EngineConfig::default(), false, None, None, false, true);
+
+        assert!(engine.allow_zero_listeners);
+        assert!(!engine.api_only_mode);
+    }
+
+    #[test]
+    fn api_only_engine_uses_explicit_mode() {
+        let engine = Engine::api_only(EngineConfig::default());
+
+        assert!(engine.allow_zero_listeners);
+        assert!(engine.api_only_mode);
+        assert!(!engine.intercept_enabled);
+    }
+
+    #[tokio::test]
+    async fn api_only_engine_does_not_initialize_faketime() {
+        crate::faketime::set_delta(0);
+
+        let mut config = EngineConfig::default();
+        config.faketime.enabled = true;
+        config.faketime.init_delta = 3600;
+
+        let stop_flag =
+            std::env::temp_dir().join(format!("nettrap-api-stop-{}", uuid::Uuid::new_v4()));
+        fs::write(&stop_flag, b"stop").expect("write stop flag");
+
+        let engine = Engine::api_only(config);
+        engine
+            .run(Some(stop_flag.clone()))
+            .await
+            .expect("api-only engine should stop cleanly");
+
+        assert_eq!(crate::faketime::get_delta(), 0);
+
+        let _ = fs::remove_file(&stop_flag);
+    }
+
+    #[tokio::test]
+    async fn api_only_engine_ignores_distributed_runtime_configuration() {
+        let mut config = EngineConfig::default();
+        config.distributed.enabled = true;
+        config.distributed.health_bind = Some("127.0.0.1:0".into());
+        config.distributed.metrics_bind = Some("127.0.0.1:0".into());
+        config
+            .distributed
+            .event_sinks
+            .push(crate::config::EventSinkConfig {
+                sink_type: "bogus".into(),
+                target: "127.0.0.1:1".into(),
+                auth: None,
+                batch_size: 1,
+                flush_interval_ms: 1000,
+                request_timeout_ms: 1000,
+            });
+
+        let stop_flag = std::env::temp_dir().join(format!(
+            "nettrap-api-distributed-stop-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::write(&stop_flag, b"stop").expect("write stop flag");
+
+        let engine = Engine::api_only(config);
+        engine
+            .run(Some(stop_flag.clone()))
+            .await
+            .expect("api-only engine should ignore distributed runtime config");
+
+        let _ = fs::remove_file(&stop_flag);
+    }
+
+    #[tokio::test]
+    async fn api_only_engine_ignores_invalid_database_backend() {
+        let mut config = EngineConfig::default();
+        config.database.backend = "postgres".to_string();
+        config.database.postgres_url = Some("postgres://invalid:bad".to_string());
+
+        let stop_flag =
+            std::env::temp_dir().join(format!("nettrap-api-db-stop-{}", uuid::Uuid::new_v4()));
+        fs::write(&stop_flag, b"stop").expect("write stop flag");
+
+        let engine = Engine::api_only(config);
+        engine
+            .run(Some(stop_flag.clone()))
+            .await
+            .expect("api-only engine should ignore invalid DB backend");
+
+        let _ = fs::remove_file(&stop_flag);
+    }
+
+    #[test]
+    fn cli_ports_reject_ambiguous_listener_clone_settings() {
+        let mut config = EngineConfig::default();
+        let mut hidden_a = crate::config::ListenerConfig::new("hidden_a", 8080);
+        hidden_a.hidden = true;
+        hidden_a.bind_address = "127.0.0.1".to_string();
+        let mut hidden_b = crate::config::ListenerConfig::new("hidden_b", 8080);
+        hidden_b.hidden = true;
+        hidden_b.bind_address = "127.0.0.2".to_string();
+        config.listeners = vec![hidden_a, hidden_b];
+
+        let args = RunArgs {
+            interface: None,
+            ports: vec![8080],
+            attribution: false,
+            intercept: false,
+            emulate: false,
+            output: None,
+            pcap: false,
+            pcap_path: None,
+            verbose_flows: false,
+            log_level: None,
+            json_output: false,
+            report_format: None,
+        };
+
+        let err = apply_cli_overrides(&mut config, &args)
+            .expect_err("incompatible base listeners should be rejected");
+
+        assert!(err.to_string().contains("incompatible settings"));
     }
 
     #[test]
@@ -902,5 +1596,72 @@ mod tests {
 
         assert!(listener_is_default_target(&config, &listener));
         assert!(listener_should_spawn(&config, &listener));
+    }
+
+    #[test]
+    fn validate_listener_presence_rejects_empty_runtime_in_run_mode() {
+        let mut config = EngineConfig::default();
+        config.listeners.clear();
+
+        let err = validate_listener_presence(&config, false).unwrap_err();
+        assert!(err.to_string().contains("No spawnable listeners"));
+    }
+
+    #[test]
+    fn validate_listener_presence_allows_api_only_mode_without_listeners() {
+        let mut config = EngineConfig::default();
+        config.listeners.clear();
+
+        validate_listener_presence(&config, true).expect("api-only mode should be allowed");
+    }
+
+    #[tokio::test]
+    async fn build_engine_requires_interceptor_when_requested() {
+        let args = RunArgs {
+            interface: None,
+            ports: Vec::new(),
+            attribution: false,
+            intercept: true,
+            emulate: false,
+            output: None,
+            pcap: false,
+            pcap_path: None,
+            verbose_flows: false,
+            log_level: None,
+            json_output: false,
+            report_format: None,
+        };
+
+        let engine = build_engine(&args, false, None)
+            .await
+            .expect("engine should build");
+
+        assert!(engine.intercept_enabled);
+        assert!(engine.require_interceptor);
+    }
+
+    #[tokio::test]
+    async fn build_engine_keeps_interceptor_optional_when_not_requested() {
+        let args = RunArgs {
+            interface: None,
+            ports: Vec::new(),
+            attribution: false,
+            intercept: false,
+            emulate: false,
+            output: None,
+            pcap: false,
+            pcap_path: None,
+            verbose_flows: false,
+            log_level: None,
+            json_output: false,
+            report_format: None,
+        };
+
+        let engine = build_engine(&args, false, None)
+            .await
+            .expect("engine should build");
+
+        assert!(!engine.intercept_enabled);
+        assert!(!engine.require_interceptor);
     }
 }

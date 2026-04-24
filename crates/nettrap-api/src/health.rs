@@ -77,6 +77,7 @@ pub struct RuntimeHealthSnapshot {
 struct RuntimeHealthState {
     startup_complete: bool,
     fatal_error: Option<String>,
+    allow_zero_listeners: bool,
     listeners: HashMap<String, ListenerHealth>,
     interceptor: ComponentHealth,
     api: ComponentHealth,
@@ -146,6 +147,10 @@ impl RuntimeHealth {
 
     pub fn set_fatal_error(&self, error: impl Into<String>) {
         self.state.write().fatal_error = Some(error.into());
+    }
+
+    pub fn set_allow_zero_listeners(&self, allow: bool) {
+        self.state.write().allow_zero_listeners = allow;
     }
 
     pub fn set_interceptor_disabled(&self) {
@@ -407,7 +412,7 @@ fn compute_status(state: &RuntimeHealthState) -> HealthStatus {
         return HealthStatus::Starting;
     }
 
-    if state.listeners.is_empty() {
+    if state.listeners.is_empty() && !state.allow_zero_listeners {
         return HealthStatus::Degraded;
     }
 
@@ -461,6 +466,20 @@ mod tests {
         let snapshot = runtime_health.snapshot();
 
         assert_eq!(snapshot.status, HealthStatus::Degraded);
+    }
+
+    #[test]
+    fn startup_complete_without_listeners_is_ok_in_api_only_mode() {
+        let runtime_health = RuntimeHealth::new();
+        runtime_health.set_allow_zero_listeners(true);
+        runtime_health.mark_startup_complete();
+        runtime_health.set_api_running();
+        runtime_health.set_interceptor_disabled();
+        runtime_health.set_distributed_export_disabled();
+
+        let snapshot = runtime_health.snapshot();
+
+        assert_eq!(snapshot.status, HealthStatus::Ok);
     }
 
     #[test]

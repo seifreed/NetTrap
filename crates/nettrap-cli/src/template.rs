@@ -10,6 +10,13 @@ pub fn render_template(template: &str, vars: &std::collections::HashMap<String, 
     render_template_depth(template, vars, 0)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ConditionalBlock {
+    start: usize,
+    content_start: usize,
+    end_start: usize,
+}
+
 fn render_template_depth(
     template: &str,
     vars: &std::collections::HashMap<String, String>,
@@ -40,19 +47,27 @@ fn render_template_depth(
         let name_end = start + 6 + name_end_offset;
 
         let var_name = result[start + 6..name_end].trim();
-        let Some(endif_offset) = result[name_end + 2..].find("{{/if}}") else {
+        let Some(block) = find_matching_conditional(&result, start) else {
             break;
         };
-        let endif = name_end + 2 + endif_offset;
 
-        let content = &result[name_end + 2..endif];
+        let content = &result[block.content_start..block.end_start];
         let var_exists = vars.get(var_name).map(|v| !v.is_empty()).unwrap_or(false);
 
         if var_exists {
             let rendered = render_template_depth(content, vars, depth + 1);
-            result = format!("{}{}{}", &result[..start], rendered, &result[endif + 7..]);
+            result = format!(
+                "{}{}{}",
+                &result[..block.start],
+                rendered,
+                &result[block.end_start + 7..]
+            );
         } else {
-            result = format!("{}{}", &result[..start], &result[endif + 7..]);
+            result = format!(
+                "{}{}",
+                &result[..block.start],
+                &result[block.end_start + 7..]
+            );
         }
     }
 
@@ -62,7 +77,7 @@ fn render_template_depth(
             break;
         };
 
-        // Skip conditionals
+        // Leave malformed control markers untouched rather than stripping them.
         if result[start..].starts_with("{{#") || result[start..].starts_with("{{/") {
             break;
         }
@@ -106,6 +121,50 @@ fn render_template_depth(
     result
 }
 
+fn find_matching_conditional(template: &str, start: usize) -> Option<ConditionalBlock> {
+    const IF_OPEN: &str = "{{#if ";
+    const IF_CLOSE: &str = "{{/if}}";
+
+    if !template[start..].starts_with(IF_OPEN) {
+        return None;
+    }
+
+    let name_end_offset = template[start + IF_OPEN.len()..].find("}}")?;
+    let content_start = start + IF_OPEN.len() + name_end_offset + 2;
+    let mut depth = 1usize;
+    let mut cursor = content_start;
+
+    while cursor <= template.len() {
+        let next_open = template[cursor..]
+            .find(IF_OPEN)
+            .map(|offset| cursor + offset);
+        let next_close = template[cursor..]
+            .find(IF_CLOSE)
+            .map(|offset| cursor + offset);
+
+        match (next_open, next_close) {
+            (Some(open), Some(close)) if open < close => {
+                depth += 1;
+                cursor = open + IF_OPEN.len();
+            }
+            (_, Some(close)) => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(ConditionalBlock {
+                        start,
+                        content_start,
+                        end_start: close,
+                    });
+                }
+                cursor = close + IF_CLOSE.len();
+            }
+            _ => return None,
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,5 +201,34 @@ mod tests {
         let vars = HashMap::new();
         let result = render_template("{{date:%Y}}", &vars);
         assert!(result.len() == 4); // Year is 4 digits
+    }
+
+    #[test]
+    fn test_nested_conditionals_match_correct_closing_block() {
+        let mut vars = HashMap::new();
+        vars.insert("outer".to_string(), "yes".to_string());
+        vars.insert("inner".to_string(), "yes".to_string());
+
+        assert_eq!(
+            render_template("{{#if outer}}A{{#if inner}}B{{/if}}C{{/if}}", &vars),
+            "ABC"
+        );
+
+        vars.remove("inner");
+        assert_eq!(
+            render_template("{{#if outer}}A{{#if inner}}B{{/if}}C{{/if}}", &vars),
+            "AC"
+        );
+    }
+
+    #[test]
+    fn test_unmatched_if_block_is_left_unchanged() {
+        let mut vars = HashMap::new();
+        vars.insert("show".to_string(), "yes".to_string());
+
+        assert_eq!(
+            render_template("prefix {{#if show}}value", &vars),
+            "prefix {{#if show}}value"
+        );
     }
 }

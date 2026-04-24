@@ -28,7 +28,10 @@ impl std::fmt::Display for PolicyDecision {
 
 impl PolicyDecision {
     pub fn should_intercept(&self) -> bool {
-        matches!(self, PolicyDecision::Intercept | PolicyDecision::Emulate | PolicyDecision::Sinkhole)
+        matches!(
+            self,
+            PolicyDecision::Intercept | PolicyDecision::Emulate | PolicyDecision::Sinkhole
+        )
     }
 
     pub fn should_block(&self) -> bool {

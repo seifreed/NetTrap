@@ -1,5 +1,4 @@
-const MAX_HEADER_SIZE: usize = 64 * 1024; // 64KB max headers
-const MAX_TOTAL_SIZE: usize = 10 * 1024 * 1024; // 10MB max total request
+use crate::parser::parse_http_request_bytes;
 
 #[derive(Debug, Clone)]
 pub struct HttpRequest {
@@ -12,77 +11,18 @@ pub struct HttpRequest {
 
 impl HttpRequest {
     pub fn parse(data: &[u8]) -> Option<Self> {
-        // Reject oversized requests to prevent DoS
-        if data.len() > MAX_TOTAL_SIZE {
-            return None;
-        }
-
-        // Find header end with size limit
-        let header_end = data.windows(4).position(|w| w == b"\r\n\r\n")?;
-
-        // Limit header size
-        if header_end > MAX_HEADER_SIZE {
-            return None;
-        }
-
-        let header_str = std::str::from_utf8(&data[..header_end]).ok()?;
-
-        let mut lines = header_str.lines();
-
-        let request_line = lines.next()?;
-        let parts: Vec<&str> = request_line.split_whitespace().collect();
-        if parts.len() < 3 {
-            return None;
-        }
-
-        let method = parts[0].to_string();
-        let path = parts[1].to_string();
-        let version = parts[2].to_string();
-
-        let headers: Vec<(String, String)> = lines
-            .filter_map(|line| {
-                let colon_pos = line.find(':')?;
-                let key = line[..colon_pos].trim().to_string();
-                let value = line[colon_pos + 1..].trim().to_string();
-                Some((key, value))
-            })
-            .collect();
-
-        // Validate headers don't contain CRLF (prevent HTTP response splitting/request smuggling)
-        for (key, value) in &headers {
-            if key.contains('\r')
-                || key.contains('\n')
-                || value.contains('\r')
-                || value.contains('\n')
-            {
-                tracing::warn!("HTTP header contains CRLF, rejecting request");
-                return None;
-            }
-        }
-
-        let body_start = header_end + 4;
-        let body = if body_start < data.len() {
-            // Limit body size based on Content-Length if present
-            let content_length: Option<usize> = headers
-                .iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case("Content-Length"))
-                .and_then(|(_, v)| v.parse().ok());
-
-            if let Some(cl) = content_length {
-                if cl > MAX_TOTAL_SIZE - body_start {
-                    return None; // Body too large
-                }
-            }
-            Some(data[body_start..].to_vec())
-        } else {
+        let parsed = parse_http_request_bytes(data).ok()??;
+        let body = if parsed.body.is_empty() {
             None
+        } else {
+            Some(parsed.body)
         };
 
         Some(Self {
-            method,
-            path,
-            version,
-            headers,
+            method: parsed.method,
+            path: parsed.path,
+            version: parsed.version,
+            headers: parsed.headers,
             body,
         })
     }
@@ -115,9 +55,29 @@ impl HttpResponse {
     pub fn new(status_code: u16) -> Self {
         Self {
             status_code,
-            status_text: "OK".to_string(),
+            status_text: Self::reason_phrase(status_code).to_string(),
             headers: Vec::new(),
             body: None,
+        }
+    }
+
+    fn reason_phrase(status: u16) -> &'static str {
+        match status {
+            200 => "OK",
+            201 => "Created",
+            204 => "No Content",
+            301 => "Moved Permanently",
+            302 => "Found",
+            304 => "Not Modified",
+            400 => "Bad Request",
+            401 => "Unauthorized",
+            403 => "Forbidden",
+            404 => "Not Found",
+            405 => "Method Not Allowed",
+            500 => "Internal Server Error",
+            502 => "Bad Gateway",
+            503 => "Service Unavailable",
+            _ => "Unknown",
         }
     }
 
@@ -158,4 +118,84 @@ pub fn default_response() -> HttpResponse {
     HttpResponse::new(200)
         .with_header("Server", "NetTrap")
         .with_body("<html><body>Hello from NetTrap</body></html>")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HttpRequest;
+    use crate::parser::MAX_TOTAL_SIZE;
+
+    #[test]
+    fn parse_accepts_complete_post_body() {
+        let request =
+            b"POST /upload HTTP/1.1\r\nHost: example.test\r\nContent-Length: 5\r\n\r\nhello";
+        let parsed = HttpRequest::parse(request).expect("complete request should parse");
+
+        assert_eq!(parsed.method, "POST");
+        assert_eq!(parsed.path, "/upload");
+        assert_eq!(parsed.body.as_deref(), Some(&b"hello"[..]));
+    }
+
+    #[test]
+    fn parse_rejects_truncated_post_body() {
+        let request =
+            b"POST /upload HTTP/1.1\r\nHost: example.test\r\nContent-Length: 5\r\n\r\nhel";
+
+        assert!(HttpRequest::parse(request).is_none());
+    }
+
+    #[test]
+    fn parse_accepts_get_without_body() {
+        let request = b"GET / HTTP/1.1\r\nHost: example.test\r\n\r\n";
+        let parsed = HttpRequest::parse(request).expect("request should parse");
+
+        assert_eq!(parsed.method, "GET");
+        assert!(parsed.body.is_none());
+    }
+
+    #[test]
+    fn parse_rejects_body_larger_than_maximum() {
+        let oversized = MAX_TOTAL_SIZE + 1;
+        let request = format!(
+            "POST /upload HTTP/1.1\r\nHost: example.test\r\nContent-Length: {}\r\n\r\n",
+            oversized
+        );
+
+        assert!(HttpRequest::parse(request.as_bytes()).is_none());
+    }
+
+    #[test]
+    fn parse_rejects_invalid_content_length() {
+        let request =
+            b"POST /upload HTTP/1.1\r\nHost: example.test\r\nContent-Length: abc\r\n\r\nhello";
+
+        assert!(HttpRequest::parse(request).is_none());
+    }
+
+    #[test]
+    fn parse_rejects_truncated_chunked_body() {
+        let request =
+            b"POST /upload HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\n\r\n4\r\ntes";
+
+        assert!(HttpRequest::parse(request).is_none());
+    }
+
+    #[test]
+    fn parse_accepts_complete_chunked_body() {
+        let request =
+            b"POST /upload HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\n\r\n4\r\ntest\r\n0\r\n\r\n";
+        let parsed = HttpRequest::parse(request).expect("complete chunked request should parse");
+
+        assert_eq!(parsed.body.as_deref(), Some(&b"test"[..]));
+    }
+
+    #[test]
+    fn parse_does_not_absorb_coalesced_request_as_body_without_framing() {
+        let request =
+            b"GET /a HTTP/1.1\r\nHost: example.test\r\n\r\nGET /b HTTP/1.1\r\nHost: example.test\r\n\r\n";
+        let parsed = HttpRequest::parse(request).expect("request should parse");
+
+        assert_eq!(parsed.path, "/a");
+        assert!(parsed.body.is_none());
+    }
 }

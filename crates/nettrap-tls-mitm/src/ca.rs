@@ -118,7 +118,7 @@ impl CertificateAuthority {
     /// the CA with the same key pair. The original cert PEM is preserved for
     /// chain building.
     pub fn from_pem_files(cert_path: &Path, key_path: &Path) -> Result<Self> {
-        let cert_pem = std::fs::read_to_string(cert_path)?;
+        let _cert_pem = std::fs::read_to_string(cert_path)?;
         let key_pem = std::fs::read_to_string(key_path)?;
 
         let key_pair = KeyPair::from_pem(&key_pem)
@@ -142,10 +142,14 @@ impl CertificateAuthority {
             .self_signed(&key_pair)
             .map_err(|e| Error::Tls(format!("Failed to recreate CA: {}", e)))?;
 
+        // Use the re-generated cert PEM (not the original file) so that
+        // the issuer DN in signed leaf certs matches the CA cert in the chain.
+        let ca_cert_pem_regenerated = ca_cert.pem();
+
         Ok(Self {
             ca_cert,
             ca_key: key_pair,
-            ca_cert_pem: cert_pem,
+            ca_cert_pem: ca_cert_pem_regenerated,
             ca_key_pem: key_pem,
             cert_dir: None,
             cache: RwLock::new(CertCache::new()),
