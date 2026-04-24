@@ -1,5 +1,7 @@
 /// Custom response configuration for HTTP listeners.
 /// Supports matching by host and/or URI, with multiple response types.
+const MAX_CUSTOM_RESPONSE_FILE_BYTES: u64 = 10 * 1024 * 1024;
+
 #[derive(Debug, Clone)]
 pub struct CustomResponseConfig {
     pub rules: Vec<CustomResponseRule>,
@@ -140,8 +142,17 @@ impl CustomResponseConfig {
         vars.insert("server".to_string(), "NetTrap".to_string());
 
         match &rule.response {
-            CustomResponseType::HttpRawFile(path) => {
-                match std::fs::read(path) {
+            CustomResponseType::HttpRawFile(path) => match std::fs::metadata(path) {
+                Ok(meta) if meta.len() > MAX_CUSTOM_RESPONSE_FILE_BYTES => {
+                    tracing::warn!(
+                        "Custom response file {} exceeds response size limit ({} > {})",
+                        path,
+                        meta.len(),
+                        MAX_CUSTOM_RESPONSE_FILE_BYTES
+                    );
+                    Some(payload_too_large_response(&date.to_string()))
+                }
+                Ok(meta) if meta.is_file() => match std::fs::read(path) {
                     Ok(content) => {
                         let content_str = String::from_utf8_lossy(&content);
                         // Support both legacy <RAW-DATE> and new {{date:...}} templates
@@ -153,8 +164,13 @@ impl CustomResponseConfig {
                         tracing::warn!("Failed to read custom response file {}: {}", path, e);
                         None
                     }
+                },
+                Ok(_) => None,
+                Err(e) => {
+                    tracing::warn!("Failed to inspect custom response file {}: {}", path, e);
+                    None
                 }
-            }
+            },
             CustomResponseType::HttpStaticString(body) => {
                 let ct = rule.content_type.as_deref().unwrap_or("text/html");
                 // Support both legacy <RAW-DATE> and new {{date:...}} templates
@@ -183,6 +199,17 @@ impl CustomResponseConfig {
             }
         }
     }
+}
+
+fn payload_too_large_response(date: &str) -> Vec<u8> {
+    let body = "Payload Too Large";
+    format!(
+        "HTTP/1.1 413 Payload Too Large\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nDate: {}\r\nServer: NetTrap\r\n\r\n{}",
+        body.len(),
+        date,
+        body
+    )
+    .into_bytes()
 }
 
 pub(crate) fn host_matches_pattern(host: &str, pattern: &str) -> bool {
@@ -227,7 +254,10 @@ fn uri_matches_pattern(uri: &str, pattern: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{CustomResponseConfig, host_matches_pattern, uri_matches_pattern};
+    use super::{
+        CustomResponseConfig, MAX_CUSTOM_RESPONSE_FILE_BYTES, host_matches_pattern,
+        uri_matches_pattern,
+    };
 
     #[test]
     fn host_matches_are_exact_or_subdomain_only() {
@@ -261,5 +291,27 @@ mod tests {
         assert!(config.find_match("notevil.com", "/gate").is_none());
         assert!(config.find_match("evil.com", "/delegate").is_none());
         assert!(config.find_match("evil.com", "/payload.exe").is_some());
+    }
+
+    #[test]
+    fn custom_response_file_rejects_oversized_file() {
+        let root = std::env::temp_dir().join(format!(
+            "nettrap-custom-response-limit-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).expect("create temp root");
+        let path = root.join("large.http");
+        let file = std::fs::File::create(&path).expect("create sparse file");
+        file.set_len(MAX_CUSTOM_RESPONSE_FILE_BYTES + 1)
+            .expect("extend sparse file");
+        let config =
+            CustomResponseConfig::parse(&format!("host=*;uri=*;type=file;path={}", path.display()));
+
+        let response = config
+            .build_response_for_request("example.com", "/", "/")
+            .expect("matching file rule should respond");
+
+        assert!(response.starts_with(b"HTTP/1.1 413 Payload Too Large"));
+        std::fs::remove_dir_all(root).expect("cleanup temp root");
     }
 }

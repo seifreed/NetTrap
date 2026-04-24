@@ -165,13 +165,8 @@ pub fn init_dns_handler(ctx: &ListenerContext) -> nettrap_proto_dns::handler::Dn
         }
     }
 
-    if let Some(custom) = ctx.custom_response() {
-        for entry in custom.split(';') {
-            if let Some((domain, ips)) = entry.split_once('=') {
-                let ip_list: Vec<String> = ips.split(',').map(|s| s.trim().to_string()).collect();
-                dns_handler.add_custom_response(domain.trim(), ip_list);
-            }
-        }
+    for (domain, ips) in ctx.config.parse_dns_custom_responses() {
+        dns_handler.add_custom_response(domain, ips);
     }
 
     dns_handler

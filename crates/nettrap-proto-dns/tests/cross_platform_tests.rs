@@ -68,6 +68,19 @@ mod tests {
         assert!(response_has_a_record(&response, "10.1.2.3"));
     }
 
+    #[tokio::test]
+    async fn test_dns_ncsi_only_special_cases_a_queries() {
+        let handler =
+            DnsHandler::new().with_ncsi_response_ip("10.1.2.3".parse().expect("valid IPv4"));
+        let query = build_dns_query("dns.msftncsi.com", 28);
+        let response = handler
+            .handle_query(&query, "127.0.0.1:53".parse().unwrap())
+            .await
+            .unwrap();
+
+        assert!(response_has_no_answers(&response));
+    }
+
     fn build_dns_query(domain: &str, qtype: u16) -> Vec<u8> {
         use hickory_proto::op::{Message, MessageType, OpCode, Query};
         use hickory_proto::rr::{Name, RecordType};
@@ -99,5 +112,11 @@ mod tests {
             RData::A(a) => a.0 == expected,
             _ => false,
         })
+    }
+
+    fn response_has_no_answers(response: &[u8]) -> bool {
+        use hickory_proto::op::Message;
+
+        Message::from_vec(response).unwrap().answers().is_empty()
     }
 }

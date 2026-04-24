@@ -102,6 +102,52 @@ impl Default for ListenerConfig {
     }
 }
 
+impl ListenerConfig {
+    /// Parse validated DNS custom responses from `custom_response`.
+    ///
+    /// Format: `domain=ip1,ip2;other.example=ip3`. Entries without at least one
+    /// valid IP are ignored so DNS handlers never receive malformed records.
+    pub fn parse_dns_custom_responses(&self) -> Vec<(String, Vec<String>)> {
+        let Some(custom) = self.custom_response.as_deref() else {
+            return Vec::new();
+        };
+
+        custom
+            .split(';')
+            .filter_map(|entry| {
+                let (domain, ips) = entry.trim().split_once('=')?;
+                let domain = domain.trim();
+                if domain.is_empty() {
+                    return None;
+                }
+
+                let ip_list: Vec<String> = ips
+                    .split(',')
+                    .filter_map(|s| {
+                        let ip = s.trim();
+                        if ip.parse::<std::net::IpAddr>().is_ok() {
+                            Some(ip.to_string())
+                        } else {
+                            tracing::warn!(
+                                "Invalid IP '{}' in DNS custom response for domain '{}', skipping",
+                                ip,
+                                domain
+                            );
+                            None
+                        }
+                    })
+                    .collect();
+
+                if ip_list.is_empty() {
+                    None
+                } else {
+                    Some((domain.to_string(), ip_list))
+                }
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,5 +179,18 @@ mod tests {
         assert_eq!(format!("{}", DnsResponseMode::Static), "static");
         assert_eq!(format!("{}", DnsResponseMode::Auto), "auto");
         assert_eq!(format!("{}", DnsResponseMode::Hostname), "hostname");
+    }
+
+    #[test]
+    fn parse_dns_custom_responses_skips_invalid_ips() {
+        let config = ListenerConfig {
+            custom_response: Some("example.com=1.2.3.4,bad;invalid=also-bad".to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            config.parse_dns_custom_responses(),
+            vec![("example.com".to_string(), vec!["1.2.3.4".to_string()])]
+        );
     }
 }

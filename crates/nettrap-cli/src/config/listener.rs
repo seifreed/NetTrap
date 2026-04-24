@@ -503,6 +503,19 @@ mod tests {
     }
 
     #[test]
+    fn parse_dns_custom_responses_skips_invalid_ips() {
+        let config = ListenerConfig::new("dns", 53)
+            .with_custom_response("example.com=10.0.0.1,bad-ip;bad.example=also-bad");
+
+        let responses = config.parse_dns_custom_responses();
+
+        assert_eq!(
+            responses,
+            vec![("example.com".to_string(), vec!["10.0.0.1".to_string()])]
+        );
+    }
+
+    #[test]
     fn host_filters_support_cidr_ranges() {
         let mut config = ListenerConfig::new("http", 80);
         config.host_whitelist = vec!["10.0.0.0/8".to_string()];

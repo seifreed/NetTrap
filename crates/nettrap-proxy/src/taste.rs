@@ -261,20 +261,16 @@ impl ProtocolTaste for TftpTaste {
 pub struct QuicTaste;
 impl ProtocolTaste for QuicTaste {
     fn taste(&self, data: &[u8], dst_port: u16) -> TasteScore {
-        if dst_port == 443 && data.len() >= 5 {
-            // QUIC long header: first bit set, version follows
-            if data[0] & 0x80 != 0 {
-                return 85;
-            }
+        if data.len() < 5 || data[0] & 0x80 == 0 {
+            return 0;
         }
-        if data.len() >= 5 && data[0] & 0x80 != 0 {
-            // Check for known QUIC versions
-            let version = u32::from_be_bytes([data[1], data[2], data[3], data[4]]);
-            if version == 1 || version == 0xff000010 || version == 0xff000011 {
-                return 80;
-            }
+
+        let version = u32::from_be_bytes([data[1], data[2], data[3], data[4]]);
+        if !matches!(version, 1 | 0xff000010 | 0xff000011) {
+            return 0;
         }
-        0
+
+        if dst_port == 443 { 85 } else { 80 }
     }
     fn protocol_name(&self) -> &'static str {
         "quic"
@@ -776,6 +772,20 @@ mod tests {
         assert_eq!(taste.taste(&[0x16, 0x03, 0x01], 443), 95);
         assert_eq!(taste.taste(&[0x16, 0x03, 0x03], 0), 95);
         assert_eq!(taste.taste(&[], 443), 40);
+    }
+
+    #[test]
+    fn test_quic_taste_requires_known_version() {
+        let taste = QuicTaste;
+
+        assert_eq!(
+            taste.taste(&[0xc3, 0x00, 0x00, 0x00, 0x01, 0, 0, 0, 0], 443),
+            85
+        );
+        assert_eq!(
+            taste.taste(&[0xc3, 0x12, 0x34, 0x56, 0x78, 0, 0, 0, 0], 443),
+            0
+        );
     }
 
     #[test]

@@ -182,7 +182,7 @@ impl TftpHandlerTrait for TftpHandler {
             TftpPacket::WriteRequest { filename, .. } => {
                 Ok(vec![self.handle_write_request(filename)])
             }
-            TftpPacket::Data { block, data } => Ok(vec![self.handle_data_block(*block, data)]),
+            TftpPacket::Data { .. } => Ok(Vec::new()),
             TftpPacket::Ack { .. } => {
                 Ok(Vec::new()) // ACKs don't need responses in server mode
             }

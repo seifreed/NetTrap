@@ -14,7 +14,7 @@ impl Default for EventBusConfig {
     fn default() -> Self {
         Self {
             buffer_size: 10000,
-            drop_on_full: false,
+            drop_on_full: true,
         }
     }
 }
@@ -74,7 +74,7 @@ impl EventBus {
     }
 
     pub fn emit(&self, event: Event) {
-        if let Err(err) = self.publish(&event, false) {
+        if let Err(err) = self.publish(&event, !self.config.drop_on_full) {
             tracing::warn!(
                 "Event bus failed to publish '{}': {}",
                 event.event_type(),
@@ -333,27 +333,42 @@ mod tests {
     }
 
     #[test]
-    fn emit_drops_without_blocking_when_buffer_is_full() {
-        let bus = EventBus::new(EventBusConfig {
+    fn emit_applies_backpressure_when_drop_mode_is_disabled() {
+        let bus = Arc::new(EventBus::new(EventBusConfig {
             buffer_size: 1,
             drop_on_full: false,
-        });
+        }));
         let receiver = bus.subscribe();
 
         bus.emit(warning_event("first"));
-        bus.emit(warning_event("second"));
+
+        let producer = {
+            let bus = Arc::clone(&bus);
+            std::thread::spawn(move || bus.emit(warning_event("second")))
+        };
+
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(!producer.is_finished());
 
         let first = receiver
             .recv_timeout(Duration::from_millis(200))
             .expect("first event should be available");
         assert_eq!(first.event_type(), "warning");
-        assert!(receiver.recv_timeout(Duration::from_millis(50)).is_err());
+
+        producer
+            .join()
+            .expect("producer should unblock once capacity frees");
+
+        let second = receiver
+            .recv_timeout(Duration::from_millis(200))
+            .expect("second event should be delivered after backpressure");
+        assert_eq!(second.event_type(), "warning");
 
         let stats = bus.stats();
         assert_eq!(stats.events_emitted, 2);
-        assert_eq!(stats.events_dropped, 1);
-        assert_eq!(stats.deliveries_completed, 1);
-        assert_eq!(stats.deliveries_dropped, 1);
+        assert_eq!(stats.events_dropped, 0);
+        assert_eq!(stats.deliveries_completed, 2);
+        assert_eq!(stats.deliveries_dropped, 0);
     }
 
     #[test]

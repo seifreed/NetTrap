@@ -146,12 +146,14 @@ impl DnsHandlerTrait for DnsHandler {
             response.set_id(message.id());
             response.add_query(query.clone());
 
-            let record = Record::from_rdata(
-                query.name().clone(),
-                300,
-                RData::A(hickory_proto::rr::rdata::A(ncsi_ip)),
-            );
-            response.add_answer(record);
+            if query_type == RecordType::A {
+                let record = Record::from_rdata(
+                    query.name().clone(),
+                    300,
+                    RData::A(hickory_proto::rr::rdata::A(ncsi_ip)),
+                );
+                response.add_answer(record);
+            }
 
             let response_bytes = response
                 .to_vec()

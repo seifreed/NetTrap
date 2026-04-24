@@ -14,6 +14,8 @@ fn has_path_traversal(s: &str) -> bool {
         || lower.contains("%252e")
 }
 
+const MAX_FTP_RETR_BYTES: u64 = 10 * 1024 * 1024;
+
 pub struct FtpHandler {
     banner: String,
     root_dir: Option<std::path::PathBuf>,
@@ -221,17 +223,28 @@ impl FtpHandler {
                     tracing::warn!("Path traversal attempt blocked: {:?}", canonical_path);
                     return FtpResponse::new(550, "Access denied");
                 }
-                if canonical_path.is_file() {
-                    if let Ok(content) = std::fs::read(&canonical_path) {
-                        let mut resp = format!(
-                            "150 Opening BINARY mode data connection for {} ({} bytes).\r\n",
-                            filename,
-                            content.len()
-                        )
-                        .into_bytes();
-                        resp.extend_from_slice(&content);
-                        resp.extend_from_slice(b"226 Transfer complete.\r\n");
-                        return FtpResponse::raw(resp);
+                if let Ok(metadata) = canonical_path.metadata() {
+                    if metadata.is_file() {
+                        if metadata.len() > MAX_FTP_RETR_BYTES {
+                            tracing::warn!(
+                                "FTP RETR file {:?} exceeds response size limit ({} > {})",
+                                canonical_path,
+                                metadata.len(),
+                                MAX_FTP_RETR_BYTES
+                            );
+                            return FtpResponse::new(552, "File too large");
+                        }
+                        if let Ok(content) = std::fs::read(&canonical_path) {
+                            let mut resp = format!(
+                                "150 Opening BINARY mode data connection for {} ({} bytes).\r\n",
+                                filename,
+                                content.len()
+                            )
+                            .into_bytes();
+                            resp.extend_from_slice(&content);
+                            resp.extend_from_slice(b"226 Transfer complete.\r\n");
+                            return FtpResponse::raw(resp);
+                        }
                     }
                 }
                 // Try extension-based fallback
@@ -604,5 +617,33 @@ pub fn resolve_banner(input: &str) -> String {
                 format!("220 {}", other)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn retr_rejects_files_over_response_limit() {
+        let root = unique_temp_dir("nettrap-ftp-limit");
+        std::fs::create_dir_all(&root).expect("create temp root");
+        let path = root.join("large.bin");
+        let file = std::fs::File::create(&path).expect("create sparse file");
+        file.set_len(MAX_FTP_RETR_BYTES + 1)
+            .expect("extend sparse file");
+
+        let response = FtpHandler::new()
+            .with_root_dir(&root)
+            .handle("RETR large.bin");
+
+        assert_eq!(response.code, 552);
+        assert!(response.raw.is_none());
+        std::fs::remove_dir_all(root).expect("cleanup temp root");
+    }
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("{}-{}", prefix, std::process::id()))
     }
 }

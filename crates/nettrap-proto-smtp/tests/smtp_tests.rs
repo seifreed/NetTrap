@@ -12,6 +12,18 @@ mod tests {
 
         let response = result.unwrap();
         assert!(response.message.contains("OK"), "EHLO should return OK");
+        assert!(
+            !response.message.contains("STARTTLS"),
+            "EHLO should not advertise unsupported STARTTLS"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_smtp_starttls_is_not_advertised_as_available() {
+        let handler = SmtpHandler::new();
+        let result = handler.handle("STARTTLS").await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().code, 454);
     }
 
     #[tokio::test]

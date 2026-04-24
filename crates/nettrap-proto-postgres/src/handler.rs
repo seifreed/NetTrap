@@ -2,6 +2,9 @@ pub struct PostgresHandler {
     version: String,
 }
 
+const POSTGRES_SSL_REQUEST: u32 = 80877103;
+const POSTGRES_GSSENC_REQUEST: u32 = 80877104;
+
 impl PostgresHandler {
     pub fn new() -> Self {
         Self {
@@ -64,9 +67,13 @@ impl PostgresHandler {
                 // Startup message (no type byte, starts with length + version)
                 let len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
                 let pg_version = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
-                if pg_version == 80877103 {
+                if pg_version == POSTGRES_SSL_REQUEST {
                     // SSLRequest → respond 'N' (no SSL), client will retry with normal startup
                     tracing::info!("POSTGRES SSLRequest from client, declining");
+                    vec![b'N']
+                } else if pg_version == POSTGRES_GSSENC_REQUEST {
+                    // GSSENCRequest → respond 'N' (no GSS encryption), client will retry startup.
+                    tracing::info!("POSTGRES GSSENCRequest from client, declining");
                     vec![b'N']
                 } else if pg_version == 196608 {
                     // Normal 3.0 startup
@@ -94,5 +101,19 @@ impl PostgresHandler {
 impl Default for PostgresHandler {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gssenc_request_is_declined_like_ssl_request() {
+        let mut request = Vec::new();
+        request.extend_from_slice(&8u32.to_be_bytes());
+        request.extend_from_slice(&POSTGRES_GSSENC_REQUEST.to_be_bytes());
+
+        assert_eq!(PostgresHandler::new().handle(&request), b"N");
     }
 }

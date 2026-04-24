@@ -1,5 +1,13 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+const MAX_FILE_RESPONSE_BYTES: u64 = 10 * 1024 * 1024;
+
+enum WebrootServeResult {
+    Found { content: Vec<u8>, mime: String },
+    TooLarge,
+    NotFound,
+}
 
 /// Serves files from a webroot directory with MIME type detection
 pub struct WebrootServer {
@@ -37,11 +45,18 @@ impl WebrootServer {
 
     /// Resolve a request path to a file and return (content, mime_type)
     pub fn serve(&self, path: &str) -> Option<(Vec<u8>, String)> {
+        match self.serve_result(path) {
+            WebrootServeResult::Found { content, mime } => Some((content, mime)),
+            WebrootServeResult::TooLarge | WebrootServeResult::NotFound => None,
+        }
+    }
+
+    fn serve_result(&self, path: &str) -> WebrootServeResult {
         let clean_path = path.trim_start_matches('/');
         // Reject paths containing traversal components (both Unix and Windows separators)
         if clean_path.contains("..") || clean_path.contains('\\') {
             tracing::warn!("Path traversal attempt blocked: {}", path);
-            return None;
+            return WebrootServeResult::NotFound;
         }
         let file_path = self.root.join(clean_path);
 
@@ -64,25 +79,16 @@ impl WebrootServer {
                                     candidate,
                                     canon
                                 );
-                                return None;
+                                return WebrootServeResult::NotFound;
                             }
                         }
-                        if let Ok(content) = std::fs::read(&candidate) {
-                            let ext = candidate
-                                .extension()
-                                .and_then(|e| e.to_str())
-                                .unwrap_or("")
-                                .to_lowercase();
-                            let mime = self
-                                .mime_types
-                                .get(&ext)
-                                .cloned()
-                                .unwrap_or_else(|| "application/octet-stream".into());
-                            return Some((content, mime));
+                        match self.read_candidate(&candidate) {
+                            WebrootServeResult::NotFound => {}
+                            result => return result,
                         }
                     }
                 }
-                return None;
+                return WebrootServeResult::NotFound;
             }
         };
         // Try exact path, then with index.html
@@ -100,23 +106,48 @@ impl WebrootServer {
                     tracing::warn!("Path traversal attempt blocked: {:?}", candidate);
                     continue;
                 }
-                if let Ok(content) = std::fs::read(&canonical_candidate) {
-                    let ext = canonical_candidate
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .unwrap_or("")
-                        .to_lowercase();
-                    let mime = self
-                        .mime_types
-                        .get(&ext)
-                        .cloned()
-                        .unwrap_or_else(|| "application/octet-stream".into());
-                    return Some((content, mime));
+                match self.read_candidate(&canonical_candidate) {
+                    WebrootServeResult::NotFound => {}
+                    result => return result,
                 }
             }
         }
 
-        None
+        WebrootServeResult::NotFound
+    }
+
+    fn read_candidate(&self, candidate: &Path) -> WebrootServeResult {
+        match candidate.metadata() {
+            Ok(meta) if meta.len() > MAX_FILE_RESPONSE_BYTES => {
+                tracing::warn!(
+                    "Webroot file {:?} exceeds response size limit ({} > {})",
+                    candidate,
+                    meta.len(),
+                    MAX_FILE_RESPONSE_BYTES
+                );
+                WebrootServeResult::TooLarge
+            }
+            Ok(meta) if meta.is_file() => match std::fs::read(candidate) {
+                Ok(content) => WebrootServeResult::Found {
+                    mime: self.mime_for_path(candidate),
+                    content,
+                },
+                Err(_) => WebrootServeResult::NotFound,
+            },
+            _ => WebrootServeResult::NotFound,
+        }
+    }
+
+    fn mime_for_path(&self, path: &Path) -> String {
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        self.mime_types
+            .get(&ext)
+            .cloned()
+            .unwrap_or_else(|| "application/octet-stream".into())
     }
 
     /// Try to find the defaultFiles directory relative to the executable
@@ -148,15 +179,21 @@ impl WebrootServer {
     /// Build an HTTP response from webroot file, falling back to fake file generation
     pub fn build_http_response(&self, path: &str) -> Vec<u8> {
         // Try webroot first; if not found, try fake file by extension
-        if let Some((content, mime)) = self.serve(path) {
-            let date = crate::faketime::fake_now().format("%a, %d %b %Y %H:%M:%S GMT");
-            return format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nDate: {}\r\nServer: NetTrap\r\n\r\n",
-                mime, content.len(), date
-            ).into_bytes()
-            .into_iter()
-            .chain(content)
-            .collect();
+        match self.serve_result(path) {
+            WebrootServeResult::Found { content, mime } => {
+                let date = crate::faketime::fake_now().format("%a, %d %b %Y %H:%M:%S GMT");
+                return format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nDate: {}\r\nServer: NetTrap\r\n\r\n",
+                    mime, content.len(), date
+                ).into_bytes()
+                .into_iter()
+                .chain(content)
+                .collect();
+            }
+            WebrootServeResult::TooLarge => {
+                return simple_http_response(413, "Payload Too Large", "Payload Too Large");
+            }
+            WebrootServeResult::NotFound => {}
         }
 
         // Fallback: fake file by extension
@@ -188,6 +225,17 @@ impl WebrootServer {
         .chain(body.iter().copied())
         .collect()
     }
+}
+
+fn simple_http_response(code: u16, reason: &str, body: &str) -> Vec<u8> {
+    format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+        code,
+        reason,
+        body.len(),
+        body
+    )
+    .into_bytes()
 }
 
 /// Generate a fake file with appropriate content and MIME type for a given extension.
@@ -467,5 +515,29 @@ pub fn fake_file_for_extension(ext: &str) -> Option<(Vec<u8>, String)> {
         )),
 
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_http_response_rejects_large_webroot_file() {
+        let root = unique_temp_dir("nettrap-webroot-limit");
+        std::fs::create_dir_all(&root).expect("create temp root");
+        let path = root.join("large.bin");
+        let file = std::fs::File::create(&path).expect("create sparse file");
+        file.set_len(MAX_FILE_RESPONSE_BYTES + 1)
+            .expect("extend sparse file");
+
+        let response = WebrootServer::new(&root).build_http_response("/large.bin");
+
+        assert!(response.starts_with(b"HTTP/1.1 413 Payload Too Large"));
+        std::fs::remove_dir_all(root).expect("cleanup temp root");
+    }
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("{}-{}", prefix, std::process::id()))
     }
 }

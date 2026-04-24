@@ -284,7 +284,7 @@ impl SmtpHandler {
             )
         } else if upper.starts_with("STARTTLS") {
             (
-                SmtpResponse::new(220, "Ready to start TLS"),
+                SmtpResponse::new(454, "4.7.0 TLS not available"),
                 SmtpAuthState::None,
             )
         } else if upper.starts_with("AUTH") {
