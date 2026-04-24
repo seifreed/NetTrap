@@ -240,37 +240,47 @@ pub fn parse_tls_handshake(data: &[u8]) -> Option<TlsFingerprint> {
         if pos + 2 <= data.len() {
             let ext_total_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
             pos += 2;
-            let ext_end = (pos + ext_total_len).min(data.len());
+            let ext_end = match pos.checked_add(ext_total_len) {
+                Some(end) => end.min(data.len()),
+                None => data.len(),
+            };
 
             while pos + 4 <= ext_end {
                 let ext_type = u16::from_be_bytes([data[pos], data[pos + 1]]);
                 let ext_len = u16::from_be_bytes([data[pos + 2], data[pos + 3]]) as usize;
-                fingerprint.extensions.push(ext_type);
-
-                if ext_type == 0x000a && pos + 4 + ext_len <= data.len() {
-                    // supported_groups
-                    let list_len = u16::from_be_bytes([data[pos + 4], data[pos + 5]]) as usize;
-                    let mut gp = pos + 6;
-                    let ge = (gp + list_len).min(data.len());
-                    while gp + 2 <= ge {
-                        fingerprint
-                            .supported_groups
-                            .push(u16::from_be_bytes([data[gp], data[gp + 1]]));
-                        gp += 2;
-                    }
+                let ext_data_start = pos + 4;
+                let Some(ext_data_end) = ext_data_start.checked_add(ext_len) else {
+                    break;
+                };
+                if ext_data_end > ext_end {
+                    break;
                 }
+                fingerprint.extensions.push(ext_type);
+                let ext_data = &data[ext_data_start..ext_data_end];
 
-                if ext_type == 0x000b && pos + 4 + ext_len <= data.len() {
-                    // ec_point_formats
-                    let fmt_len = data[pos + 4] as usize;
-                    for i in 0..fmt_len {
-                        if pos + 5 + i < data.len() {
-                            fingerprint.ec_point_formats.push(data[pos + 5 + i] as u16);
+                if ext_type == 0x000a && ext_data.len() >= 2 {
+                    // supported_groups
+                    let list_len = u16::from_be_bytes([ext_data[0], ext_data[1]]) as usize;
+                    if 2 + list_len <= ext_data.len() {
+                        for group in ext_data[2..2 + list_len].chunks_exact(2) {
+                            fingerprint
+                                .supported_groups
+                                .push(u16::from_be_bytes([group[0], group[1]]));
                         }
                     }
                 }
 
-                pos += 4 + ext_len;
+                if ext_type == 0x000b && !ext_data.is_empty() {
+                    // ec_point_formats
+                    let fmt_len = ext_data[0] as usize;
+                    if fmt_len < ext_data.len() {
+                        fingerprint
+                            .ec_point_formats
+                            .extend(ext_data[1..1 + fmt_len].iter().map(|&format| format as u16));
+                    }
+                }
+
+                pos = ext_data_end;
             }
         }
     }
@@ -336,5 +346,33 @@ mod tests {
         assert_eq!(fingerprint.versions, vec![0x0303]);
         assert_eq!(fingerprint.ja3, ja3);
         assert_eq!(fingerprint.ja3_hash, hash);
+    }
+
+    #[test]
+    fn tls_fingerprinters_ignore_short_supported_groups_extension() {
+        let short_supported_groups = [0x00, 0x0a, 0x00, 0x01, 0xff];
+        let data = build_client_hello(0x0303, &short_supported_groups);
+
+        let fingerprint = parse_tls_handshake(&data).expect("handshake should parse");
+        let (ja3, _) = crate::ja3::ja3_from_handshake(&data).expect("ja3 parser should succeed");
+        let ja4 = crate::ja3::ja4_from_handshake(&data);
+
+        assert!(fingerprint.supported_groups.is_empty());
+        assert!(ja3.contains(",10,,"));
+        assert!(ja4.is_some());
+    }
+
+    #[test]
+    fn tls_fingerprinters_ignore_empty_ec_point_formats_extension() {
+        let empty_ec_point_formats = [0x00, 0x0b, 0x00, 0x00];
+        let data = build_client_hello(0x0303, &empty_ec_point_formats);
+
+        let fingerprint = parse_tls_handshake(&data).expect("handshake should parse");
+        let (ja3, _) = crate::ja3::ja3_from_handshake(&data).expect("ja3 parser should succeed");
+        let ja4 = crate::ja3::ja4_from_handshake(&data);
+
+        assert!(fingerprint.ec_point_formats.is_empty());
+        assert!(ja3.ends_with("11,,"));
+        assert!(ja4.is_some());
     }
 }

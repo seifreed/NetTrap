@@ -14,6 +14,7 @@ use crate::session::SessionDestination;
 use crate::utils::log_event;
 
 const TFTP_TRANSFER_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_TFTP_ACTIVE_TRANSFERS: usize = 1024;
 const MAX_TFTP_UPLOAD_BYTES: u64 = 8 * 1024 * 1024;
 
 type TftpTransfers = Arc<Mutex<HashMap<TftpTransferKey, TftpTransferState>>>;
@@ -720,6 +721,11 @@ async fn handle_tftp(
     transfers: &TftpTransfers,
     packet: UdpPacket<'_>,
 ) {
+    {
+        let mut active = transfers.lock().await;
+        prune_tftp_transfers(&mut active);
+    }
+
     if let Some(tftp_packet) = nettrap_proto_tftp::TftpPacket::parse(packet.query_data) {
         log_event(
             packet.output_path,
@@ -746,6 +752,8 @@ async fn handle_tftp(
                     prune_tftp_transfers(&mut active);
                     if active.contains_key(&key) {
                         Ok(vec![tftp_error(4, "Transfer already active")])
+                    } else if tftp_transfer_limit_reached(&active, &key) {
+                        Ok(vec![tftp_error(4, "Too many active transfers")])
                     } else {
                         let response = tftp_handler.handle_read_request_block(filename, 1);
                         remember_tftp_read_response(
@@ -762,20 +770,22 @@ async fn handle_tftp(
                     let key = TftpTransferKey::new(*packet.src, packet.destination);
                     let mut active = transfers.lock().await;
                     prune_tftp_transfers(&mut active);
-                    match active.entry(key) {
-                        std::collections::hash_map::Entry::Occupied(_) => {
-                            Ok(vec![tftp_error(4, "Transfer already active")])
-                        }
-                        std::collections::hash_map::Entry::Vacant(entry) => {
-                            let response = tftp_handler.handle_write_request(filename);
-                            entry.insert(TftpTransferState::Write {
+                    if active.contains_key(&key) {
+                        Ok(vec![tftp_error(4, "Transfer already active")])
+                    } else if tftp_transfer_limit_reached(&active, &key) {
+                        Ok(vec![tftp_error(4, "Too many active transfers")])
+                    } else {
+                        let response = tftp_handler.handle_write_request(filename);
+                        active.insert(
+                            key,
+                            TftpTransferState::Write {
                                 filename: filename.clone(),
                                 next_block_expected: 1,
                                 bytes_received: 0,
                                 last_activity: Instant::now(),
-                            });
-                            Ok(vec![response])
-                        }
+                            },
+                        );
+                        Ok(vec![response])
                     }
                 }
                 nettrap_proto_tftp::TftpPacket::Ack { block } => {
@@ -859,6 +869,13 @@ async fn handle_tftp(
 
 fn prune_tftp_transfers(transfers: &mut HashMap<TftpTransferKey, TftpTransferState>) {
     transfers.retain(|_, state| state.last_activity().elapsed() <= TFTP_TRANSFER_TIMEOUT);
+}
+
+fn tftp_transfer_limit_reached(
+    transfers: &HashMap<TftpTransferKey, TftpTransferState>,
+    key: &TftpTransferKey,
+) -> bool {
+    !transfers.contains_key(key) && transfers.len() >= MAX_TFTP_ACTIVE_TRANSFERS
 }
 
 fn remember_tftp_read_response(
@@ -1547,6 +1564,60 @@ mod tests {
             Some(("first.bin".to_string(), 2))
         );
         assert_eq!(next_tftp_read_block(&transfers, &key, 0), None);
+    }
+
+    #[test]
+    fn tftp_transfer_limit_rejects_new_keys_but_allows_existing_key() {
+        let mut transfers = HashMap::new();
+        let destination = SessionDestination::new("127.0.0.1", 69);
+
+        for i in 0..MAX_TFTP_ACTIVE_TRANSFERS {
+            let src = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 40000 + i as u16);
+            transfers.insert(
+                TftpTransferKey::new(src, &destination),
+                TftpTransferState::Read {
+                    filename: format!("file-{i}.bin"),
+                    last_block_sent: 1,
+                    last_activity: Instant::now(),
+                },
+            );
+        }
+
+        let existing = TftpTransferKey::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 40000),
+            &destination,
+        );
+        let new_key = TftpTransferKey::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 53000),
+            &destination,
+        );
+
+        assert!(!tftp_transfer_limit_reached(&transfers, &existing));
+        assert!(tftp_transfer_limit_reached(&transfers, &new_key));
+    }
+
+    #[test]
+    fn tftp_transfer_prune_releases_capacity() {
+        let mut transfers = HashMap::new();
+        let destination = SessionDestination::new("127.0.0.1", 69);
+        let expired = Instant::now() - TFTP_TRANSFER_TIMEOUT - Duration::from_secs(1);
+        let key = TftpTransferKey::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 53000),
+            &destination,
+        );
+        transfers.insert(
+            key,
+            TftpTransferState::Write {
+                filename: "upload.bin".to_string(),
+                next_block_expected: 1,
+                bytes_received: 0,
+                last_activity: expired,
+            },
+        );
+
+        prune_tftp_transfers(&mut transfers);
+
+        assert!(transfers.is_empty());
     }
 
     fn udp_test_context(

@@ -15,6 +15,10 @@ fn has_path_traversal(s: &str) -> bool {
 }
 
 const MAX_FTP_RETR_BYTES: u64 = 10 * 1024 * 1024;
+const MAX_FTP_LIST_ENTRIES: usize = 4096;
+const MAX_FTP_LIST_BYTES: usize = 1024 * 1024;
+const FTP_LIST_OK_TRAILER: &str = "226 Directory send OK.\r\n";
+const FTP_LIST_TRUNCATED_TRAILER: &str = "226 Directory send OK (truncated).\r\n";
 
 pub struct FtpHandler {
     banner: String,
@@ -97,7 +101,97 @@ const VIRTUAL_FILES: &[(&str, u64)] = &[
     ("setup.exe", 16),
 ];
 
+#[derive(Debug, Clone, Copy)]
+enum FtpListStyle {
+    Detailed,
+    NamesOnly,
+}
+
 impl FtpHandler {
+    fn push_listing_line(listing: &mut String, line: &str) -> bool {
+        if listing
+            .len()
+            .saturating_add(line.len())
+            .saturating_add(FTP_LIST_TRUNCATED_TRAILER.len())
+            > MAX_FTP_LIST_BYTES
+        {
+            return false;
+        }
+        listing.push_str(line);
+        true
+    }
+
+    fn append_virtual_listing(listing: &mut String, style: FtpListStyle) {
+        for (vname, vsize) in VIRTUAL_FILES {
+            let line = match style {
+                FtpListStyle::Detailed => format!(
+                    "-rw-r--r--    1 ftp      ftp          {} Jan 01 00:00 {}\r\n",
+                    vsize, vname
+                ),
+                FtpListStyle::NamesOnly => format!("{vname}\r\n"),
+            };
+            if !Self::push_listing_line(listing, &line) {
+                break;
+            }
+        }
+    }
+
+    fn build_listing_response(
+        entries: Option<std::fs::ReadDir>,
+        style: FtpListStyle,
+    ) -> FtpResponse {
+        let mut listing = String::from("150 Here comes the directory listing.\r\n");
+        let mut saw_entry = false;
+        let mut listed_entries = 0usize;
+        let mut truncated = false;
+
+        if let Some(entries) = entries {
+            for entry in entries.flatten() {
+                saw_entry = true;
+                if listed_entries >= MAX_FTP_LIST_ENTRIES {
+                    truncated = true;
+                    break;
+                }
+
+                let line = match style {
+                    FtpListStyle::Detailed => {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        let meta = entry.metadata().ok();
+                        let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+                        format!(
+                            "-rw-r--r--    1 ftp      ftp          {} Jan 01 00:00 {}\r\n",
+                            size, name
+                        )
+                    }
+                    FtpListStyle::NamesOnly => {
+                        format!("{}\r\n", entry.file_name().to_string_lossy())
+                    }
+                };
+
+                if !Self::push_listing_line(&mut listing, &line) {
+                    truncated = true;
+                    break;
+                }
+                listed_entries += 1;
+            }
+        }
+
+        if !saw_entry {
+            Self::append_virtual_listing(&mut listing, style);
+        }
+
+        listing.push_str(if truncated {
+            FTP_LIST_TRUNCATED_TRAILER
+        } else {
+            FTP_LIST_OK_TRAILER
+        });
+        FtpResponse {
+            code: 0,
+            message: listing,
+            raw: None,
+        }
+    }
+
     pub fn handle(&self, command: &str) -> FtpResponse {
         let upper = command.to_uppercase();
 
@@ -131,52 +225,11 @@ impl FtpHandler {
                 ),
             )
         } else if upper.starts_with("LIST") {
-            if let Some(ref root) = self.root_dir {
-                let entries = std::fs::read_dir(root).ok();
-                if let Some(entries) = entries {
-                    let mut listing = String::from("150 Here comes the directory listing.\r\n");
-                    let mut count = 0;
-                    for entry in entries.flatten() {
-                        let name = entry.file_name().to_string_lossy().to_string();
-                        let meta = entry.metadata().ok();
-                        let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-                        listing.push_str(&format!(
-                            "-rw-r--r--    1 ftp      ftp          {} Jan 01 00:00 {}\r\n",
-                            size, name
-                        ));
-                        count += 1;
-                    }
-                    // If directory is empty, show virtual files
-                    if count == 0 {
-                        for (vname, vsize) in VIRTUAL_FILES {
-                            listing.push_str(&format!(
-                                "-rw-r--r--    1 ftp      ftp          {} Jan 01 00:00 {}\r\n",
-                                vsize, vname
-                            ));
-                        }
-                    }
-                    listing.push_str("226 Directory send OK.\r\n");
-                    return FtpResponse {
-                        code: 0,
-                        message: listing,
-                        raw: None,
-                    }; // code 0 = raw response
-                }
-            }
-            // No root dir configured: return virtual listing
-            let mut listing = String::from("150 Here comes the directory listing.\r\n");
-            for (vname, vsize) in VIRTUAL_FILES {
-                listing.push_str(&format!(
-                    "-rw-r--r--    1 ftp      ftp          {} Jan 01 00:00 {}\r\n",
-                    vsize, vname
-                ));
-            }
-            listing.push_str("226 Directory send OK.\r\n");
-            FtpResponse {
-                code: 0,
-                message: listing,
-                raw: None,
-            }
+            let entries = self
+                .root_dir
+                .as_ref()
+                .and_then(|root| std::fs::read_dir(root).ok());
+            Self::build_listing_response(entries, FtpListStyle::Detailed)
         } else if upper.starts_with("RETR") {
             let filename = command.get(5..).unwrap_or("").trim();
 
@@ -357,22 +410,11 @@ impl FtpHandler {
         } else if upper.starts_with("ABOR") {
             FtpResponse::new(226, "Abort successful")
         } else if upper.starts_with("NLST") {
-            // Simple name list
-            if let Some(ref root) = self.root_dir {
-                if let Ok(entries) = std::fs::read_dir(root) {
-                    let mut listing = String::from("150 Here comes the directory listing.\r\n");
-                    for entry in entries.flatten() {
-                        listing.push_str(&format!("{}\r\n", entry.file_name().to_string_lossy()));
-                    }
-                    listing.push_str("226 Directory send OK.\r\n");
-                    return FtpResponse {
-                        code: 0,
-                        message: listing,
-                        raw: None,
-                    };
-                }
-            }
-            FtpResponse::new(150, "Opening data connection")
+            let entries = self
+                .root_dir
+                .as_ref()
+                .and_then(|root| std::fs::read_dir(root).ok());
+            Self::build_listing_response(entries, FtpListStyle::NamesOnly)
         } else if upper.starts_with("QUIT") {
             FtpResponse::new(221, "Goodbye")
         } else {
@@ -640,6 +682,40 @@ mod tests {
 
         assert_eq!(response.code, 552);
         assert!(response.raw.is_none());
+        std::fs::remove_dir_all(root).expect("cleanup temp root");
+    }
+
+    #[test]
+    fn listing_line_rejects_content_that_would_exceed_limit() {
+        let mut listing = String::from("150 Here comes the directory listing.\r\n");
+        let oversized_line = "x".repeat(MAX_FTP_LIST_BYTES);
+
+        assert!(!FtpHandler::push_listing_line(
+            &mut listing,
+            &oversized_line
+        ));
+        assert!(listing.len() < MAX_FTP_LIST_BYTES);
+    }
+
+    #[test]
+    fn nlst_without_root_returns_bounded_virtual_listing() {
+        let response = FtpHandler::new().handle("NLST");
+
+        assert_eq!(response.code, 0);
+        assert!(response.message.contains("index.html\r\n"));
+        assert!(response.message.len() <= MAX_FTP_LIST_BYTES);
+    }
+
+    #[test]
+    fn empty_root_list_uses_bounded_virtual_listing() {
+        let root = unique_temp_dir("nettrap-ftp-empty-list");
+        std::fs::create_dir_all(&root).expect("create temp root");
+
+        let response = FtpHandler::new().with_root_dir(&root).handle("LIST");
+
+        assert_eq!(response.code, 0);
+        assert!(response.message.contains("index.html"));
+        assert!(response.message.len() <= MAX_FTP_LIST_BYTES);
         std::fs::remove_dir_all(root).expect("cleanup temp root");
     }
 

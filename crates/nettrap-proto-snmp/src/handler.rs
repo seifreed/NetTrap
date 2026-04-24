@@ -41,71 +41,84 @@ impl SnmpHandler {
 
     fn parse_snmp(data: &[u8]) -> Option<(String, u8, Vec<u8>)> {
         let mut pos = 0;
-        // SEQUENCE
-        if data[pos] != 0x30 {
-            return None;
-        }
-        pos += 1;
-        let (_, lb) = Self::parse_len(&data[pos..]);
-        if lb == 0 {
-            return None;
-        }
-        pos += lb;
-        // Version: INTEGER
-        if pos >= data.len() || data[pos] != 0x02 {
-            return None;
-        }
-        pos += 1;
-        let (vlen, lb) = Self::parse_len(&data[pos..]);
-        if lb == 0 {
-            return None;
-        }
-        pos += lb + vlen;
-        // Community: OCTET STRING
-        if pos >= data.len() || data[pos] != 0x04 {
-            return None;
-        }
-        pos += 1;
-        let (clen, lb) = Self::parse_len(&data[pos..]);
-        if lb == 0 {
-            return None;
-        }
-        pos += lb;
-        if pos > data.len() {
-            return None;
-        }
-        let safe_clen = clen.min(data.len().saturating_sub(pos));
-        let community = String::from_utf8_lossy(&data[pos..pos + safe_clen]).to_string();
-        pos += safe_clen;
-        // PDU type
-        if pos >= data.len() {
-            return None;
-        }
-        let pdu_type = data[pos] & 0x1F;
-        pos += 1;
-        let (_, lb) = Self::parse_len(&data[pos..]);
-        if lb == 0 {
-            return None;
-        }
-        pos += lb;
-        // Request ID
-        let request_id = if pos + 4 < data.len() && data[pos] == 0x02 {
-            pos += 1;
-            let (rlen, lb) = Self::parse_len(&data[pos..]);
-            if lb == 0 {
-                return None;
-            }
-            pos += lb;
-            if pos > data.len() {
-                return None;
-            }
-            let safe_rlen = rlen.min(data.len().saturating_sub(pos));
-            data[pos..pos + safe_rlen].to_vec()
-        } else {
-            vec![0x01]
-        };
 
-        Some((community, pdu_type, request_id))
+        let message = Self::read_tlv(data, &mut pos, data.len(), 0x30)?;
+        if pos != data.len() {
+            return None;
+        }
+
+        let mut msg_pos = 0;
+        let version = Self::read_tlv(message, &mut msg_pos, message.len(), 0x02)?;
+        if version.is_empty() {
+            return None;
+        }
+
+        let community_bytes = Self::read_tlv(message, &mut msg_pos, message.len(), 0x04)?;
+        let community = String::from_utf8_lossy(community_bytes).to_string();
+
+        let pdu_tag = *message.get(msg_pos)?;
+        if !matches!(pdu_tag, 0xA0 | 0xA1 | 0xA3) {
+            return None;
+        }
+        let pdu_type = pdu_tag & 0x1F;
+        msg_pos += 1;
+        let (pdu_len, lb) = Self::parse_len(&message[msg_pos..]);
+        if lb == 0 {
+            return None;
+        }
+        msg_pos += lb;
+        let pdu_end = msg_pos.checked_add(pdu_len)?;
+        if pdu_end > message.len() {
+            return None;
+        }
+        let pdu = &message[msg_pos..pdu_end];
+        msg_pos = pdu_end;
+        if msg_pos != message.len() {
+            return None;
+        }
+
+        let mut pdu_pos = 0;
+        let request_id = Self::read_tlv(pdu, &mut pdu_pos, pdu.len(), 0x02)?;
+        if request_id.is_empty() {
+            return None;
+        }
+
+        let error_status = Self::read_tlv(pdu, &mut pdu_pos, pdu.len(), 0x02)?;
+        let error_index = Self::read_tlv(pdu, &mut pdu_pos, pdu.len(), 0x02)?;
+        if error_status.is_empty() || error_index.is_empty() {
+            return None;
+        }
+
+        let _varbind_list = Self::read_tlv(pdu, &mut pdu_pos, pdu.len(), 0x30)?;
+        if pdu_pos != pdu.len() {
+            return None;
+        }
+
+        Some((community, pdu_type, request_id.to_vec()))
+    }
+
+    fn read_tlv<'a>(
+        data: &'a [u8],
+        pos: &mut usize,
+        limit: usize,
+        expected_tag: u8,
+    ) -> Option<&'a [u8]> {
+        if limit > data.len() || *pos >= limit || data[*pos] != expected_tag {
+            return None;
+        }
+        *pos += 1;
+        let (len, lb) = Self::parse_len(&data[*pos..limit]);
+        if lb == 0 {
+            return None;
+        }
+        *pos += lb;
+        let end = (*pos).checked_add(len)?;
+        if end > limit {
+            return None;
+        }
+        let value = &data[*pos..end];
+        *pos = end;
+        Some(value)
     }
 
     fn parse_len(data: &[u8]) -> (usize, usize) {
@@ -195,5 +208,55 @@ impl SnmpHandler {
 impl Default for SnmpHandler {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_get_request() -> Vec<u8> {
+        vec![
+            0x30, 0x26, 0x02, 0x01, 0x01, 0x04, 0x06, b'p', b'u', b'b', b'l', b'i', b'c', 0xa0,
+            0x19, 0x02, 0x01, 0x01, 0x02, 0x01, 0x00, 0x02, 0x01, 0x00, 0x30, 0x0e, 0x30, 0x0c,
+            0x06, 0x08, 0x2b, 0x06, 0x01, 0x02, 0x01, 0x01, 0x01, 0x00, 0x05, 0x00,
+        ]
+    }
+
+    #[test]
+    fn valid_get_request_gets_response() {
+        let response = SnmpHandler::new().handle(&valid_get_request());
+
+        assert!(!response.is_empty());
+    }
+
+    #[test]
+    fn rejects_truncated_top_level_length() {
+        let mut request = valid_get_request();
+        request[1] += 1;
+
+        let response = SnmpHandler::new().handle(&request);
+
+        assert!(response.is_empty());
+    }
+
+    #[test]
+    fn rejects_non_request_pdu_tag_with_request_low_bits() {
+        let mut request = valid_get_request();
+        request[13] = 0x80;
+
+        let response = SnmpHandler::new().handle(&request);
+
+        assert!(response.is_empty());
+    }
+
+    #[test]
+    fn rejects_request_id_that_corrupts_following_fields() {
+        let mut request = valid_get_request();
+        request[16] = 0x02;
+
+        let response = SnmpHandler::new().handle(&request);
+
+        assert!(response.is_empty());
     }
 }

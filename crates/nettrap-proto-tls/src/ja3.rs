@@ -108,43 +108,49 @@ pub fn ja3_from_handshake(data: &[u8]) -> Option<(String, String)> {
 
     let extensions_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
     pos += 2;
-    let extensions_end = pos + extensions_len;
+    let extensions_end = pos.checked_add(extensions_len)?;
+    if extensions_end > data.len() {
+        return None;
+    }
 
     let mut extensions = Vec::new();
     let mut supported_groups = Vec::new();
     let mut ec_point_formats = Vec::new();
 
-    while pos + 4 <= extensions_end && pos + 4 <= data.len() {
+    while pos + 4 <= extensions_end {
         let ext_type = u16::from_be_bytes([data[pos], data[pos + 1]]);
         let ext_len = u16::from_be_bytes([data[pos + 2], data[pos + 3]]) as usize;
-
-        extensions.push(ext_type);
-
-        if ext_type == 0x000a && pos + 4 + ext_len <= data.len() {
-            // supported_groups: list_length(2) at ext_data start (pos+4), groups start at pos+6
-            let mut group_pos = pos + 4;
-            let groups_len = u16::from_be_bytes([data[group_pos], data[group_pos + 1]]) as usize;
-            group_pos += 2;
-            let groups_end = group_pos + groups_len;
-            while group_pos + 2 <= groups_end && group_pos + 2 <= data.len() {
-                supported_groups.push(u16::from_be_bytes([data[group_pos], data[group_pos + 1]]));
-                group_pos += 2;
-            }
+        let ext_data_start = pos + 4;
+        let ext_data_end = ext_data_start.checked_add(ext_len)?;
+        if ext_data_end > extensions_end {
+            return None;
         }
 
-        if ext_type == 0x000b && pos + 4 + ext_len <= data.len() {
-            // ec_point_formats: formats_length(1) at ext_data start (pos+4), formats start at pos+5
-            let mut format_pos = pos + 4;
-            let formats_len = data[format_pos] as usize;
-            format_pos += 1;
-            for i in 0..formats_len {
-                if format_pos + i < data.len() {
-                    ec_point_formats.push(data[format_pos + i]);
+        extensions.push(ext_type);
+        let ext_data = &data[ext_data_start..ext_data_end];
+
+        if ext_type == 0x000a && ext_data.len() >= 2 {
+            // supported_groups: list_length(2) at ext_data start (pos+4), groups start at pos+6
+            let groups_len = u16::from_be_bytes([ext_data[0], ext_data[1]]) as usize;
+            if 2 + groups_len <= ext_data.len() {
+                for group in ext_data[2..2 + groups_len].chunks_exact(2) {
+                    supported_groups.push(u16::from_be_bytes([group[0], group[1]]));
                 }
             }
         }
 
-        pos += 4 + ext_len;
+        if ext_type == 0x000b && !ext_data.is_empty() {
+            // ec_point_formats: formats_length(1) at ext_data start (pos+4), formats start at pos+5
+            let formats_len = ext_data[0] as usize;
+            if formats_len < ext_data.len() {
+                ec_point_formats.extend_from_slice(&ext_data[1..1 + formats_len]);
+            }
+        }
+
+        pos = ext_data_end;
+    }
+    if pos != extensions_end {
+        return None;
     }
 
     let ja3 = calculate_ja3(
@@ -310,50 +316,53 @@ pub fn ja4_from_handshake(data: &[u8]) -> Option<String> {
 
     let extensions_total_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
     pos += 2;
-    let extensions_end = pos + extensions_total_len;
+    let extensions_end = pos.checked_add(extensions_total_len)?;
+    if extensions_end > data.len() {
+        return None;
+    }
 
     let mut extensions = Vec::new();
     let mut sni: Option<String> = None;
     let mut alpn: Option<String> = None;
     let mut supported_versions: Option<u16> = None;
 
-    while pos + 4 <= extensions_end && pos + 4 <= data.len() {
+    while pos + 4 <= extensions_end {
         let ext_type = u16::from_be_bytes([data[pos], data[pos + 1]]);
         let ext_len = u16::from_be_bytes([data[pos + 2], data[pos + 3]]) as usize;
+        let ext_data_start = pos + 4;
+        let ext_data_end = ext_data_start.checked_add(ext_len)?;
+        if ext_data_end > extensions_end {
+            return None;
+        }
         extensions.push(ext_type);
+        let ext_data = &data[ext_data_start..ext_data_end];
 
         // Extract SNI (type 0x0000)
-        if ext_type == 0x0000 && pos + 4 + ext_len <= data.len() {
-            let ext_data = &data[pos + 4..pos + 4 + ext_len];
-            if ext_data.len() >= 5 {
-                let name_len = u16::from_be_bytes([ext_data[3], ext_data[4]]) as usize;
-                if 5 + name_len <= ext_data.len() {
-                    sni = String::from_utf8(ext_data[5..5 + name_len].to_vec()).ok();
-                }
+        if ext_type == 0x0000 && ext_data.len() >= 5 {
+            let name_len = u16::from_be_bytes([ext_data[3], ext_data[4]]) as usize;
+            if 5 + name_len <= ext_data.len() {
+                sni = String::from_utf8(ext_data[5..5 + name_len].to_vec()).ok();
             }
         }
 
         // Extract ALPN (type 0x0010)
-        if ext_type == 0x0010 && pos + 4 + ext_len <= data.len() {
-            let ext_data = &data[pos + 4..pos + 4 + ext_len];
-            if ext_data.len() >= 3 {
-                let proto_len = ext_data[2] as usize;
-                if 3 + proto_len <= ext_data.len() {
-                    alpn = String::from_utf8(ext_data[3..3 + proto_len].to_vec()).ok();
-                }
+        if ext_type == 0x0010 && ext_data.len() >= 3 {
+            let proto_len = ext_data[2] as usize;
+            if 3 + proto_len <= ext_data.len() {
+                alpn = String::from_utf8(ext_data[3..3 + proto_len].to_vec()).ok();
             }
         }
 
         // Extract supported_versions (type 0x002b) for actual TLS version
-        if ext_type == 0x002b && pos + 4 + ext_len <= data.len() {
-            let ext_data = &data[pos + 4..pos + 4 + ext_len];
-            if ext_data.len() >= 3 {
-                // First version in the list is the preferred one
-                supported_versions = Some(u16::from_be_bytes([ext_data[1], ext_data[2]]));
-            }
+        if ext_type == 0x002b && ext_data.len() >= 3 {
+            // First version in the list is the preferred one
+            supported_versions = Some(u16::from_be_bytes([ext_data[1], ext_data[2]]));
         }
 
-        pos += 4 + ext_len;
+        pos = ext_data_end;
+    }
+    if pos != extensions_end {
+        return None;
     }
 
     // Use supported_versions if available (more accurate for TLS 1.3)

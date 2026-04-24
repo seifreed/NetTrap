@@ -28,10 +28,28 @@ impl SipHandler {
         value.replace(['\r', '\n'], "")
     }
 
+    fn request_method(first_line: &str) -> Option<&str> {
+        let (method, rest) = first_line.split_once(' ')?;
+        if method.is_empty()
+            || method.starts_with("SIP/")
+            || !method.bytes().all(|byte| byte.is_ascii_uppercase())
+        {
+            return None;
+        }
+        if !rest.split_whitespace().any(|part| part == "SIP/2.0") {
+            return None;
+        }
+        Some(method)
+    }
+
     pub fn handle(&self, data: &[u8]) -> Vec<u8> {
         let text = String::from_utf8_lossy(data);
         let first_line = text.lines().next().unwrap_or("");
-        tracing::warn!("SIP request: {}", first_line);
+        tracing::warn!("SIP packet: {}", first_line);
+
+        let Some(method) = Self::request_method(first_line) else {
+            return Vec::new();
+        };
 
         // Extract mandatory headers (case-insensitive per RFC 3261)
         // Sanitize to prevent header injection via CRLF in attacker-controlled values
@@ -50,33 +68,26 @@ impl SipHandler {
         let cseq =
             Self::sanitize_header_value(Self::extract_header(&text, "CSeq").unwrap_or("1 UNKNOWN"));
 
-        if first_line.starts_with("REGISTER ") || first_line.starts_with("INVITE ") {
+        if matches!(method, "REGISTER" | "INVITE") {
             format!(
                 "SIP/2.0 401 Unauthorized\r\nVia: {}\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: {}\r\nWWW-Authenticate: Digest realm=\"{}\", nonce=\"nettrap\"\r\nContent-Length: 0\r\n\r\n",
                 via, from, to, call_id, cseq, self.domain
             )
             .into_bytes()
-        } else if first_line.starts_with("OPTIONS ") {
+        } else if method == "OPTIONS" {
             format!(
                 "SIP/2.0 200 OK\r\nVia: {}\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: {}\r\nAllow: INVITE, ACK, CANCEL, OPTIONS, BYE, REGISTER\r\nContent-Length: 0\r\n\r\n",
                 via, from, to, call_id, cseq
             )
             .into_bytes()
-        } else if first_line.starts_with("BYE ")
-            || first_line.starts_with("ACK ")
-            || first_line.starts_with("CANCEL ")
-        {
+        } else if matches!(method, "BYE" | "ACK" | "CANCEL") {
             format!(
                 "SIP/2.0 200 OK\r\nVia: {}\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: {}\r\nContent-Length: 0\r\n\r\n",
                 via, from, to, call_id, cseq
             )
             .into_bytes()
         } else {
-            format!(
-                "SIP/2.0 405 Method Not Allowed\r\nVia: {}\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: {}\r\nAllow: INVITE, ACK, CANCEL, OPTIONS, BYE, REGISTER\r\nContent-Length: 0\r\n\r\n",
-                via, from, to, call_id, cseq
-            )
-            .into_bytes()
+            Vec::new()
         }
     }
 }
@@ -84,5 +95,41 @@ impl SipHandler {
 impl Default for SipHandler {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn responds_to_known_sip_request() {
+        let response = SipHandler::new().handle(
+            b"OPTIONS sip:service@example.com SIP/2.0\r\nCall-ID: abc\r\nCSeq: 1 OPTIONS\r\n\r\n",
+        );
+
+        assert!(String::from_utf8_lossy(&response).starts_with("SIP/2.0 200 OK"));
+    }
+
+    #[test]
+    fn ignores_sip_response() {
+        let response = SipHandler::new().handle(b"SIP/2.0 200 OK\r\nCall-ID: abc\r\n\r\n");
+
+        assert!(response.is_empty());
+    }
+
+    #[test]
+    fn ignores_non_sip_payload_on_sip_port() {
+        let response = SipHandler::new().handle(b"not sip");
+
+        assert!(response.is_empty());
+    }
+
+    #[test]
+    fn ignores_unsupported_sip_request_method() {
+        let response = SipHandler::new()
+            .handle(b"MESSAGE sip:service@example.com SIP/2.0\r\nCall-ID: abc\r\n\r\n");
+
+        assert!(response.is_empty());
     }
 }
