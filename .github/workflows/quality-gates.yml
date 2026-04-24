@@ -1,0 +1,180 @@
+name: Quality Gates
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main, develop]
+  workflow_dispatch:
+  schedule:
+    - cron: "0 4 * * 1"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+permissions:
+  contents: read
+
+jobs:
+  rust-quality:
+    name: Rust Quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpcap-dev libnetfilter-queue-dev libnfnetlink-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: quality-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            quality-${{ runner.os }}-cargo-
+
+      - name: Install quality tools
+        run: |
+          cargo install cargo-audit --locked
+          cargo install cargo-deny --locked
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Run tests
+        run: cargo test
+
+      - name: Run security audit
+        run: cargo audit
+
+      - name: Run dependency policy checks
+        run: cargo deny check
+
+  lockfile-and-diff:
+    name: Lockfile and Diff Hygiene
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpcap-dev libnetfilter-queue-dev libnfnetlink-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: hygiene-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            hygiene-${{ runner.os }}-cargo-
+
+      - name: Validate lockfile resolution
+        run: cargo metadata --locked --format-version 1 > /dev/null
+
+      - name: Check all targets and features
+        run: cargo check --all-targets --all-features
+
+      - name: Check whitespace errors
+        run: git diff --check
+
+      - name: Ensure Cargo.lock is unchanged
+        run: |
+          if ! git diff --quiet -- Cargo.lock; then
+            echo "::error::Cargo.lock changed during quality gates. Commit the lockfile update."
+            git diff -- Cargo.lock
+            exit 1
+          fi
+
+  scheduled-heavy-gates:
+    name: Scheduled Heavy Gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpcap-dev libnetfilter-queue-dev libnfnetlink-dev
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88
+
+      - name: Install nightly Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: heavy-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            heavy-${{ runner.os }}-cargo-
+
+      - name: Install heavy quality tools
+        run: |
+          cargo install cargo-udeps --locked
+          cargo install cargo-tarpaulin --locked
+          cargo install cargo-fuzz --locked
+          cargo install cargo-outdated --locked
+
+      - name: Check unused dependencies
+        run: cargo +nightly udeps --all-targets --all-features
+
+      - name: Run coverage report
+        run: cargo tarpaulin --out Xml --out Html
+
+      - name: Upload coverage reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-reports
+          path: |
+            cobertura.xml
+            tarpaulin-report.html
+
+      - name: Build fuzz targets
+        run: cargo +nightly fuzz build
+
+      - name: Run fuzz smoke test
+        run: cargo +nightly fuzz run http_request_parse -- -max_total_time=10
+
+      - name: Run benchmarks
+        run: cargo bench --no-fail-fast
+
+      - name: Check outdated dependencies
+        run: cargo outdated
