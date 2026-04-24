@@ -136,7 +136,7 @@ impl Pop3HandlerTrait for Pop3Handler {
                         let email = &self.emails[idx - 1];
                         let lines: usize = parts.get(2).and_then(|l| l.parse().ok()).unwrap_or(10);
                         let body_lines: Vec<&str> = email.body.lines().take(lines).collect();
-                        let mut response = format!("+OK\r\n");
+                        let mut response = "+OK\r\n".to_string();
                         for line in body_lines {
                             response.push_str(line);
                             response.push_str("\r\n");
@@ -167,7 +167,7 @@ impl Pop3HandlerTrait for Pop3Handler {
                     Ok(Pop3Response::err("Invalid argument"))
                 }
             } else {
-                let mut response = format!("+OK\r\n");
+                let mut response = "+OK\r\n".to_string();
                 for i in 0..self.emails.len() {
                     response.push_str(&format!("{} nettrap-msg-{}\r\n", i + 1, i + 1));
                 }

@@ -8,8 +8,10 @@ use crate::utils::log_event;
 use crate::utils::service_name::resolve_service_name;
 use nettrap_protocols::tcp::*;
 
+type TcpBannerFactory = fn(Option<&str>) -> Option<Vec<u8>>;
+
 pub struct HandlerRegistry {
-    tcp_banner_factories: HashMap<&'static str, fn(Option<&str>) -> Option<Vec<u8>>>,
+    tcp_banner_factories: HashMap<&'static str, TcpBannerFactory>,
 }
 
 impl HandlerRegistry {
@@ -31,11 +33,7 @@ impl HandlerRegistry {
         self.register_tcp_banner("irc", Self::irc_banner);
     }
 
-    fn register_tcp_banner(
-        &mut self,
-        name: &'static str,
-        factory: fn(Option<&str>) -> Option<Vec<u8>>,
-    ) {
+    fn register_tcp_banner(&mut self, name: &'static str, factory: TcpBannerFactory) {
         self.tcp_banner_factories.insert(name, factory);
     }
 

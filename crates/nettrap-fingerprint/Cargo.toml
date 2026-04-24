@@ -9,12 +9,8 @@ license.workspace = true
 
 [dependencies]
 nettrap-core.workspace = true
-nettrap-flow.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 bytes.workspace = true
 sha2.workspace = true
 md-5.workspace = true
-base64.workspace = true
-hex.workspace = true
-tracing.workspace = true

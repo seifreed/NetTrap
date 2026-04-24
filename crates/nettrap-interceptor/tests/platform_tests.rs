@@ -35,7 +35,6 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     mod macos_tests {
-        use nettrap_interceptor::Interceptor;
         use nettrap_interceptor::InterceptorConfig;
         use nettrap_interceptor::platform::DefaultInterceptor;
 

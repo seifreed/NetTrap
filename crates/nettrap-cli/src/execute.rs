@@ -3,6 +3,18 @@ use std::process::Command;
 /// Maximum input length to prevent DoS via oversized inputs
 const MAX_INPUT_LEN: usize = 256;
 
+fn truncate_to_char_boundary(s: &str, max_len: usize) -> &str {
+    if s.len() <= max_len {
+        return s;
+    }
+
+    let mut end = max_len;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// Shell-escape a string to prevent command injection.
 /// Only allows safe characters: alphanumeric, dash, underscore, dot, colon.
 /// Logs a warning if dangerous characters were stripped.
@@ -17,7 +29,7 @@ fn shell_escape(s: &str) -> String {
             s.len(),
             MAX_INPUT_LEN
         );
-        &s[..s.floor_char_boundary(MAX_INPUT_LEN)]
+        truncate_to_char_boundary(s, MAX_INPUT_LEN)
     } else {
         s
     };
@@ -40,6 +52,17 @@ fn shell_escape(s: &str) -> String {
     sanitized
 }
 
+pub struct ExecuteOnConnect<'a> {
+    pub template: &'a str,
+    pub pid: Option<u32>,
+    pub procname: Option<&'a str>,
+    pub src_addr: &'a str,
+    pub src_port: u16,
+    pub dst_addr: &'a str,
+    pub dst_port: u16,
+    pub listener: &'a str,
+}
+
 /// Execute a command template when a connection is received.
 /// Available template variables:
 /// - {pid}: Process ID
@@ -52,30 +75,22 @@ fn shell_escape(s: &str) -> String {
 ///
 /// All template values are sanitized to prevent command injection.
 /// WARNING: The template itself is NOT sanitized - only use trusted template strings!
-pub fn execute_on_connect(
-    template: &str,
-    pid: Option<u32>,
-    procname: Option<&str>,
-    src_addr: &str,
-    src_port: u16,
-    dst_addr: &str,
-    dst_port: u16,
-    listener: &str,
-) {
+pub fn execute_on_connect(args: ExecuteOnConnect<'_>) {
     // Sanitize all user-controllable inputs
-    let pid_str = pid.map(|p| p.to_string()).unwrap_or_default();
-    let procname_sanitized = shell_escape(procname.unwrap_or("unknown"));
-    let src_addr_sanitized = shell_escape(src_addr);
-    let dst_addr_sanitized = shell_escape(dst_addr);
-    let listener_sanitized = shell_escape(listener);
+    let pid_str = args.pid.map(|p| p.to_string()).unwrap_or_default();
+    let procname_sanitized = shell_escape(args.procname.unwrap_or("unknown"));
+    let src_addr_sanitized = shell_escape(args.src_addr);
+    let dst_addr_sanitized = shell_escape(args.dst_addr);
+    let listener_sanitized = shell_escape(args.listener);
 
-    let cmd = template
+    let cmd = args
+        .template
         .replace("{pid}", &pid_str)
         .replace("{procname}", &procname_sanitized)
         .replace("{src_addr}", &src_addr_sanitized)
-        .replace("{src_port}", &src_port.to_string())
+        .replace("{src_port}", &args.src_port.to_string())
         .replace("{dst_addr}", &dst_addr_sanitized)
-        .replace("{dst_port}", &dst_port.to_string())
+        .replace("{dst_port}", &args.dst_port.to_string())
         .replace("{listener}", &listener_sanitized);
 
     tracing::info!("Executing command: {}", cmd);

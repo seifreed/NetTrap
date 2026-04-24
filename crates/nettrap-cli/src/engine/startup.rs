@@ -6,7 +6,7 @@ use nettrap_core::prelude::Protocol;
 use crate::config::EngineConfig;
 use crate::database::DatabaseBackend;
 use crate::listener_context::ListenerContext;
-use crate::listener_runtime::{ListenerRuntime, ListenerSecurity};
+use crate::listener_runtime::{ListenerRuntime, ListenerRuntimeResources, ListenerSecurity};
 
 pub struct StartupContext {
     pub ca: Option<Arc<nettrap_tls_mitm::CertificateAuthority>>,
@@ -457,16 +457,16 @@ pub fn build_listener_context(
         listener.host_blacklist.clone(),
     )?;
 
-    let runtime = ListenerRuntime::new(
-        startup.ca.clone(),
-        Arc::clone(&startup.router),
-        startup.attribution.clone(),
-        startup.pcap_writer.clone(),
-        Arc::clone(&startup.nbi_collector),
-        Arc::clone(&startup.session_tracker),
-        Arc::clone(&startup.port_forward_table),
-        Arc::clone(&startup.flow_manager),
-    );
+    let runtime = ListenerRuntime::new(ListenerRuntimeResources {
+        ca: startup.ca.clone(),
+        router: Arc::clone(&startup.router),
+        attribution: startup.attribution.clone(),
+        pcap_writer: startup.pcap_writer.clone(),
+        nbi_collector: Arc::clone(&startup.nbi_collector),
+        session_tracker: Arc::clone(&startup.session_tracker),
+        port_forward_table: Arc::clone(&startup.port_forward_table),
+        flow_manager: Arc::clone(&startup.flow_manager),
+    });
 
     Ok(ListenerContext::builder()
         .name(listener.name.clone())

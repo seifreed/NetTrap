@@ -58,7 +58,7 @@ fn handle_tls_command(args: &crate::cli::TlsArgs) -> crate::Result<()> {
             Ok(())
         }
         crate::cli::TlsCommands::InstallMkcert => {
-            crate::mkcert::install_mkcert().map_err(|e| crate::Error::Other(e))
+            crate::mkcert::install_mkcert().map_err(crate::Error::Other)
         }
         crate::cli::TlsCommands::Install => {
             if !crate::mkcert::is_mkcert_installed() {
@@ -66,7 +66,7 @@ fn handle_tls_command(args: &crate::cli::TlsArgs) -> crate::Result<()> {
                     "mkcert is not installed. Run 'nettrap tls install-mkcert' first.".into(),
                 ));
             }
-            crate::mkcert::install_ca().map_err(|e| crate::Error::Other(e))
+            crate::mkcert::install_ca().map_err(crate::Error::Other)
         }
         crate::cli::TlsCommands::Generate(gen_args) => {
             if !crate::mkcert::is_mkcert_installed() {
@@ -76,7 +76,7 @@ fn handle_tls_command(args: &crate::cli::TlsArgs) -> crate::Result<()> {
             }
             let hosts: Vec<&str> = gen_args.hostnames.iter().map(|s| s.as_str()).collect();
             let (cert, key) = crate::mkcert::generate_cert(&hosts, &gen_args.output_dir)
-                .map_err(|e| crate::Error::Other(e))?;
+                .map_err(crate::Error::Other)?;
             println!("Certificate: {}", cert.display());
             println!("Private key: {}", key.display());
             Ok(())
@@ -741,7 +741,7 @@ enum PreparedListener {
         name: String,
         socket: UdpSocket,
         bind_addr: std::net::IpAddr,
-        ctx: crate::listener_context::ListenerContext,
+        ctx: Box<crate::listener_context::ListenerContext>,
         output_path: Option<PathBuf>,
     },
 }
@@ -872,7 +872,7 @@ async fn spawn_listeners(
                     name: listener.name.clone(),
                     socket,
                     bind_addr,
-                    ctx: listener_ctx,
+                    ctx: Box::new(listener_ctx),
                     output_path,
                 });
             }
@@ -929,7 +929,7 @@ async fn spawn_listeners(
                 let fatal_runtime_tx = fatal_runtime_tx.clone();
                 handles.push(tokio::spawn(async move {
                     let result =
-                        run_udp_listener(ctx, socket, bind_addr, output_path.as_deref()).await;
+                        run_udp_listener(*ctx, socket, bind_addr, output_path.as_deref()).await;
                     let message = format!("UDP listener '{}' stopped unexpectedly", name);
                     match &result {
                         Ok(()) => {

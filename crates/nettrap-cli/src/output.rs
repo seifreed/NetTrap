@@ -13,17 +13,6 @@ pub enum OutputFormat {
 }
 
 impl OutputFormat {
-    pub fn from_str(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "json" => Self::Json,
-            "jsonl" | "ndjson" => Self::Jsonl,
-            "sarif" => Self::Sarif,
-            "toon" => Self::Toon,
-            "csv" => Self::Csv,
-            _ => Self::Jsonl, // default
-        }
-    }
-
     pub fn extension(&self) -> &'static str {
         match self {
             Self::Json => "json",
@@ -32,6 +21,22 @@ impl OutputFormat {
             Self::Toon => "toon",
             Self::Csv => "csv",
         }
+    }
+}
+
+impl std::str::FromStr for OutputFormat {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let format = match s.to_lowercase().as_str() {
+            "json" => Self::Json,
+            "jsonl" | "ndjson" => Self::Jsonl,
+            "sarif" => Self::Sarif,
+            "toon" => Self::Toon,
+            "csv" => Self::Csv,
+            _ => Self::Jsonl,
+        };
+        Ok(format)
     }
 }
 
@@ -53,8 +58,7 @@ pub fn export_nbis(
 // ─── JSON (pretty-printed array) ─────────────────────────────────────────────
 
 fn export_json(events: &[NetworkBehaviorIndicator], path: &Path) -> std::io::Result<()> {
-    let json = serde_json::to_string_pretty(events)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let json = serde_json::to_string_pretty(events).map_err(std::io::Error::other)?;
     std::fs::write(path, json)
 }
 
@@ -64,8 +68,7 @@ fn export_jsonl(events: &[NetworkBehaviorIndicator], path: &Path) -> std::io::Re
     use std::io::Write;
     let mut file = std::fs::File::create(path)?;
     for event in events {
-        let line = serde_json::to_string(event)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let line = serde_json::to_string(event).map_err(std::io::Error::other)?;
         writeln!(file, "{}", line)?;
     }
     Ok(())
@@ -173,8 +176,7 @@ fn export_sarif(events: &[NetworkBehaviorIndicator], path: &Path) -> std::io::Re
         }],
     };
 
-    let json = serde_json::to_string_pretty(&sarif)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let json = serde_json::to_string_pretty(&sarif).map_err(std::io::Error::other)?;
     std::fs::write(path, json)
 }
 
@@ -332,13 +334,14 @@ fn export_toon(events: &[NetworkBehaviorIndicator], path: &Path) -> std::io::Res
         )?;
 
         for e in proto_events {
-            let mut row = Vec::new();
-            row.push(e.timestamp.clone());
-            row.push(e.listener.clone());
-            row.push(e.src_ip.clone());
-            row.push(e.src_port.to_string());
-            row.push(e.dst_ip.clone());
-            row.push(e.dst_port.to_string());
+            let mut row = vec![
+                e.timestamp.clone(),
+                e.listener.clone(),
+                e.src_ip.clone(),
+                e.src_port.to_string(),
+                e.dst_ip.clone(),
+                e.dst_port.to_string(),
+            ];
             if columns.contains(&"process".to_string()) {
                 row.push(e.process_name.clone().unwrap_or_default());
             }
@@ -452,17 +455,18 @@ fn export_csv(events: &[NetworkBehaviorIndicator], path: &Path) -> std::io::Resu
 
     // Write rows
     for e in events {
-        let mut row = Vec::new();
-        row.push(csv_escape(&e.event_id));
-        row.push(csv_escape(&e.timestamp));
-        row.push(csv_escape(&e.listener));
-        row.push(csv_escape(&e.protocol));
-        row.push(csv_escape(&e.src_ip));
-        row.push(e.src_port.to_string());
-        row.push(csv_escape(&e.dst_ip));
-        row.push(e.dst_port.to_string());
-        row.push(csv_escape(&e.process_name.clone().unwrap_or_default()));
-        row.push(e.process_pid.map(|p| p.to_string()).unwrap_or_default());
+        let mut row = vec![
+            csv_escape(&e.event_id),
+            csv_escape(&e.timestamp),
+            csv_escape(&e.listener),
+            csv_escape(&e.protocol),
+            csv_escape(&e.src_ip),
+            e.src_port.to_string(),
+            csv_escape(&e.dst_ip),
+            e.dst_port.to_string(),
+            csv_escape(&e.process_name.clone().unwrap_or_default()),
+            e.process_pid.map(|p| p.to_string()).unwrap_or_default(),
+        ];
         for key in &all_keys {
             row.push(csv_escape(
                 &e.indicators.get(key).cloned().unwrap_or_default(),

@@ -1,10 +1,10 @@
-/// Simple template engine for response customization.
-/// Supports variable substitution, conditionals, and date formatting.
-///
-/// Variables: {{variable_name}}
-/// Date: {{date}} {{date:%Y-%m-%d}} {{date:%a, %d %b %Y %H:%M:%S GMT}}
-/// Conditionals: {{#if variable}}content{{/if}}
-/// Defaults: {{variable|default_value}}
+//! Simple template engine for response customization.
+//! Supports variable substitution, conditionals, and date formatting.
+//!
+//! Variables: {{variable_name}}
+//! Date: {{date}} {{date:%Y-%m-%d}} {{date:%a, %d %b %Y %H:%M:%S GMT}}
+//! Conditionals: {{#if variable}}content{{/if}}
+//! Defaults: {{variable|default_value}}
 
 pub fn render_template(template: &str, vars: &std::collections::HashMap<String, String>) -> String {
     render_template_depth(template, vars, 0)
@@ -90,11 +90,7 @@ fn render_template_depth(
         let expr = result[start + 2..end].trim();
 
         let value = if expr == "date" || expr.starts_with("date:") {
-            let fmt = if expr.starts_with("date:") {
-                &expr[5..]
-            } else {
-                "%Y-%m-%d %H:%M:%S"
-            };
+            let fmt = expr.strip_prefix("date:").unwrap_or("%Y-%m-%d %H:%M:%S");
             // Validate format string by attempting to format; fall back on invalid specifiers
             let formatted = std::panic::catch_unwind(|| chrono::Utc::now().format(fmt).to_string());
             match formatted {

@@ -185,7 +185,7 @@ fn acquire_connection_slot(counter: &Arc<AtomicU32>, max: Option<u32>) -> bool {
 mod tests {
     use super::*;
     use crate::listener_context::ListenerContext;
-    use crate::listener_runtime::{ListenerRuntime, ListenerSecurity};
+    use crate::listener_runtime::{ListenerRuntime, ListenerRuntimeResources, ListenerSecurity};
     use crate::process_filter::ProcessFilter;
     use crate::session::{PortForwardTable, SessionTracker};
 
@@ -204,16 +204,16 @@ mod tests {
                 Vec::new(),
             )
             .expect("host rules should compile"),
-            ListenerRuntime::new(
-                None,
-                Arc::new(nettrap_proxy::ProtocolRouter::new()),
-                None,
-                None,
-                Arc::new(crate::nbi::NbiCollector::new(None)),
-                Arc::clone(&tracker),
-                Arc::new(PortForwardTable::new()),
-                Arc::new(nettrap_flow::FlowManager::default()),
-            ),
+            ListenerRuntime::new(ListenerRuntimeResources {
+                ca: None,
+                router: Arc::new(nettrap_proxy::ProtocolRouter::new()),
+                attribution: None,
+                pcap_writer: None,
+                nbi_collector: Arc::new(crate::nbi::NbiCollector::new(None)),
+                session_tracker: Arc::clone(&tracker),
+                port_forward_table: Arc::new(PortForwardTable::new()),
+                flow_manager: Arc::new(nettrap_flow::FlowManager::default()),
+            }),
         );
         let peer: std::net::SocketAddr = "127.0.0.1:54000".parse().unwrap();
         let destination = SessionDestination::new("127.0.0.1", 80);

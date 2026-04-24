@@ -151,14 +151,13 @@ impl ProcessFilter {
             }
         }
 
-        if !self.per_listener_whitelist.is_empty() {
-            if !self
+        if !self.per_listener_whitelist.is_empty()
+            && !self
                 .per_listener_whitelist
                 .iter()
                 .any(|p| p.matches(process_name))
-            {
-                return false;
-            }
+        {
+            return false;
         }
 
         if !self.per_listener_blacklist.is_empty() {

@@ -479,6 +479,9 @@ pub async fn run_udp_listener(
     let destination_capture = match configure_udp_destination_capture(&socket, bind_addr) {
         Ok(capture) => capture,
         Err(e) => {
+            #[cfg(not(target_os = "windows"))]
+            let capture = UdpDestinationCapture;
+            #[cfg(target_os = "windows")]
             let capture = UdpDestinationCapture::default();
             tracing::warn!(
                 "UDP listener '{}' could not enable destination capture on {}: {}",
@@ -550,40 +553,37 @@ pub async fn run_udp_listener(
                 tokio::spawn(async move {
                     let _permit = permit; // held until task completes
                     if ctx_clone.name() == "tftp" || ctx_clone.name().starts_with("tftp") {
-                        handle_tftp(
-                            &ctx_clone,
-                            &socket_clone,
-                            out_clone.as_deref(),
-                            &tftp_handler_clone,
-                            &query_data,
-                            &src,
-                            &destination,
+                        let packet = UdpPacket {
+                            output_path: out_clone.as_deref(),
+                            query_data: &query_data,
+                            src: &src,
+                            destination: &destination,
                             len,
-                        )
-                        .await;
+                        };
+                        handle_tftp(&ctx_clone, &socket_clone, &tftp_handler_clone, packet).await;
                     } else if ctx_clone.name() == "dns" || ctx_clone.name().starts_with("dns") {
-                        handle_dns(
-                            &ctx_clone,
-                            &socket_clone,
-                            out_clone.as_deref(),
-                            &dns_handler_clone,
-                            &query_data,
-                            &src,
-                            &destination,
+                        let packet = UdpPacket {
+                            output_path: out_clone.as_deref(),
+                            query_data: &query_data,
+                            src: &src,
+                            destination: &destination,
                             len,
-                        )
-                        .await;
+                        };
+                        handle_dns(&ctx_clone, &socket_clone, &dns_handler_clone, packet).await;
                     } else {
+                        let packet = UdpPacket {
+                            output_path: out_clone.as_deref(),
+                            query_data: &query_data,
+                            src: &src,
+                            destination: &destination,
+                            len,
+                        };
                         handle_detected_udp(
                             &ctx_clone,
                             &socket_clone,
-                            out_clone.as_deref(),
                             &dns_handler_clone,
                             &tftp_handler_clone,
-                            &query_data,
-                            &src,
-                            &destination,
-                            len,
+                            packet,
                         )
                         .await;
                     }
@@ -658,48 +658,54 @@ fn apply_attributed_process_filter(
 async fn handle_tftp(
     ctx: &ListenerContext,
     socket: &UdpSocket,
-    output_path: Option<&std::path::Path>,
     tftp_handler: &nettrap_proto_tftp::TftpHandler,
-    query_data: &[u8],
-    src: &std::net::SocketAddr,
-    destination: &SessionDestination,
-    _len: usize,
+    packet: UdpPacket<'_>,
 ) {
-    if let Some(packet) = nettrap_proto_tftp::TftpPacket::parse(query_data) {
+    if let Some(tftp_packet) = nettrap_proto_tftp::TftpPacket::parse(packet.query_data) {
         log_event(
-            output_path,
+            packet.output_path,
             ctx.name(),
-            src,
+            packet.src,
             "tftp_request",
-            &format!("{:?}", packet),
+            &format!("{:?}", tftp_packet),
         )
         .await;
         let nbi = crate::nbi::tftp_nbi(
             ctx.name(),
-            &src.ip().to_string(),
-            src.port(),
-            destination,
-            &format!("{:?}", packet),
+            &packet.src.ip().to_string(),
+            packet.src.port(),
+            packet.destination,
+            &format!("{:?}", tftp_packet),
             "",
         );
         ctx.record_nbi(&nbi).await;
-        match tftp_handler.handle_packet(&packet).await {
+        match tftp_handler.handle_packet(&tftp_packet).await {
             Ok(responses) => {
                 let mut sent_bytes = 0u64;
                 ctx.apply_response_delay().await;
                 for resp in responses {
                     let resp_bytes = resp.to_bytes();
-                    ctx.write_pcap_response_udp_for_destination(&resp_bytes, src, destination);
-                    match socket.send_to(&resp_bytes, *src).await {
+                    ctx.write_pcap_response_udp_for_destination(
+                        &resp_bytes,
+                        packet.src,
+                        packet.destination,
+                    );
+                    match socket.send_to(&resp_bytes, *packet.src).await {
                         Ok(_) => {
                             sent_bytes += resp_bytes.len() as u64;
                         }
                         Err(e) => {
-                            tracing::warn!("Failed to send TFTP response to {}: {}", src, e);
+                            tracing::warn!("Failed to send TFTP response to {}: {}", packet.src, e);
                         }
                     }
                 }
-                ctx.update_session_bytes(src, "UDP", destination, _len as u64, sent_bytes);
+                ctx.update_session_bytes(
+                    packet.src,
+                    "UDP",
+                    packet.destination,
+                    packet.len as u64,
+                    sent_bytes,
+                );
             }
             Err(e) => tracing::warn!("TFTP handler error: {}", e),
         }
@@ -709,58 +715,69 @@ async fn handle_tftp(
 async fn handle_dns(
     ctx: &ListenerContext,
     socket: &UdpSocket,
-    output_path: Option<&std::path::Path>,
     dns_handler: &nettrap_proto_dns::handler::DnsHandler,
-    query_data: &[u8],
-    src: &std::net::SocketAddr,
-    destination: &SessionDestination,
-    len: usize,
+    packet: UdpPacket<'_>,
 ) {
-    match dns_handler.handle_query(query_data, *src).await {
+    match dns_handler
+        .handle_query(packet.query_data, *packet.src)
+        .await
+    {
         Ok(response) => {
             ctx.apply_response_delay().await;
-            ctx.write_pcap_response_udp_for_destination(&response, src, destination);
-            if let Err(e) = socket.send_to(&response, *src).await {
-                tracing::warn!("Failed to send UDP response to {}: {}", src, e);
+            ctx.write_pcap_response_udp_for_destination(&response, packet.src, packet.destination);
+            if let Err(e) = socket.send_to(&response, *packet.src).await {
+                tracing::warn!("Failed to send UDP response to {}: {}", packet.src, e);
             }
-            ctx.update_session_bytes(src, "UDP", destination, len as u64, response.len() as u64);
+            ctx.update_session_bytes(
+                packet.src,
+                "UDP",
+                packet.destination,
+                packet.len as u64,
+                response.len() as u64,
+            );
             log_event(
-                output_path,
+                packet.output_path,
                 ctx.name(),
-                src,
+                packet.src,
                 "dns_query",
-                &format!("{} bytes", len),
+                &format!("{} bytes", packet.len),
             )
             .await;
             let nbi = crate::nbi::dns_nbi(
                 ctx.name(),
-                &src.ip().to_string(),
-                src.port(),
-                destination,
+                &packet.src.ip().to_string(),
+                packet.src.port(),
+                packet.destination,
                 "",
                 "query",
             );
             ctx.record_nbi(&nbi).await;
         }
         Err(e) => {
-            tracing::warn!("UDP handler error from {}: {}", src, e);
+            tracing::warn!("UDP handler error from {}: {}", packet.src, e);
         }
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+struct UdpPacket<'a> {
+    output_path: Option<&'a std::path::Path>,
+    query_data: &'a [u8],
+    src: &'a std::net::SocketAddr,
+    destination: &'a SessionDestination,
+    len: usize,
+}
+
 async fn handle_detected_udp(
     ctx: &ListenerContext,
     socket: &UdpSocket,
-    output_path: Option<&std::path::Path>,
     dns_handler: &nettrap_proto_dns::handler::DnsHandler,
     tftp_handler: &nettrap_proto_tftp::TftpHandler,
-    query_data: &[u8],
-    src: &std::net::SocketAddr,
-    destination: &SessionDestination,
-    len: usize,
+    packet: UdpPacket<'_>,
 ) {
-    let detected = ctx.runtime.router.route_udp(query_data, destination.port);
+    let detected = ctx
+        .runtime
+        .router
+        .route_udp(packet.query_data, packet.destination.port);
     match detected {
         Some((ref name, score))
             if score >= 50
@@ -771,140 +788,137 @@ async fn handle_detected_udp(
                 "taste() routed {} (score={}) from {} on UDP",
                 name,
                 score,
-                src
+                packet.src
             );
             match name.as_str() {
                 "dns" => {
-                    handle_dns(
-                        ctx,
-                        socket,
-                        output_path,
-                        dns_handler,
-                        query_data,
-                        src,
-                        destination,
-                        len,
-                    )
-                    .await;
+                    handle_dns(ctx, socket, dns_handler, packet).await;
                 }
                 "tftp" => {
-                    handle_tftp(
-                        ctx,
-                        socket,
-                        output_path,
-                        tftp_handler,
-                        query_data,
-                        src,
-                        destination,
-                        len,
-                    )
-                    .await;
+                    handle_tftp(ctx, socket, tftp_handler, packet).await;
                 }
                 "snmp" => {
-                    let response = nettrap_proto_snmp::SnmpHandler::new().handle(query_data);
+                    let response = nettrap_proto_snmp::SnmpHandler::new().handle(packet.query_data);
                     crate::protocol_handlers::handle_udp_generic(
                         ctx,
                         socket,
-                        &response,
-                        *src,
-                        destination,
-                        len,
-                        output_path,
-                        "snmp",
+                        crate::protocol_handlers::UdpGenericResponse {
+                            response: &response,
+                            src: *packet.src,
+                            destination: packet.destination,
+                            len: packet.len,
+                            output_path: packet.output_path,
+                            protocol_name: "snmp",
+                        },
                     )
                     .await;
                 }
                 "sip" => {
-                    let response = nettrap_proto_sip::SipHandler::new().handle(query_data);
+                    let response = nettrap_proto_sip::SipHandler::new().handle(packet.query_data);
                     crate::protocol_handlers::handle_udp_generic(
                         ctx,
                         socket,
-                        &response,
-                        *src,
-                        destination,
-                        len,
-                        output_path,
-                        "sip",
+                        crate::protocol_handlers::UdpGenericResponse {
+                            response: &response,
+                            src: *packet.src,
+                            destination: packet.destination,
+                            len: packet.len,
+                            output_path: packet.output_path,
+                            protocol_name: "sip",
+                        },
                     )
                     .await;
                 }
                 "upnp" => {
-                    let response = nettrap_proto_upnp::UpnpHandler::new().handle(query_data);
+                    let response = nettrap_proto_upnp::UpnpHandler::new().handle(packet.query_data);
                     crate::protocol_handlers::handle_udp_generic(
                         ctx,
                         socket,
-                        &response,
-                        *src,
-                        destination,
-                        len,
-                        output_path,
-                        "upnp",
+                        crate::protocol_handlers::UdpGenericResponse {
+                            response: &response,
+                            src: *packet.src,
+                            destination: packet.destination,
+                            len: packet.len,
+                            output_path: packet.output_path,
+                            protocol_name: "upnp",
+                        },
                     )
                     .await;
                 }
                 "ntp" => {
-                    let response = nettrap_proto_ntp::NtpHandler::new().handle(query_data);
+                    let response = nettrap_proto_ntp::NtpHandler::new().handle(packet.query_data);
                     crate::protocol_handlers::handle_udp_generic(
                         ctx,
                         socket,
-                        &response,
-                        *src,
-                        destination,
-                        len,
-                        output_path,
-                        "ntp",
+                        crate::protocol_handlers::UdpGenericResponse {
+                            response: &response,
+                            src: *packet.src,
+                            destination: packet.destination,
+                            len: packet.len,
+                            output_path: packet.output_path,
+                            protocol_name: "ntp",
+                        },
                     )
                     .await;
                 }
                 "coap" => {
-                    let response = nettrap_proto_coap::CoapHandler::new().handle(query_data);
+                    let response = nettrap_proto_coap::CoapHandler::new().handle(packet.query_data);
                     crate::protocol_handlers::handle_udp_generic(
                         ctx,
                         socket,
-                        &response,
-                        *src,
-                        destination,
-                        len,
-                        output_path,
-                        "coap",
+                        crate::protocol_handlers::UdpGenericResponse {
+                            response: &response,
+                            src: *packet.src,
+                            destination: packet.destination,
+                            len: packet.len,
+                            output_path: packet.output_path,
+                            protocol_name: "coap",
+                        },
                     )
                     .await;
                 }
                 "mqtt" => {
-                    let response = nettrap_proto_mqtt::MqttHandler::new().handle_packet(query_data);
+                    let response =
+                        nettrap_proto_mqtt::MqttHandler::new().handle_packet(packet.query_data);
                     crate::protocol_handlers::handle_udp_generic(
                         ctx,
                         socket,
-                        &response,
-                        *src,
-                        destination,
-                        len,
-                        output_path,
-                        "mqtt",
+                        crate::protocol_handlers::UdpGenericResponse {
+                            response: &response,
+                            src: *packet.src,
+                            destination: packet.destination,
+                            len: packet.len,
+                            output_path: packet.output_path,
+                            protocol_name: "mqtt",
+                        },
                     )
                     .await;
                 }
                 _ => {
                     log_event(
-                        output_path,
+                        packet.output_path,
                         ctx.name(),
-                        src,
+                        packet.src,
                         "udp_unknown",
-                        &format!("{} bytes, detected={}", len, name),
+                        &format!("{} bytes, detected={}", packet.len, name),
                     )
                     .await;
                     let nbi = crate::nbi::raw_nbi(
                         ctx.name(),
-                        &src.ip().to_string(),
-                        src.port(),
-                        destination,
-                        len,
+                        &packet.src.ip().to_string(),
+                        packet.src.port(),
+                        packet.destination,
+                        packet.len,
                         "",
                     );
                     ctx.record_nbi(&nbi).await;
                     ctx.apply_response_delay().await;
-                    ctx.write_pcap_response_udp_for_destination(b"OK\n", src, destination);
-                    let _ = socket.send_to(b"OK\n", *src).await;
+                    ctx.write_pcap_response_udp_for_destination(
+                        b"OK\n",
+                        packet.src,
+                        packet.destination,
+                    );
+                    let _ = socket.send_to(b"OK\n", *packet.src).await;
                 }
             }
         }
@@ -912,27 +926,27 @@ async fn handle_detected_udp(
             tracing::debug!(
                 "UDP '{}' unclassified {} bytes from {} (no protocol match)",
                 ctx.name(),
-                len,
-                src
+                packet.len,
+                packet.src
             );
             log_event(
-                output_path,
+                packet.output_path,
                 ctx.name(),
-                src,
+                packet.src,
                 "udp_unclassified",
-                &format!("{} bytes", len),
+                &format!("{} bytes", packet.len),
             )
             .await;
             let nbi = crate::nbi::raw_nbi(
                 ctx.name(),
-                &src.ip().to_string(),
-                src.port(),
-                destination,
-                len,
+                &packet.src.ip().to_string(),
+                packet.src.port(),
+                packet.destination,
+                packet.len,
                 "unknown",
             );
             ctx.record_nbi(&nbi).await;
-            ctx.update_session_bytes(src, "UDP", destination, len as u64, 0);
+            ctx.update_session_bytes(packet.src, "UDP", packet.destination, packet.len as u64, 0);
         }
     }
 }
@@ -941,7 +955,7 @@ async fn handle_detected_udp(
 mod tests {
     use super::*;
     use crate::listener_context::ListenerContext;
-    use crate::listener_runtime::{ListenerRuntime, ListenerSecurity};
+    use crate::listener_runtime::{ListenerRuntime, ListenerRuntimeResources, ListenerSecurity};
     use crate::process_filter::ProcessFilter;
     use crate::session::{PortForwardTable, SessionTracker};
     use std::sync::Arc;
@@ -961,16 +975,16 @@ mod tests {
                 Vec::new(),
             )
             .expect("host rules should compile"),
-            ListenerRuntime::new(
-                None,
-                Arc::new(nettrap_proxy::ProtocolRouter::new()),
-                None,
-                None,
-                Arc::new(crate::nbi::NbiCollector::new(None)),
-                Arc::clone(&tracker),
-                Arc::new(PortForwardTable::new()),
-                Arc::new(nettrap_flow::FlowManager::default()),
-            ),
+            ListenerRuntime::new(ListenerRuntimeResources {
+                ca: None,
+                router: Arc::new(nettrap_proxy::ProtocolRouter::new()),
+                attribution: None,
+                pcap_writer: None,
+                nbi_collector: Arc::new(crate::nbi::NbiCollector::new(None)),
+                session_tracker: Arc::clone(&tracker),
+                port_forward_table: Arc::new(PortForwardTable::new()),
+                flow_manager: Arc::new(nettrap_flow::FlowManager::default()),
+            }),
         );
         let src: std::net::SocketAddr = "127.0.0.1:53000".parse().unwrap();
         let attr = nettrap_core::prelude::Attribution::new(
@@ -1009,16 +1023,16 @@ mod tests {
                 Vec::new(),
             )
             .expect("host rules should compile"),
-            ListenerRuntime::new(
-                None,
-                Arc::new(nettrap_proxy::ProtocolRouter::new()),
-                None,
-                None,
-                Arc::new(crate::nbi::NbiCollector::new(None)),
-                Arc::clone(&tracker),
-                Arc::new(PortForwardTable::new()),
-                Arc::new(nettrap_flow::FlowManager::default()),
-            ),
+            ListenerRuntime::new(ListenerRuntimeResources {
+                ca: None,
+                router: Arc::new(nettrap_proxy::ProtocolRouter::new()),
+                attribution: None,
+                pcap_writer: None,
+                nbi_collector: Arc::new(crate::nbi::NbiCollector::new(None)),
+                session_tracker: Arc::clone(&tracker),
+                port_forward_table: Arc::new(PortForwardTable::new()),
+                flow_manager: Arc::new(nettrap_flow::FlowManager::default()),
+            }),
         );
         let src: std::net::SocketAddr = "127.0.0.1:53001".parse().unwrap();
         let attr = nettrap_core::prelude::Attribution::new(
@@ -1110,16 +1124,16 @@ mod tests {
             .build(
                 ListenerSecurity::new(ProcessFilter::default(), Vec::new(), Vec::new())
                     .expect("empty host rules should compile"),
-                ListenerRuntime::new(
-                    None,
-                    Arc::new(nettrap_proxy::ProtocolRouter::new()),
-                    None,
-                    None,
-                    Arc::new(crate::nbi::NbiCollector::new(None)),
-                    Arc::clone(&tracker),
-                    Arc::clone(&port_forward_table),
-                    Arc::clone(&flow_manager),
-                ),
+                ListenerRuntime::new(ListenerRuntimeResources {
+                    ca: None,
+                    router: Arc::new(nettrap_proxy::ProtocolRouter::new()),
+                    attribution: None,
+                    pcap_writer: None,
+                    nbi_collector: Arc::new(crate::nbi::NbiCollector::new(None)),
+                    session_tracker: Arc::clone(&tracker),
+                    port_forward_table: Arc::clone(&port_forward_table),
+                    flow_manager: Arc::clone(&flow_manager),
+                }),
             );
 
         let listener =

@@ -12,22 +12,20 @@ test = false
 
 [dependencies]
 nettrap-core.workspace = true
-nettrap-flow.workspace = true
-nettrap-events.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
-tracing.workspace = true
-tokio.workspace = true
-parking_lot.workspace = true
 bytes.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 widestring = "1.0"
-libloading = "0.8"
-bitflags = "2.4"
+libloading = "0.9"
+bitflags = "2.11"
+parking_lot.workspace = true
+tokio.workspace = true
+tracing.workspace = true
 
 [target.'cfg(windows)'.build-dependencies]
-bindgen = "0.69"
+bindgen = "0.72"
 
 [features]
 default = []

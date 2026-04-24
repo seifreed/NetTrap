@@ -1,0 +1,19 @@
+[package]
+name = "nettrap-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.12"
+nettrap-proto-http = { path = "../crates/nettrap-proto-http" }
+
+[[bin]]
+name = "http_request_parse"
+path = "fuzz_targets/http_request_parse.rs"
+test = false
+doc = false
+bench = false

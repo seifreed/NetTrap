@@ -15,9 +15,10 @@ pub const SSH_DISCONNECT_KEY_EXCHANGE_FAILED: u32 = 3;
 pub const SSH_DISCONNECT_AUTH_CANCELLED_BY_USER: u32 = 13;
 
 /// SSH session state
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum SshState {
     /// Waiting for client version string
+    #[default]
     WaitingVersion,
     /// Version exchanged, performing key exchange
     KeyExchange,
@@ -27,10 +28,4 @@ pub enum SshState {
     Session,
     /// Disconnected
     Disconnected,
-}
-
-impl Default for SshState {
-    fn default() -> Self {
-        Self::WaitingVersion
-    }
 }

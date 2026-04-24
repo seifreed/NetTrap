@@ -222,7 +222,7 @@ fn extract_ssh_payload_frame(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
     if buffer.len() < 5 {
         None
     } else {
-        Some(buffer.drain(..).collect())
+        Some(std::mem::take(buffer))
     }
 }
 
@@ -713,7 +713,7 @@ fn extract_immediate_frame(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
     if buffer.is_empty() {
         None
     } else {
-        Some(buffer.drain(..).collect())
+        Some(std::mem::take(buffer))
     }
 }
 
@@ -755,7 +755,7 @@ pub async fn handle_tcp_connection(
     let memcached_handler = nettrap_proto_memcached::MemcachedHandler::new();
     let postgres_handler = nettrap_proto_postgres::PostgresHandler::new();
 
-    let webroot_server = ctx.webroot().map(|w| crate::webroot::WebrootServer::new(w));
+    let webroot_server = ctx.webroot().map(crate::webroot::WebrootServer::new);
 
     let mut smtp_data_mode = false;
     let mut smtp_data_buf: Vec<u8> = Vec::new();
@@ -1296,7 +1296,7 @@ async fn dispatch_named_tcp_protocol(
         Some(postgres_handler.handle(data))
     } else if name == "raw" || name.starts_with("raw") || name == "echo" || name.starts_with("echo")
     {
-        let raw_handler = if let Some(ref custom) = ctx.custom_response() {
+        let raw_handler = if let Some(custom) = ctx.custom_response() {
             nettrap_proto_raw::RawHandler::from_custom_response(custom)
         } else {
             nettrap_proto_raw::RawHandler::new()
@@ -1802,17 +1802,17 @@ async fn handle_http_response(
     let path = extract_http_path(data);
     let host = extract_http_host(data);
     let method = extract_http_method(data);
-    let nbi = crate::nbi::http_nbi(
-        ctx.name(),
-        &peer.ip().to_string(),
-        peer.port(),
+    let nbi = crate::nbi::http_nbi(crate::nbi::HttpNbiInput {
+        listener: ctx.name(),
+        src_ip: &peer.ip().to_string(),
+        src_port: peer.port(),
         destination,
-        &method,
-        &target,
-        &host,
-        "",
-        data.len(),
-    );
+        method: &method,
+        uri: &target,
+        host: &host,
+        user_agent: "",
+        body_len: data.len(),
+    });
     ctx.runtime.nbi_collector.record(&nbi).await;
 
     if ctx.dump_http_posts() && method.eq_ignore_ascii_case("POST") {

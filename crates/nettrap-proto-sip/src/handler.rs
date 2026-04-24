@@ -25,7 +25,7 @@ impl SipHandler {
 
     /// Sanitize a SIP header value to prevent header injection via CRLF
     fn sanitize_header_value(value: &str) -> String {
-        value.replace('\r', "").replace('\n', "")
+        value.replace(['\r', '\n'], "")
     }
 
     pub fn handle(&self, data: &[u8]) -> Vec<u8> {

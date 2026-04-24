@@ -30,26 +30,28 @@ pub struct ListenerRuntime {
     pub ca: Option<Arc<nettrap_tls_mitm::CertificateAuthority>>,
 }
 
+pub struct ListenerRuntimeResources {
+    pub ca: Option<Arc<nettrap_tls_mitm::CertificateAuthority>>,
+    pub router: Arc<nettrap_proxy::ProtocolRouter>,
+    pub attribution: Option<Arc<nettrap_attribution::AttributionEngine>>,
+    pub pcap_writer: Option<Arc<nettrap_pcap::PcapWriter>>,
+    pub nbi_collector: Arc<NbiCollector>,
+    pub session_tracker: Arc<SessionTracker>,
+    pub port_forward_table: Arc<PortForwardTable>,
+    pub flow_manager: Arc<nettrap_flow::FlowManager>,
+}
+
 impl ListenerRuntime {
-    pub fn new(
-        ca: Option<Arc<nettrap_tls_mitm::CertificateAuthority>>,
-        router: Arc<nettrap_proxy::ProtocolRouter>,
-        attribution: Option<Arc<nettrap_attribution::AttributionEngine>>,
-        pcap_writer: Option<Arc<nettrap_pcap::PcapWriter>>,
-        nbi_collector: Arc<NbiCollector>,
-        session_tracker: Arc<SessionTracker>,
-        port_forward_table: Arc<PortForwardTable>,
-        flow_manager: Arc<nettrap_flow::FlowManager>,
-    ) -> Self {
+    pub fn new(resources: ListenerRuntimeResources) -> Self {
         Self {
-            ca,
-            router,
-            attribution,
-            pcap_writer,
-            nbi_collector,
-            session_tracker,
-            port_forward_table,
-            flow_manager,
+            ca: resources.ca,
+            router: resources.router,
+            attribution: resources.attribution,
+            pcap_writer: resources.pcap_writer,
+            nbi_collector: resources.nbi_collector,
+            session_tracker: resources.session_tracker,
+            port_forward_table: resources.port_forward_table,
+            flow_manager: resources.flow_manager,
         }
     }
 }
@@ -74,9 +76,9 @@ impl ListenerSecurity {
         host_blacklist: Vec<String>,
     ) -> crate::Result<Self> {
         let compiled_host_whitelist =
-            Arc::new(compile_host_rules(&host_whitelist).map_err(|err| crate::Error::Config(err))?);
+            Arc::new(compile_host_rules(&host_whitelist).map_err(crate::Error::Config)?);
         let compiled_host_blacklist =
-            Arc::new(compile_host_rules(&host_blacklist).map_err(|err| crate::Error::Config(err))?);
+            Arc::new(compile_host_rules(&host_blacklist).map_err(crate::Error::Config)?);
 
         Ok(Self {
             process_filter,
@@ -89,14 +91,14 @@ impl ListenerSecurity {
 
     pub fn with_host_whitelist(mut self, whitelist: Vec<String>) -> crate::Result<Self> {
         self.compiled_host_whitelist =
-            Arc::new(compile_host_rules(&whitelist).map_err(|err| crate::Error::Config(err))?);
+            Arc::new(compile_host_rules(&whitelist).map_err(crate::Error::Config)?);
         self.host_whitelist = whitelist;
         Ok(self)
     }
 
     pub fn with_host_blacklist(mut self, blacklist: Vec<String>) -> crate::Result<Self> {
         self.compiled_host_blacklist =
-            Arc::new(compile_host_rules(&blacklist).map_err(|err| crate::Error::Config(err))?);
+            Arc::new(compile_host_rules(&blacklist).map_err(crate::Error::Config)?);
         self.host_blacklist = blacklist;
         Ok(self)
     }

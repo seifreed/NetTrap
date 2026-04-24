@@ -3,7 +3,6 @@
 #[cfg(test)]
 mod tests {
     use nettrap_proto_smtp::handler::{SmtpHandler, SmtpHandlerTrait};
-    use nettrap_proto_smtp::smtp::SmtpResponse;
 
     #[tokio::test]
     async fn test_smtp_ehlo() {

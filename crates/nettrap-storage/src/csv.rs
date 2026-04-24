@@ -86,6 +86,8 @@ impl Storage for CsvStorage {
             .ok_or_else(|| Error::Storage("CSV storage not opened — call open() first".into()))?;
         self.ensure_header(w)?;
 
+        let direction = format!("{:?}", flow.direction);
+        let details = format!("state={:?} duration_ms={}", flow.state, flow.duration_ms());
         let line = format!(
             "{},flow,{},{},{},{},{},{},{},{}",
             flow.created_at.to_rfc3339(),
@@ -94,13 +96,9 @@ impl Storage for CsvStorage {
             flow.five_tuple.dst_ip,
             flow.five_tuple.dst_port,
             flow.five_tuple.protocol,
-            format!("{:?}", flow.direction),
+            direction,
             flow.metadata.bytes_sent + flow.metadata.bytes_received,
-            Self::csv_escape(&format!(
-                "state={:?} duration_ms={}",
-                flow.state,
-                flow.duration_ms()
-            )),
+            Self::csv_escape(&details),
         );
         writeln!(w, "{}", line).map_err(|e| Error::Storage(e.to_string()))?;
         Ok(())
@@ -113,6 +111,8 @@ impl Storage for CsvStorage {
             .ok_or_else(|| Error::Storage("CSV storage not opened — call open() first".into()))?;
         self.ensure_header(w)?;
 
+        let direction = format!("{:?}", packet.direction);
+        let details = format!("type={:?}", packet.packet_type);
         let line = format!(
             "{},packet,{},{},{},{},{},{},{},{}",
             packet.timestamp.to_rfc3339(),
@@ -121,9 +121,9 @@ impl Storage for CsvStorage {
             packet.five_tuple.dst_ip,
             packet.five_tuple.dst_port,
             packet.five_tuple.protocol,
-            format!("{:?}", packet.direction),
+            direction,
             packet.length,
-            Self::csv_escape(&format!("type={:?}", packet.packet_type)),
+            Self::csv_escape(&details),
         );
         writeln!(w, "{}", line).map_err(|e| Error::Storage(e.to_string()))?;
         Ok(())

@@ -202,8 +202,6 @@ impl IrcHandlerTrait for IrcHandler {
                 // CAP negotiation - respond with empty capabilities
                 if args.to_uppercase().starts_with("LS") {
                     Ok(IrcResponse::single(format!(":{} CAP * LS :\r\n", srv)))
-                } else if args.to_uppercase().starts_with("END") {
-                    Ok(IrcResponse::new())
                 } else {
                     Ok(IrcResponse::new())
                 }

@@ -12,8 +12,6 @@ test = false
 
 [dependencies]
 nettrap-core.workspace = true
-nettrap-flow.workspace = true
-nettrap-events.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 bytes.workspace = true
@@ -23,7 +21,6 @@ tracing.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
 socket2.workspace = true
-pcap-file.workspace = true
 pcap.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]

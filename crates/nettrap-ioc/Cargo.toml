@@ -9,11 +9,7 @@ license.workspace = true
 
 [dependencies]
 nettrap-core.workspace = true
-nettrap-flow.workspace = true
-nettrap-events.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 regex.workspace = true
-ipnet.workspace = true
-tracing.workspace = true
 once_cell.workspace = true

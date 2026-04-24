@@ -1,6 +1,5 @@
 # ─── Build artifacts ──────────────────────────────────────────────────────────
 target/
-Cargo.lock
 
 # ─── AI/Editor assistants ─────────────────────────────────────────────────────
 CLAUDE.md
@@ -59,10 +58,15 @@ flare-fakenet-ng/
 # ─── Test/coverage artifacts ──────────────────────────────────────────────────
 coverage/
 benches/results/
+criterion/
 *.profraw
 *.profdata
 lcov.info
 tarpaulin-report.html
+fuzz/artifacts/
+fuzz/corpus/
+fuzz/target/
+fuzz/Cargo.lock
 
 # ─── Docker artifacts ─────────────────────────────────────────────────────────
 docker-compose.override.yml

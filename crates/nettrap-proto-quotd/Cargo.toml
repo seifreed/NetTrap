@@ -8,6 +8,5 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
-nettrap-core.workspace = true
 tracing.workspace = true
 rand.workspace = true

@@ -23,18 +23,13 @@ pub enum RedisAttackType {
 }
 
 /// Redis session state
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum RedisState {
     /// Waiting for commands
+    #[default]
     Connected,
     /// Client has authenticated
     Authenticated,
     /// Client disconnected
     Disconnected,
-}
-
-impl Default for RedisState {
-    fn default() -> Self {
-        Self::Connected
-    }
 }

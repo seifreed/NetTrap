@@ -8,7 +8,7 @@ use super::ListenerConfig;
 // ─── FakeTime Configuration ──────────────────────────────────────────────────
 
 /// FakeTime mode configuration — shifts all service timestamps to trigger time-bombs
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FakeTimeConfig {
     /// Enable fake-time mode
     #[serde(default)]
@@ -25,17 +25,6 @@ pub struct FakeTimeConfig {
     /// Seconds to add each tick
     #[serde(default)]
     pub auto_increment_secs: i64,
-}
-
-impl Default for FakeTimeConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            init_delta: 0,
-            auto_delay_secs: 0,
-            auto_increment_secs: 0,
-        }
-    }
 }
 
 // ─── Distributed Deployment Config (all optional for standalone) ─────────────
@@ -142,18 +131,13 @@ fn default_pool_size() -> u32 {
     5
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NetworkMode {
     SingleHost,
     MultiHost,
+    #[default]
     Auto,
-}
-
-impl Default for NetworkMode {
-    fn default() -> Self {
-        NetworkMode::Auto
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -814,11 +798,13 @@ mod tests {
 
     #[test]
     fn normalize_listener_names_renames_case_insensitive_duplicates() {
-        let mut config = EngineConfig::default();
-        config.listeners = vec![
-            ListenerConfig::new("http", 80),
-            ListenerConfig::new("HTTP", 8080),
-        ];
+        let mut config = EngineConfig {
+            listeners: vec![
+                ListenerConfig::new("http", 80),
+                ListenerConfig::new("HTTP", 8080),
+            ],
+            ..EngineConfig::default()
+        };
 
         config.normalize_listener_names();
 
@@ -833,8 +819,10 @@ mod tests {
 
         let colliding = ListenerConfig::new("http_80", 9000);
 
-        let mut config = EngineConfig::default();
-        config.listeners = vec![ranged, colliding];
+        let mut config = EngineConfig {
+            listeners: vec![ranged, colliding],
+            ..EngineConfig::default()
+        };
 
         config.expand_listeners();
 
@@ -848,13 +836,15 @@ mod tests {
 
     #[test]
     fn finalize_listener_names_rejects_ambiguous_redirect_defaults() {
-        let mut config = EngineConfig::default();
-        config.listeners = vec![
-            ListenerConfig::new("http", 80),
-            ListenerConfig::new("http", 8080),
-        ];
-        config.redirect_all_traffic = true;
-        config.default_tcp_listener = Some("http".to_string());
+        let mut config = EngineConfig {
+            listeners: vec![
+                ListenerConfig::new("http", 80),
+                ListenerConfig::new("http", 8080),
+            ],
+            redirect_all_traffic: true,
+            default_tcp_listener: Some("http".to_string()),
+            ..EngineConfig::default()
+        };
 
         let err = config
             .finalize_listener_names()
@@ -868,13 +858,15 @@ mod tests {
 
     #[test]
     fn finalize_listener_names_rewrites_unique_redirect_defaults_to_final_name() {
-        let mut config = EngineConfig::default();
-        config.listeners = vec![
-            ListenerConfig::new("http", 80),
-            ListenerConfig::new("control", 8080),
-        ];
-        config.redirect_all_traffic = true;
-        config.default_tcp_listener = Some("control".to_string());
+        let mut config = EngineConfig {
+            listeners: vec![
+                ListenerConfig::new("http", 80),
+                ListenerConfig::new("control", 8080),
+            ],
+            redirect_all_traffic: true,
+            default_tcp_listener: Some("control".to_string()),
+            ..EngineConfig::default()
+        };
 
         config
             .finalize_listener_names()
@@ -887,10 +879,12 @@ mod tests {
     fn from_file_rejects_unresolvable_hostname_filters() {
         let path =
             std::env::temp_dir().join(format!("nettrap-host-filter-{}.toml", std::process::id()));
-        let mut config = EngineConfig::default();
-        config.listeners = vec![ListenerConfig::new("http", 80)];
-        config.listeners[0].host_whitelist =
-            vec!["definitely-not-a-real-nettrap-host.invalid".to_string()];
+        let mut listener = ListenerConfig::new("http", 80);
+        listener.host_whitelist = vec!["definitely-not-a-real-nettrap-host.invalid".to_string()];
+        let config = EngineConfig {
+            listeners: vec![listener],
+            ..EngineConfig::default()
+        };
         let serialized = toml::to_string(&config).expect("serialize config");
         fs::write(&path, serialized).expect("write temp config");
 
@@ -903,11 +897,13 @@ mod tests {
 
     #[test]
     fn finalize_listener_names_rejects_spawnable_socket_collisions() {
-        let mut config = EngineConfig::default();
-        config.listeners = vec![
-            ListenerConfig::new("http", 80),
-            ListenerConfig::new("http-alt", 80),
-        ];
+        let mut config = EngineConfig {
+            listeners: vec![
+                ListenerConfig::new("http", 80),
+                ListenerConfig::new("http-alt", 80),
+            ],
+            ..EngineConfig::default()
+        };
 
         let err = config
             .finalize_listener_names()
@@ -921,10 +917,12 @@ mod tests {
 
     #[test]
     fn finalize_listener_names_ignores_disabled_socket_collisions() {
-        let mut config = EngineConfig::default();
         let mut disabled = ListenerConfig::new("http-alt", 80);
         disabled.enabled = false;
-        config.listeners = vec![ListenerConfig::new("http", 80), disabled];
+        let mut config = EngineConfig {
+            listeners: vec![ListenerConfig::new("http", 80), disabled],
+            ..EngineConfig::default()
+        };
 
         config
             .finalize_listener_names()
@@ -935,8 +933,10 @@ mod tests {
     fn from_file_rejects_invalid_bind_address() {
         let path =
             std::env::temp_dir().join(format!("nettrap-bind-address-{}.toml", std::process::id()));
-        let mut config = EngineConfig::default();
-        config.listeners = vec![ListenerConfig::new("http", 80).with_bind_address("not-an-ip")];
+        let config = EngineConfig {
+            listeners: vec![ListenerConfig::new("http", 80).with_bind_address("not-an-ip")],
+            ..EngineConfig::default()
+        };
         let serialized = toml::to_string(&config).expect("serialize config");
         fs::write(&path, serialized).expect("write temp config");
 
@@ -949,11 +949,13 @@ mod tests {
 
     #[test]
     fn finalize_listener_names_rejects_canonical_socket_collisions() {
-        let mut config = EngineConfig::default();
-        config.listeners = vec![
-            ListenerConfig::new("http-v6-short", 80).with_bind_address("::1"),
-            ListenerConfig::new("http-v6-long", 80).with_bind_address("0:0:0:0:0:0:0:1"),
-        ];
+        let mut config = EngineConfig {
+            listeners: vec![
+                ListenerConfig::new("http-v6-short", 80).with_bind_address("::1"),
+                ListenerConfig::new("http-v6-long", 80).with_bind_address("0:0:0:0:0:0:0:1"),
+            ],
+            ..EngineConfig::default()
+        };
 
         let err = config
             .validate()
@@ -971,10 +973,12 @@ mod tests {
             "nettrap-empty-expansion-{}.toml",
             std::process::id()
         ));
-        let mut config = EngineConfig::default();
         let mut listener = ListenerConfig::new("http", 80);
         listener.port_range = Some("not-a-port".to_string());
-        config.listeners = vec![listener];
+        let config = EngineConfig {
+            listeners: vec![listener],
+            ..EngineConfig::default()
+        };
         let serialized = toml::to_string(&config).expect("serialize config");
         fs::write(&path, serialized).expect("write temp config");
 
@@ -992,10 +996,11 @@ mod tests {
             "nettrap-invalid-distributed-sink-{}.toml",
             std::process::id()
         ));
-        let mut config = EngineConfig::default();
-        config.distributed.enabled = true;
-        config
-            .distributed
+        let mut distributed = crate::config::DistributedConfig {
+            enabled: true,
+            ..crate::config::DistributedConfig::default()
+        };
+        distributed
             .event_sinks
             .push(crate::config::EventSinkConfig {
                 sink_type: "bogus".into(),
@@ -1005,6 +1010,10 @@ mod tests {
                 flush_interval_ms: 1000,
                 request_timeout_ms: 1000,
             });
+        let config = EngineConfig {
+            distributed,
+            ..EngineConfig::default()
+        };
         let serialized = toml::to_string(&config).expect("serialize config");
         fs::write(&path, serialized).expect("write temp config");
 
@@ -1025,12 +1034,18 @@ mod tests {
             "nettrap-api-global-normalization-{}.toml",
             std::process::id()
         ));
-        let mut config = EngineConfig::default();
         let mut listener = ListenerConfig::new("http", 80).with_bind_address("not-an-ip");
         listener.port_range = Some("80,81".to_string());
-        config.listeners = vec![listener];
-        config.database.pool_size = 0;
-        config.attribution_timeout_ms = 0;
+        let database = crate::config::DatabaseConfig {
+            pool_size: 0,
+            ..crate::config::DatabaseConfig::default()
+        };
+        let config = EngineConfig {
+            listeners: vec![listener],
+            database,
+            attribution_timeout_ms: 0,
+            ..EngineConfig::default()
+        };
         let serialized = toml::to_string(&config).expect("serialize config");
         fs::write(&path, serialized).expect("write temp config");
 
@@ -1051,8 +1066,10 @@ mod tests {
             "nettrap-invalid-api-bind-{}.toml",
             std::process::id()
         ));
-        let mut config = EngineConfig::default();
-        config.api_bind = Some("not-a-socket".into());
+        let config = EngineConfig {
+            api_bind: Some("not-a-socket".into()),
+            ..EngineConfig::default()
+        };
         let serialized = toml::to_string(&config).expect("serialize config");
         fs::write(&path, serialized).expect("write temp config");
 
@@ -1069,8 +1086,13 @@ mod tests {
             "nettrap-invalid-distributed-bind-{}.toml",
             std::process::id()
         ));
-        let mut config = EngineConfig::default();
-        config.distributed.health_bind = Some("still-not-a-socket".into());
+        let config = EngineConfig {
+            distributed: crate::config::DistributedConfig {
+                health_bind: Some("still-not-a-socket".into()),
+                ..crate::config::DistributedConfig::default()
+            },
+            ..EngineConfig::default()
+        };
         let serialized = toml::to_string(&config).expect("serialize config");
         fs::write(&path, serialized).expect("write temp config");
 
@@ -1087,8 +1109,10 @@ mod tests {
             "nettrap-empty-api-bind-{}.toml",
             std::process::id()
         ));
-        let mut config = EngineConfig::default();
-        config.api_bind = Some("   ".into());
+        let config = EngineConfig {
+            api_bind: Some("   ".into()),
+            ..EngineConfig::default()
+        };
         let serialized = toml::to_string(&config).expect("serialize config");
         fs::write(&path, serialized).expect("write temp config");
 
@@ -1101,9 +1125,11 @@ mod tests {
 
     #[test]
     fn finalize_listener_names_rejects_listener_and_api_bind_collisions() {
-        let mut config = EngineConfig::default();
-        config.listeners = vec![ListenerConfig::new("http", 8080).with_bind_address("127.0.0.1")];
-        config.api_bind = Some("127.0.0.1:8080".into());
+        let mut config = EngineConfig {
+            listeners: vec![ListenerConfig::new("http", 8080).with_bind_address("127.0.0.1")],
+            api_bind: Some("127.0.0.1:8080".into()),
+            ..EngineConfig::default()
+        };
 
         let err = config
             .validate()
@@ -1117,9 +1143,11 @@ mod tests {
 
     #[test]
     fn validate_socket_collision_with_unspecified_listener_and_concrete_api_bind() {
-        let mut config = EngineConfig::default();
-        config.listeners = vec![ListenerConfig::new("http", 8080).with_bind_address("0.0.0.0")];
-        config.api_bind = Some("127.0.0.1:8080".into());
+        let mut config = EngineConfig {
+            listeners: vec![ListenerConfig::new("http", 8080).with_bind_address("0.0.0.0")],
+            api_bind: Some("127.0.0.1:8080".into()),
+            ..EngineConfig::default()
+        };
 
         let err = config
             .validate()
@@ -1133,10 +1161,15 @@ mod tests {
 
     #[test]
     fn finalize_listener_names_rejects_global_endpoint_collisions() {
-        let mut config = EngineConfig::default();
-        config.listeners = vec![ListenerConfig::new("http", 8080)];
-        config.distributed.health_bind = Some("127.0.0.1:9000".into());
-        config.distributed.metrics_bind = Some("127.0.0.1:9000".into());
+        let mut config = EngineConfig {
+            listeners: vec![ListenerConfig::new("http", 8080)],
+            distributed: crate::config::DistributedConfig {
+                health_bind: Some("127.0.0.1:9000".into()),
+                metrics_bind: Some("127.0.0.1:9000".into()),
+                ..crate::config::DistributedConfig::default()
+            },
+            ..EngineConfig::default()
+        };
 
         let err = config
             .validate()
@@ -1154,10 +1187,12 @@ mod tests {
             "nettrap-declarative-roundtrip-{}.toml",
             std::process::id()
         ));
-        let mut config = EngineConfig::default();
         let mut listener = ListenerConfig::new("http", 80);
         listener.port_range = Some("80,81".to_string());
-        config.listeners = vec![listener];
+        let config = EngineConfig {
+            listeners: vec![listener],
+            ..EngineConfig::default()
+        };
         let serialized = toml::to_string(&config).expect("serialize config");
         fs::write(&path, serialized).expect("write temp config");
 

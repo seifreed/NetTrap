@@ -9,8 +9,6 @@ license.workspace = true
 
 [dependencies]
 nettrap-core.workspace = true
-nettrap-flow.workspace = true
-nettrap-events.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 bytes.workspace = true
@@ -20,7 +18,6 @@ tracing.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
 hickory-proto.workspace = true
-hickory-client.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

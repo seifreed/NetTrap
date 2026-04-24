@@ -18,5 +18,3 @@ hashbrown.workspace = true
 uuid.workspace = true
 parking_lot.workspace = true
 tracing.workspace = true
-tokio.workspace = true
-async-trait.workspace = true

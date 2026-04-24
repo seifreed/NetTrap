@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub enum IrcBanner {
+    #[default]
     Generic,
     DebianIrcd,
     Custom(String),
@@ -23,14 +24,14 @@ impl IrcBanner {
     }
 }
 
-impl Default for IrcBanner {
-    fn default() -> Self {
-        IrcBanner::Generic
-    }
-}
-
 pub struct IrcResponse {
     pub messages: Vec<String>,
+}
+
+impl Default for IrcResponse {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl IrcResponse {

@@ -49,9 +49,10 @@ pub trait Engine: Send + Sync {
 }
 
 /// Engine state enum for lifecycle management.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EngineState {
     /// Engine created but not started
+    #[default]
     Created,
     /// Engine is initializing resources
     Initializing,
@@ -65,14 +66,8 @@ pub enum EngineState {
     Error,
 }
 
-impl Default for EngineState {
-    fn default() -> Self {
-        Self::Created
-    }
-}
-
 /// Configuration for engine behavior.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct EngineOptions {
     /// Enable packet interception
     pub intercept_enabled: bool,
@@ -86,17 +81,4 @@ pub struct EngineOptions {
     pub pcap_enabled: bool,
     /// Verbose logging
     pub verbose: bool,
-}
-
-impl Default for EngineOptions {
-    fn default() -> Self {
-        Self {
-            intercept_enabled: false,
-            interface: None,
-            output_override: None,
-            attribution_enabled: false,
-            pcap_enabled: false,
-            verbose: false,
-        }
-    }
 }

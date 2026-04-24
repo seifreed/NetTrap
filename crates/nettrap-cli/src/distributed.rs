@@ -1136,6 +1136,12 @@ impl EventFanout {
     }
 }
 
+impl Default for EventFanout {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub struct FanoutSendOutcome {
     pub error: Option<String>,
 }
@@ -1460,6 +1466,96 @@ pub async fn run_metrics_server(
         local_addr
     );
     serve_metrics_server(listener, node, runtime_health).await
+}
+
+// ─── Heartbeat ───────────────────────────────────────────────────────────────
+
+/// Periodically sends heartbeat to control plane
+pub async fn run_heartbeat(
+    control_url: String,
+    token: Option<String>,
+    node: Arc<NodeIdentity>,
+    interval_secs: u64,
+) -> crate::Result<()> {
+    if interval_secs == 0 {
+        return Ok(());
+    }
+
+    run_heartbeat_with_interval(
+        control_url,
+        token,
+        node,
+        std::time::Duration::from_secs(interval_secs),
+        HEARTBEAT_FAILURE_LIMIT,
+    )
+    .await
+}
+
+async fn run_heartbeat_with_interval(
+    control_url: String,
+    token: Option<String>,
+    node: Arc<NodeIdentity>,
+    interval: std::time::Duration,
+    failure_limit: u32,
+) -> crate::Result<()> {
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/v1/heartbeat", control_url);
+    let mut consecutive_failures = 0u32;
+
+    loop {
+        let payload = serde_json::json!({
+            "node_id": node.node_id,
+            "hostname": node.hostname,
+            "region": node.region,
+            "tags": node.tags,
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+        });
+
+        let mut req = client.post(&url).json(&payload);
+        if let Some(ref t) = token {
+            req = req.header("Authorization", format!("Bearer {}", t));
+        }
+
+        match req.send().await {
+            Ok(resp) if resp.status().is_success() => {
+                consecutive_failures = 0;
+                tracing::debug!("Heartbeat sent to control plane");
+            }
+            Ok(resp) => {
+                consecutive_failures += 1;
+                let message = format!(
+                    "Control plane heartbeat rejected ({}/{}): {}",
+                    consecutive_failures,
+                    failure_limit,
+                    resp.status()
+                );
+                tracing::warn!("{}", message);
+                if consecutive_failures >= failure_limit {
+                    return Err(crate::Error::Other(format!(
+                        "Control plane heartbeat failed {} consecutive times: {}",
+                        failure_limit,
+                        resp.status()
+                    )));
+                }
+            }
+            Err(e) => {
+                consecutive_failures += 1;
+                let message = format!(
+                    "Control plane heartbeat failed ({}/{}): {}",
+                    consecutive_failures, failure_limit, e
+                );
+                tracing::warn!("{}", message);
+                if consecutive_failures >= failure_limit {
+                    return Err(crate::Error::Other(format!(
+                        "Control plane heartbeat failed {} consecutive times: {}",
+                        failure_limit, e
+                    )));
+                }
+            }
+        }
+
+        tokio::time::sleep(interval).await;
+    }
 }
 
 #[cfg(test)]
@@ -2009,95 +2105,5 @@ mod tests {
 
         server.abort();
         let _ = server.await;
-    }
-}
-
-// ─── Heartbeat ───────────────────────────────────────────────────────────────
-
-/// Periodically sends heartbeat to control plane
-pub async fn run_heartbeat(
-    control_url: String,
-    token: Option<String>,
-    node: Arc<NodeIdentity>,
-    interval_secs: u64,
-) -> crate::Result<()> {
-    if interval_secs == 0 {
-        return Ok(());
-    }
-
-    run_heartbeat_with_interval(
-        control_url,
-        token,
-        node,
-        std::time::Duration::from_secs(interval_secs),
-        HEARTBEAT_FAILURE_LIMIT,
-    )
-    .await
-}
-
-async fn run_heartbeat_with_interval(
-    control_url: String,
-    token: Option<String>,
-    node: Arc<NodeIdentity>,
-    interval: std::time::Duration,
-    failure_limit: u32,
-) -> crate::Result<()> {
-    let client = reqwest::Client::new();
-    let url = format!("{}/api/v1/heartbeat", control_url);
-    let mut consecutive_failures = 0u32;
-
-    loop {
-        let payload = serde_json::json!({
-            "node_id": node.node_id,
-            "hostname": node.hostname,
-            "region": node.region,
-            "tags": node.tags,
-            "timestamp": chrono::Utc::now().to_rfc3339(),
-        });
-
-        let mut req = client.post(&url).json(&payload);
-        if let Some(ref t) = token {
-            req = req.header("Authorization", format!("Bearer {}", t));
-        }
-
-        match req.send().await {
-            Ok(resp) if resp.status().is_success() => {
-                consecutive_failures = 0;
-                tracing::debug!("Heartbeat sent to control plane");
-            }
-            Ok(resp) => {
-                consecutive_failures += 1;
-                let message = format!(
-                    "Control plane heartbeat rejected ({}/{}): {}",
-                    consecutive_failures,
-                    failure_limit,
-                    resp.status()
-                );
-                tracing::warn!("{}", message);
-                if consecutive_failures >= failure_limit {
-                    return Err(crate::Error::Other(format!(
-                        "Control plane heartbeat failed {} consecutive times: {}",
-                        failure_limit,
-                        resp.status()
-                    )));
-                }
-            }
-            Err(e) => {
-                consecutive_failures += 1;
-                let message = format!(
-                    "Control plane heartbeat failed ({}/{}): {}",
-                    consecutive_failures, failure_limit, e
-                );
-                tracing::warn!("{}", message);
-                if consecutive_failures >= failure_limit {
-                    return Err(crate::Error::Other(format!(
-                        "Control plane heartbeat failed {} consecutive times: {}",
-                        failure_limit, e
-                    )));
-                }
-            }
-        }
-
-        tokio::time::sleep(interval).await;
     }
 }

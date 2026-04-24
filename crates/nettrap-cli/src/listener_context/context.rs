@@ -8,7 +8,9 @@ use std::sync::Arc;
 
 use crate::custom_response::CustomResponseConfig;
 use crate::listener_config::ListenerConfig;
-use crate::listener_runtime::{ConnectionDedup, ListenerRuntime, ListenerSecurity};
+use crate::listener_runtime::{
+    ConnectionDedup, ListenerRuntime, ListenerRuntimeResources, ListenerSecurity,
+};
 use crate::nbi::NbiCollector;
 use crate::process_filter::ProcessFilter;
 use crate::session::{PortForwardTable, SessionDestination, SessionTracker};
@@ -234,17 +236,15 @@ impl ListenerContext {
         protocol: &str,
         destination: &SessionDestination,
     ) {
-        if let Some((process_name, process_pid)) =
+        if let Some((Some(process_name), process_pid)) =
             self.runtime
                 .session_tracker
                 .get_process(src, protocol, destination)
         {
-            if let Some(process_name) = process_name {
-                flow.metadata.process = Some(nettrap_core::prelude::ProcessInfo::new(
-                    process_pid.unwrap_or_default(),
-                    process_name,
-                ));
-            }
+            flow.metadata.process = Some(nettrap_core::prelude::ProcessInfo::new(
+                process_pid.unwrap_or_default(),
+                process_name,
+            ));
         }
     }
 
@@ -392,7 +392,7 @@ impl ListenerContext {
 
         let security = ListenerSecurity::new(process_filter, host_whitelist, host_blacklist)?;
 
-        let runtime = ListenerRuntime::new(
+        let runtime = ListenerRuntime::new(ListenerRuntimeResources {
             ca,
             router,
             attribution,
@@ -401,7 +401,7 @@ impl ListenerContext {
             session_tracker,
             port_forward_table,
             flow_manager,
-        );
+        });
 
         Ok(Self {
             config: config.clone(),
@@ -482,16 +482,16 @@ impl ListenerContext {
             self.session_process_for_destination(peer, protocol, destination);
 
         if let Some(ref cmd) = self.config.execute_cmd {
-            crate::execute::execute_on_connect(
-                cmd,
-                process_pid,
-                process_name.as_deref(),
-                &peer.ip().to_string(),
-                peer.port(),
-                &destination.ip,
-                destination.port,
-                &self.config.name,
-            );
+            crate::execute::execute_on_connect(crate::execute::ExecuteOnConnect {
+                template: cmd,
+                pid: process_pid,
+                procname: process_name.as_deref(),
+                src_addr: &peer.ip().to_string(),
+                src_port: peer.port(),
+                dst_addr: &destination.ip,
+                dst_port: destination.port,
+                listener: &self.config.name,
+            });
         }
     }
 
@@ -504,16 +504,16 @@ impl ListenerContext {
             self.session_process_for_destination_any(peer, destination);
 
         if let Some(ref cmd) = self.config.execute_cmd {
-            crate::execute::execute_on_connect(
-                cmd,
-                process_pid,
-                process_name.as_deref(),
-                &peer.ip().to_string(),
-                peer.port(),
-                &destination.ip,
-                destination.port,
-                &self.config.name,
-            );
+            crate::execute::execute_on_connect(crate::execute::ExecuteOnConnect {
+                template: cmd,
+                pid: process_pid,
+                procname: process_name.as_deref(),
+                src_addr: &peer.ip().to_string(),
+                src_port: peer.port(),
+                dst_addr: &destination.ip,
+                dst_port: destination.port,
+                listener: &self.config.name,
+            });
         }
     }
 
@@ -837,7 +837,7 @@ impl ListenerContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::listener_runtime::{ListenerRuntime, ListenerSecurity};
+    use crate::listener_runtime::{ListenerRuntime, ListenerRuntimeResources, ListenerSecurity};
     use crate::process_filter::ProcessFilter;
     use crate::session::{PortForwardTable, SessionTracker};
 
@@ -848,16 +848,16 @@ mod tests {
         let ctx = ListenerContext::builder().name("raw").port(9000).build(
             ListenerSecurity::new(ProcessFilter::default(), Vec::new(), Vec::new())
                 .expect("empty host rules should compile"),
-            ListenerRuntime::new(
-                None,
-                Arc::new(nettrap_proxy::ProtocolRouter::new()),
-                None,
-                None,
-                Arc::new(crate::nbi::NbiCollector::new(None)),
-                Arc::clone(&tracker),
-                Arc::clone(&port_forward_table),
-                Arc::new(nettrap_flow::FlowManager::default()),
-            ),
+            ListenerRuntime::new(ListenerRuntimeResources {
+                ca: None,
+                router: Arc::new(nettrap_proxy::ProtocolRouter::new()),
+                attribution: None,
+                pcap_writer: None,
+                nbi_collector: Arc::new(crate::nbi::NbiCollector::new(None)),
+                session_tracker: Arc::clone(&tracker),
+                port_forward_table: Arc::clone(&port_forward_table),
+                flow_manager: Arc::new(nettrap_flow::FlowManager::default()),
+            }),
         );
         let src: std::net::SocketAddr = "127.0.0.1:53000".parse().unwrap();
         let original_dst: std::net::SocketAddr = "10.0.0.7:4444".parse().unwrap();
@@ -884,16 +884,16 @@ mod tests {
         let ctx = ListenerContext::builder().name("raw").port(9000).build(
             ListenerSecurity::new(ProcessFilter::default(), Vec::new(), Vec::new())
                 .expect("empty host rules should compile"),
-            ListenerRuntime::new(
-                None,
-                Arc::new(nettrap_proxy::ProtocolRouter::new()),
-                None,
-                None,
-                Arc::new(crate::nbi::NbiCollector::new(None)),
-                Arc::clone(&tracker),
-                Arc::clone(&port_forward_table),
-                Arc::new(nettrap_flow::FlowManager::default()),
-            ),
+            ListenerRuntime::new(ListenerRuntimeResources {
+                ca: None,
+                router: Arc::new(nettrap_proxy::ProtocolRouter::new()),
+                attribution: None,
+                pcap_writer: None,
+                nbi_collector: Arc::new(crate::nbi::NbiCollector::new(None)),
+                session_tracker: Arc::clone(&tracker),
+                port_forward_table: Arc::clone(&port_forward_table),
+                flow_manager: Arc::new(nettrap_flow::FlowManager::default()),
+            }),
         );
         let src: std::net::SocketAddr = "127.0.0.1:53000".parse().unwrap();
         let fallback = SessionDestination::new("192.168.1.50", 9000);
@@ -914,16 +914,16 @@ mod tests {
         let ctx = ListenerContext::builder().name("dns").port(53).build(
             ListenerSecurity::new(ProcessFilter::default(), Vec::new(), Vec::new())
                 .expect("empty host rules should compile"),
-            ListenerRuntime::new(
-                None,
-                Arc::new(nettrap_proxy::ProtocolRouter::new()),
-                None,
-                None,
-                Arc::new(crate::nbi::NbiCollector::new(None)),
-                Arc::clone(&tracker),
-                Arc::clone(&port_forward_table),
-                Arc::new(nettrap_flow::FlowManager::default()),
-            ),
+            ListenerRuntime::new(ListenerRuntimeResources {
+                ca: None,
+                router: Arc::new(nettrap_proxy::ProtocolRouter::new()),
+                attribution: None,
+                pcap_writer: None,
+                nbi_collector: Arc::new(crate::nbi::NbiCollector::new(None)),
+                session_tracker: Arc::clone(&tracker),
+                port_forward_table: Arc::clone(&port_forward_table),
+                flow_manager: Arc::new(nettrap_flow::FlowManager::default()),
+            }),
         );
         let src: std::net::SocketAddr = "127.0.0.1:53000".parse().unwrap();
         let destination = SessionDestination::new("10.0.0.7", 53);
@@ -946,16 +946,16 @@ mod tests {
         let ctx = ListenerContext::builder().name("http").port(8080).build(
             ListenerSecurity::new(ProcessFilter::default(), Vec::new(), Vec::new())
                 .expect("empty host rules should compile"),
-            ListenerRuntime::new(
-                None,
-                Arc::new(nettrap_proxy::ProtocolRouter::new()),
-                None,
-                None,
-                Arc::new(crate::nbi::NbiCollector::new(None)),
-                Arc::clone(&tracker),
-                Arc::clone(&port_forward_table),
-                Arc::new(nettrap_flow::FlowManager::default()),
-            ),
+            ListenerRuntime::new(ListenerRuntimeResources {
+                ca: None,
+                router: Arc::new(nettrap_proxy::ProtocolRouter::new()),
+                attribution: None,
+                pcap_writer: None,
+                nbi_collector: Arc::new(crate::nbi::NbiCollector::new(None)),
+                session_tracker: Arc::clone(&tracker),
+                port_forward_table: Arc::clone(&port_forward_table),
+                flow_manager: Arc::new(nettrap_flow::FlowManager::default()),
+            }),
         );
         let src: std::net::SocketAddr = "127.0.0.1:53000".parse().unwrap();
         let tracked = SessionDestination::new("10.0.0.7", 8080);
@@ -979,16 +979,16 @@ mod tests {
             .build(
                 ListenerSecurity::new(ProcessFilter::default(), Vec::new(), Vec::new())
                     .expect("empty host rules should compile"),
-                ListenerRuntime::new(
-                    None,
-                    Arc::new(nettrap_proxy::ProtocolRouter::new()),
-                    None,
-                    None,
-                    Arc::new(crate::nbi::NbiCollector::new(None)),
-                    Arc::clone(&tracker),
-                    Arc::clone(&port_forward_table),
-                    Arc::new(nettrap_flow::FlowManager::default()),
-                ),
+                ListenerRuntime::new(ListenerRuntimeResources {
+                    ca: None,
+                    router: Arc::new(nettrap_proxy::ProtocolRouter::new()),
+                    attribution: None,
+                    pcap_writer: None,
+                    nbi_collector: Arc::new(crate::nbi::NbiCollector::new(None)),
+                    session_tracker: Arc::clone(&tracker),
+                    port_forward_table: Arc::clone(&port_forward_table),
+                    flow_manager: Arc::new(nettrap_flow::FlowManager::default()),
+                }),
             );
         let src: std::net::SocketAddr = "127.0.0.1:53000".parse().unwrap();
         let destination = SessionDestination::new("10.0.0.7", 8080);
@@ -1016,16 +1016,16 @@ mod tests {
         let ctx = ListenerContext::builder().name("http").port(8080).build(
             ListenerSecurity::new(ProcessFilter::default(), Vec::new(), Vec::new())
                 .expect("empty host rules should compile"),
-            ListenerRuntime::new(
-                None,
-                Arc::new(nettrap_proxy::ProtocolRouter::new()),
-                None,
-                None,
-                Arc::new(crate::nbi::NbiCollector::new(None)),
-                Arc::clone(&tracker),
-                Arc::clone(&port_forward_table),
-                Arc::clone(&flow_manager),
-            ),
+            ListenerRuntime::new(ListenerRuntimeResources {
+                ca: None,
+                router: Arc::new(nettrap_proxy::ProtocolRouter::new()),
+                attribution: None,
+                pcap_writer: None,
+                nbi_collector: Arc::new(crate::nbi::NbiCollector::new(None)),
+                session_tracker: Arc::clone(&tracker),
+                port_forward_table: Arc::clone(&port_forward_table),
+                flow_manager: Arc::clone(&flow_manager),
+            }),
         );
         let src: std::net::SocketAddr = "127.0.0.1:53000".parse().unwrap();
         let destination = SessionDestination::new("10.0.0.7", 8080);

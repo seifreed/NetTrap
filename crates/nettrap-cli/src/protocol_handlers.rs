@@ -52,35 +52,45 @@ pub fn has_simple_handler(name: &str) -> bool {
     crate::handler_registry::has_simple_tcp_handler(name)
 }
 
+pub struct UdpGenericResponse<'a> {
+    pub response: &'a [u8],
+    pub src: std::net::SocketAddr,
+    pub destination: &'a SessionDestination,
+    pub len: usize,
+    pub output_path: Option<&'a std::path::Path>,
+    pub protocol_name: &'a str,
+}
+
 pub async fn handle_udp_generic(
     ctx: &ListenerContext,
     socket: &tokio::net::UdpSocket,
-    response: &[u8],
-    src: std::net::SocketAddr,
-    destination: &SessionDestination,
-    len: usize,
-    output_path: Option<&std::path::Path>,
-    protocol_name: &str,
+    packet: UdpGenericResponse<'_>,
 ) {
     ctx.apply_response_delay().await;
-    ctx.write_pcap_response_udp_for_destination(response, &src, destination);
-    let _ = socket.send_to(response, src).await;
-    ctx.update_session_bytes(&src, "UDP", destination, len as u64, response.len() as u64);
+    ctx.write_pcap_response_udp_for_destination(packet.response, &packet.src, packet.destination);
+    let _ = socket.send_to(packet.response, packet.src).await;
+    ctx.update_session_bytes(
+        &packet.src,
+        "UDP",
+        packet.destination,
+        packet.len as u64,
+        packet.response.len() as u64,
+    );
     log_event(
-        output_path,
+        packet.output_path,
         ctx.name(),
-        &src,
-        &format!("{}_request", protocol_name),
-        &format!("{} bytes", len),
+        &packet.src,
+        &format!("{}_request", packet.protocol_name),
+        &format!("{} bytes", packet.len),
     )
     .await;
     let nbi = crate::nbi::raw_nbi(
         ctx.name(),
-        &src.ip().to_string(),
-        src.port(),
-        destination,
-        len,
-        protocol_name,
+        &packet.src.ip().to_string(),
+        packet.src.port(),
+        packet.destination,
+        packet.len,
+        packet.protocol_name,
     );
     ctx.record_nbi(&nbi).await;
 }

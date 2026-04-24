@@ -35,18 +35,13 @@ pub struct AttributionResult {
     pub executable_path: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum AttributionConfidence {
+    #[default]
     None,
     Low,
     Medium,
     High,
-}
-
-impl Default for AttributionConfidence {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════

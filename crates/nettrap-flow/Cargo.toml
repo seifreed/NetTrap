@@ -17,6 +17,3 @@ chrono.workspace = true
 parking_lot.workspace = true
 dashmap.workspace = true
 hashbrown.workspace = true
-tracing.workspace = true
-tokio.workspace = true
-async-trait.workspace = true

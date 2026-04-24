@@ -109,11 +109,14 @@ fn export_nbi_formats(
             return;
         }
 
-        let format = crate::output::OutputFormat::from_str(&config.output_format);
+        let format = config
+            .output_format
+            .parse::<crate::output::OutputFormat>()
+            .unwrap_or(crate::output::OutputFormat::Jsonl);
 
         if format != crate::output::OutputFormat::Jsonl {
             let export_path = base_path.with_extension(format.extension());
-            match crate::output::export_nbis(&events, format, &export_path) {
+            match crate::output::export_nbis(events, format, &export_path) {
                 Ok(()) => tracing::info!(
                     "NBI exported as {}: {}",
                     config.output_format,
@@ -126,7 +129,7 @@ fn export_nbi_formats(
         if format != crate::output::OutputFormat::Sarif {
             let sarif_path = base_path.with_extension("sarif.json");
             match crate::output::export_nbis(
-                &events,
+                events,
                 crate::output::OutputFormat::Sarif,
                 &sarif_path,
             ) {
@@ -137,7 +140,7 @@ fn export_nbi_formats(
 
         if format != crate::output::OutputFormat::Csv {
             let csv_path = base_path.with_extension("csv");
-            match crate::output::export_nbis(&events, crate::output::OutputFormat::Csv, &csv_path) {
+            match crate::output::export_nbis(events, crate::output::OutputFormat::Csv, &csv_path) {
                 Ok(()) => tracing::info!("CSV report: {}", csv_path.display()),
                 Err(e) => tracing::warn!("Failed to generate CSV: {}", e),
             }
@@ -207,9 +210,7 @@ async fn resolve_shutdown_events(
 
     if jsonl_events.is_empty() {
         db_events
-    } else if db_events.is_empty() {
-        jsonl_events
-    } else if events_match(&jsonl_events, &db_events) {
+    } else if db_events.is_empty() || events_match(&jsonl_events, &db_events) {
         jsonl_events
     } else if jsonl_event_ids == db_event_ids {
         if jsonl_payloads == db_payloads {

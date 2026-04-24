@@ -15,9 +15,10 @@ pub const OPT_WINDOW_SIZE: u8 = 31;
 pub const OPT_LINEMODE: u8 = 34;
 
 /// Telnet session state
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum TelnetState {
     /// Waiting for username input
+    #[default]
     WaitingUsername,
     /// Waiting for password input
     WaitingPassword,
@@ -25,12 +26,6 @@ pub enum TelnetState {
     Shell,
     /// Session disconnected
     Disconnected,
-}
-
-impl Default for TelnetState {
-    fn default() -> Self {
-        Self::WaitingUsername
-    }
 }
 
 /// Parsed telnet data, stripping out IAC sequences

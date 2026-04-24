@@ -11,6 +11,12 @@ struct UdpForwardKey {
     target_port: u16,
 }
 
+type UdpForwardTable = Arc<
+    parking_lot::RwLock<
+        std::collections::HashMap<UdpForwardKey, (Arc<UdpSocket>, std::time::Instant)>,
+    >,
+>;
+
 impl UdpForwardKey {
     fn new(src: std::net::SocketAddr, protocol_name: impl Into<String>, target_port: u16) -> Self {
         Self {
@@ -99,11 +105,8 @@ impl ProxyListener {
 
         let mut buf = vec![0u8; 65535];
         // Track UDP forwarding sockets per source and detected destination.
-        let forward_table: Arc<
-            parking_lot::RwLock<
-                std::collections::HashMap<UdpForwardKey, (Arc<UdpSocket>, std::time::Instant)>,
-            >,
-        > = Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new()));
+        let forward_table: UdpForwardTable =
+            Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new()));
 
         // Spawn periodic cleanup of stale UDP sessions (every 60s, expire after 120s)
         {
@@ -206,40 +209,6 @@ impl ProxyListener {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn udp_forward_key_distinguishes_protocol_for_same_source() {
-        let src = "127.0.0.1:53000".parse().expect("valid socket address");
-        let dns = UdpForwardKey::new(src, "dns", 53);
-        let snmp = UdpForwardKey::new(src, "snmp", 161);
-
-        assert_ne!(dns, snmp);
-    }
-
-    #[test]
-    fn udp_forward_key_distinguishes_target_port_for_same_source_and_protocol() {
-        let src = "127.0.0.1:53000".parse().expect("valid socket address");
-        let first = UdpForwardKey::new(src, "dns", 53);
-        let second = UdpForwardKey::new(src, "dns", 5353);
-
-        assert_ne!(first, second);
-    }
-
-    #[test]
-    fn resolve_listener_port_errors_when_handler_has_no_port_mapping() {
-        let peer = "127.0.0.1:53000".parse().expect("valid socket address");
-        let listener_ports = std::collections::HashMap::new();
-
-        let err = resolve_listener_port(&listener_ports, "http", peer, "TCP")
-            .expect_err("missing mapping should fail");
-
-        assert!(err.to_string().contains("http"));
-    }
-}
-
 /// Handle a single proxied TCP connection with full-duplex forwarding
 async fn handle_proxy_connection(
     client: TcpStream,
@@ -321,4 +290,38 @@ async fn handle_proxy_connection(
     let _ = tokio::join!(client_to_server, server_to_client);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn udp_forward_key_distinguishes_protocol_for_same_source() {
+        let src = "127.0.0.1:53000".parse().expect("valid socket address");
+        let dns = UdpForwardKey::new(src, "dns", 53);
+        let snmp = UdpForwardKey::new(src, "snmp", 161);
+
+        assert_ne!(dns, snmp);
+    }
+
+    #[test]
+    fn udp_forward_key_distinguishes_target_port_for_same_source_and_protocol() {
+        let src = "127.0.0.1:53000".parse().expect("valid socket address");
+        let first = UdpForwardKey::new(src, "dns", 53);
+        let second = UdpForwardKey::new(src, "dns", 5353);
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn resolve_listener_port_errors_when_handler_has_no_port_mapping() {
+        let peer = "127.0.0.1:53000".parse().expect("valid socket address");
+        let listener_ports = std::collections::HashMap::new();
+
+        let err = resolve_listener_port(&listener_ports, "http", peer, "TCP")
+            .expect_err("missing mapping should fail");
+
+        assert!(err.to_string().contains("http"));
+    }
 }

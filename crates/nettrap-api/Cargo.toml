@@ -10,12 +10,11 @@ license.workspace = true
 [dependencies]
 nettrap-core.workspace = true
 nettrap-flow.workspace = true
-nettrap-events.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 parking_lot.workspace = true
 tokio.workspace = true
-axum = "0.8"
+axum = "0.8.9"
 tower = "0.5"
 tracing.workspace = true

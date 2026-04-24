@@ -19,9 +19,7 @@ parking_lot.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
-rusqlite = { workspace = true, optional = true }
 
 [features]
 default = ["jsonl"]
 jsonl = []
-sqlite = ["dep:rusqlite"]

@@ -9,16 +9,12 @@ license.workspace = true
 
 [dependencies]
 nettrap-core.workspace = true
-nettrap-flow.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 chrono.workspace = true
 parking_lot.workspace = true
 dashmap.workspace = true
 hashbrown.workspace = true
-tracing.workspace = true
-tokio.workspace = true
-async-trait.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 procfs = "0.18"

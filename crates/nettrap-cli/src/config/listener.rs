@@ -332,7 +332,7 @@ impl ListenerConfig {
     /// Matches the process basename (after last path separator) case-insensitively.
     pub fn is_process_allowed(&self, process_name: &str) -> bool {
         let basename = process_name
-            .rsplit(|c| c == '/' || c == '\\')
+            .rsplit(['/', '\\'])
             .next()
             .unwrap_or(process_name)
             .to_lowercase();

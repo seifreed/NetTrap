@@ -23,18 +23,13 @@ pub const CONNACK_BAD_AUTH: u8 = 4;
 pub const CONNACK_NOT_AUTHORIZED: u8 = 5;
 
 /// MQTT session state
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum MqttState {
     /// Waiting for CONNECT packet
+    #[default]
     WaitingConnect,
     /// Connected and ready for publish/subscribe
     Connected,
     /// Disconnected
     Disconnected,
-}
-
-impl Default for MqttState {
-    fn default() -> Self {
-        Self::WaitingConnect
-    }
 }

@@ -118,7 +118,7 @@ impl SmbHandler {
     }
 
     /// Encode NetBIOS session header length (3 bytes: bits 16-0)
-    fn set_netbios_length(resp: &mut Vec<u8>, payload_len: u32) {
+    fn set_netbios_length(resp: &mut [u8], payload_len: u32) {
         resp[1] = ((payload_len >> 16) & 0x01) as u8; // bit 16 (max 131071 bytes)
         resp[2] = ((payload_len >> 8) & 0xFF) as u8;
         resp[3] = (payload_len & 0xFF) as u8;

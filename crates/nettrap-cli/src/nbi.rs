@@ -36,13 +36,13 @@ const NBI_EXPORT_OPERATION_TIMEOUT_MS: u64 = 5000;
 const NBI_EXPORT_OPERATION_TIMEOUT_MS: u64 = 100;
 
 enum LocalWorkerCommand {
-    Record(NetworkBehaviorIndicator),
+    Record(Box<NetworkBehaviorIndicator>),
     Flush(tokio::sync::oneshot::Sender<()>),
 }
 
 enum ExportWorkerCommand {
     Record(
-        NetworkBehaviorIndicator,
+        Box<NetworkBehaviorIndicator>,
         Arc<crate::distributed::EventFanout>,
     ),
     Flush(
@@ -50,6 +50,64 @@ enum ExportWorkerCommand {
         tokio::sync::oneshot::Sender<Result<(), String>>,
     ),
     Shutdown(tokio::sync::oneshot::Sender<()>),
+}
+
+#[derive(Clone)]
+struct WorkerHealthRefs {
+    runtime_health: Arc<parking_lot::RwLock<Option<Arc<nettrap_api::RuntimeHealth>>>>,
+    local_dropped: Arc<AtomicU64>,
+    export_dropped: Arc<AtomicU64>,
+    export_rejected: Arc<AtomicU64>,
+    export_unknown: Arc<AtomicU64>,
+    local_persist_failures: Arc<AtomicU64>,
+    worker_restarts: Arc<AtomicU64>,
+    last_worker_error: Arc<parking_lot::RwLock<Option<String>>>,
+    last_local_persist_error: Arc<parking_lot::RwLock<Option<String>>>,
+}
+
+impl WorkerHealthRefs {
+    fn snapshot(&self) -> nettrap_api::NbiCollectorHealth {
+        nettrap_api::NbiCollectorHealth {
+            local_dropped: self.local_dropped.load(Ordering::Acquire),
+            export_dropped: self.export_dropped.load(Ordering::Acquire),
+            export_rejected: self.export_rejected.load(Ordering::Acquire),
+            export_unknown: self.export_unknown.load(Ordering::Acquire),
+            local_persist_failures: self.local_persist_failures.load(Ordering::Acquire),
+            worker_restarts: self.worker_restarts.load(Ordering::Acquire),
+            last_worker_error: self.last_worker_error.read().clone(),
+            last_local_persist_error: self.last_local_persist_error.read().clone(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct WorkerSlotRefs {
+    handle: Arc<parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    queued: Arc<AtomicUsize>,
+    dropped: Arc<AtomicU64>,
+}
+
+#[derive(Clone)]
+struct WorkerSupervisorContext {
+    health: WorkerHealthRefs,
+    fanout: Arc<parking_lot::RwLock<Option<Arc<crate::distributed::EventFanout>>>>,
+    retired_fanouts: Arc<parking_lot::RwLock<Vec<Arc<crate::distributed::EventFanout>>>>,
+    local: WorkerSlotRefs,
+    export: WorkerSlotRefs,
+}
+
+struct LocalWorkerContext {
+    path: Option<PathBuf>,
+    database: Arc<parking_lot::RwLock<Option<Arc<crate::database::DatabaseBackend>>>>,
+    health: WorkerHealthRefs,
+    queued_events: Arc<AtomicUsize>,
+}
+
+struct ExportWorkerContext {
+    active_fanout: Arc<parking_lot::RwLock<Option<Arc<crate::distributed::EventFanout>>>>,
+    retired_fanouts: Arc<parking_lot::RwLock<Vec<Arc<crate::distributed::EventFanout>>>>,
+    health: WorkerHealthRefs,
+    queued_events: Arc<AtomicUsize>,
 }
 
 struct LocalPersistOutcome {
@@ -113,6 +171,14 @@ impl<C> WorkerSlot<C> {
 
     fn sender(&self) -> tokio::sync::mpsc::Sender<C> {
         self.tx.read().clone()
+    }
+
+    fn refs(&self) -> WorkerSlotRefs {
+        WorkerSlotRefs {
+            handle: Arc::clone(&self.handle),
+            queued: Arc::clone(&self.queued),
+            dropped: Arc::clone(&self.dropped),
+        }
     }
 
     fn ensure_receiver(&self, capacity: usize) -> Option<tokio::sync::mpsc::Receiver<C>> {
@@ -245,24 +311,32 @@ pub fn dns_nbi(
 }
 
 /// Build NBI for HTTP request
-pub fn http_nbi(
-    listener: &str,
-    src_ip: &str,
-    src_port: u16,
-    destination: &SessionDestination,
-    method: &str,
-    uri: &str,
-    host: &str,
-    user_agent: &str,
-    body_len: usize,
-) -> NetworkBehaviorIndicator {
-    let mut nbi = NetworkBehaviorIndicator::new(listener, "HTTP", src_ip, src_port, destination);
-    nbi.add("method", method);
-    nbi.add("uri", uri);
-    nbi.add("host", host);
-    nbi.add("user_agent", user_agent);
-    if body_len > 0 {
-        nbi.add("body_length", body_len.to_string());
+pub struct HttpNbiInput<'a> {
+    pub listener: &'a str,
+    pub src_ip: &'a str,
+    pub src_port: u16,
+    pub destination: &'a SessionDestination,
+    pub method: &'a str,
+    pub uri: &'a str,
+    pub host: &'a str,
+    pub user_agent: &'a str,
+    pub body_len: usize,
+}
+
+pub fn http_nbi(input: HttpNbiInput<'_>) -> NetworkBehaviorIndicator {
+    let mut nbi = NetworkBehaviorIndicator::new(
+        input.listener,
+        "HTTP",
+        input.src_ip,
+        input.src_port,
+        input.destination,
+    );
+    nbi.add("method", input.method);
+    nbi.add("uri", input.uri);
+    nbi.add("host", input.host);
+    nbi.add("user_agent", input.user_agent);
+    if input.body_len > 0 {
+        nbi.add("body_length", input.body_len.to_string());
     }
     nbi
 }
@@ -558,15 +632,7 @@ impl NbiCollector {
                             "export worker stopped while retiring sinkless fanout",
                         );
                         Self::note_export_delivery_unknown_shared(
-                            &self.runtime_health,
-                            &self.local_worker.dropped,
-                            &self.export_worker.dropped,
-                            &self.export_rejected,
-                            &self.export_unknown,
-                            &self.local_persist_failures,
-                            &self.worker_restarts,
-                            &self.last_worker_error,
-                            &self.last_local_persist_error,
+                            &self.worker_health_refs(),
                             worker_loss.unknown,
                             "export worker stopped while retiring sinkless fanout",
                         );
@@ -580,15 +646,7 @@ impl NbiCollector {
                         "export worker stopped while detaching sinkless fanout",
                     );
                     Self::note_export_delivery_unknown_shared(
-                        &self.runtime_health,
-                        &self.local_worker.dropped,
-                        &self.export_worker.dropped,
-                        &self.export_rejected,
-                        &self.export_unknown,
-                        &self.local_persist_failures,
-                        &self.worker_restarts,
-                        &self.last_worker_error,
-                        &self.last_local_persist_error,
+                        &self.worker_health_refs(),
                         worker_loss.unknown,
                         "export worker stopped while detaching sinkless fanout",
                     );
@@ -611,15 +669,7 @@ impl NbiCollector {
                     "export worker stopped while detaching sinkless fanout",
                 );
                 Self::note_export_delivery_unknown_shared(
-                    &self.runtime_health,
-                    &self.local_worker.dropped,
-                    &self.export_worker.dropped,
-                    &self.export_rejected,
-                    &self.export_unknown,
-                    &self.local_persist_failures,
-                    &self.worker_restarts,
-                    &self.last_worker_error,
-                    &self.last_local_persist_error,
+                    &self.worker_health_refs(),
                     worker_loss.unknown,
                     "export worker stopped while detaching sinkless fanout",
                 );
@@ -851,15 +901,7 @@ impl NbiCollector {
         reason: impl Into<String>,
     ) {
         Self::record_worker_exit_shared(
-            &self.runtime_health,
-            &self.local_worker.dropped,
-            &self.export_worker.dropped,
-            &self.export_rejected,
-            &self.export_unknown,
-            &self.local_persist_failures,
-            &self.worker_restarts,
-            &self.last_worker_error,
-            &self.last_local_persist_error,
+            &self.worker_health_refs(),
             worker_name,
             queued,
             dropped,
@@ -916,8 +958,6 @@ impl NbiCollector {
         if let Some(runtime_health) = self.runtime_health.read().clone() {
             if interruption.dropped > 0 {
                 runtime_health.set_distributed_export_loss(reason);
-            } else if interruption.unknown > 0 {
-                runtime_health.set_distributed_export_degraded(reason);
             } else {
                 runtime_health.set_distributed_export_degraded(reason);
             }
@@ -929,47 +969,19 @@ impl NbiCollector {
         );
     }
 
-    fn note_export_delivery_loss_shared(
-        runtime_health_ref: &Arc<parking_lot::RwLock<Option<Arc<nettrap_api::RuntimeHealth>>>>,
-        local_dropped: &Arc<AtomicU64>,
-        export_dropped: &Arc<AtomicU64>,
-        export_rejected: &Arc<AtomicU64>,
-        export_unknown: &Arc<AtomicU64>,
-        local_persist_failures: &Arc<AtomicU64>,
-        worker_restarts: &Arc<AtomicU64>,
-        last_worker_error: &Arc<parking_lot::RwLock<Option<String>>>,
-        last_local_persist_error: &Arc<parking_lot::RwLock<Option<String>>>,
-        reason: impl Into<String>,
-    ) {
+    fn note_export_delivery_loss_shared(health: &WorkerHealthRefs, reason: impl Into<String>) {
         let reason = format!("distributed export lost accepted event: {}", reason.into());
-        export_dropped.fetch_add(1, Ordering::Relaxed);
-        *last_worker_error.write() = Some(reason.clone());
-        if let Some(runtime_health) = runtime_health_ref.read().clone() {
-            runtime_health.update_nbi_collector(Self::build_health_snapshot(
-                local_dropped,
-                export_dropped,
-                export_rejected,
-                export_unknown,
-                local_persist_failures,
-                worker_restarts,
-                last_worker_error,
-                last_local_persist_error,
-            ));
+        health.export_dropped.fetch_add(1, Ordering::Relaxed);
+        *health.last_worker_error.write() = Some(reason.clone());
+        if let Some(runtime_health) = health.runtime_health.read().clone() {
+            runtime_health.update_nbi_collector(health.snapshot());
             runtime_health.set_distributed_export_loss(reason.clone());
         }
         tracing::warn!("{}", reason);
     }
 
     fn note_export_delivery_unknown_shared(
-        runtime_health_ref: &Arc<parking_lot::RwLock<Option<Arc<nettrap_api::RuntimeHealth>>>>,
-        local_dropped: &Arc<AtomicU64>,
-        export_dropped: &Arc<AtomicU64>,
-        export_rejected: &Arc<AtomicU64>,
-        export_unknown: &Arc<AtomicU64>,
-        local_persist_failures: &Arc<AtomicU64>,
-        worker_restarts: &Arc<AtomicU64>,
-        last_worker_error: &Arc<parking_lot::RwLock<Option<String>>>,
-        last_local_persist_error: &Arc<parking_lot::RwLock<Option<String>>>,
+        health: &WorkerHealthRefs,
         count: u64,
         reason: impl Into<String>,
     ) {
@@ -982,58 +994,31 @@ impl NbiCollector {
             count,
             reason.into()
         );
-        export_unknown.fetch_add(count, Ordering::Relaxed);
-        *last_worker_error.write() = Some(reason.clone());
-        if let Some(runtime_health) = runtime_health_ref.read().clone() {
-            runtime_health.update_nbi_collector(Self::build_health_snapshot(
-                local_dropped,
-                export_dropped,
-                export_rejected,
-                export_unknown,
-                local_persist_failures,
-                worker_restarts,
-                last_worker_error,
-                last_local_persist_error,
-            ));
+        health.export_unknown.fetch_add(count, Ordering::Relaxed);
+        *health.last_worker_error.write() = Some(reason.clone());
+        if let Some(runtime_health) = health.runtime_health.read().clone() {
+            runtime_health.update_nbi_collector(health.snapshot());
             runtime_health.set_distributed_export_degraded(reason.clone());
         }
         tracing::warn!("{}", reason);
     }
 
-    fn build_health_snapshot(
-        local_dropped: &Arc<AtomicU64>,
-        export_dropped: &Arc<AtomicU64>,
-        export_rejected: &Arc<AtomicU64>,
-        export_unknown: &Arc<AtomicU64>,
-        local_persist_failures: &Arc<AtomicU64>,
-        worker_restarts: &Arc<AtomicU64>,
-        last_worker_error: &Arc<parking_lot::RwLock<Option<String>>>,
-        last_local_persist_error: &Arc<parking_lot::RwLock<Option<String>>>,
-    ) -> nettrap_api::NbiCollectorHealth {
-        // Use Acquire ordering for consistent snapshot across counters
-        nettrap_api::NbiCollectorHealth {
-            local_dropped: local_dropped.load(Ordering::Acquire),
-            export_dropped: export_dropped.load(Ordering::Acquire),
-            export_rejected: export_rejected.load(Ordering::Acquire),
-            export_unknown: export_unknown.load(Ordering::Acquire),
-            local_persist_failures: local_persist_failures.load(Ordering::Acquire),
-            worker_restarts: worker_restarts.load(Ordering::Acquire),
-            last_worker_error: last_worker_error.read().clone(),
-            last_local_persist_error: last_local_persist_error.read().clone(),
+    fn worker_health_refs(&self) -> WorkerHealthRefs {
+        WorkerHealthRefs {
+            runtime_health: Arc::clone(&self.runtime_health),
+            local_dropped: Arc::clone(&self.local_worker.dropped),
+            export_dropped: Arc::clone(&self.export_worker.dropped),
+            export_rejected: Arc::clone(&self.export_rejected),
+            export_unknown: Arc::clone(&self.export_unknown),
+            local_persist_failures: Arc::clone(&self.local_persist_failures),
+            worker_restarts: Arc::clone(&self.worker_restarts),
+            last_worker_error: Arc::clone(&self.last_worker_error),
+            last_local_persist_error: Arc::clone(&self.last_local_persist_error),
         }
     }
 
     fn current_health_snapshot(&self) -> nettrap_api::NbiCollectorHealth {
-        Self::build_health_snapshot(
-            &self.local_worker.dropped,
-            &self.export_worker.dropped,
-            &self.export_rejected,
-            &self.export_unknown,
-            &self.local_persist_failures,
-            &self.worker_restarts,
-            &self.last_worker_error,
-            &self.last_local_persist_error,
-        )
+        self.worker_health_refs().snapshot()
     }
 
     fn publish_runtime_health(&self) {
@@ -1055,32 +1040,17 @@ impl NbiCollector {
     }
 
     fn note_local_persist_issue_shared(
-        runtime_health_ref: &Arc<parking_lot::RwLock<Option<Arc<nettrap_api::RuntimeHealth>>>>,
-        local_dropped: &Arc<AtomicU64>,
-        export_dropped: &Arc<AtomicU64>,
-        export_rejected: &Arc<AtomicU64>,
-        export_unknown: &Arc<AtomicU64>,
-        local_persist_failures: &Arc<AtomicU64>,
-        worker_restarts: &Arc<AtomicU64>,
-        last_worker_error: &Arc<parking_lot::RwLock<Option<String>>>,
-        last_local_persist_error: &Arc<parking_lot::RwLock<Option<String>>>,
+        health: &WorkerHealthRefs,
         reason: impl Into<String>,
         total_loss: bool,
     ) {
         let reason = reason.into();
-        local_persist_failures.fetch_add(1, Ordering::Relaxed);
-        *last_local_persist_error.write() = Some(reason.clone());
-        if let Some(runtime_health) = runtime_health_ref.read().clone() {
-            runtime_health.update_nbi_collector(Self::build_health_snapshot(
-                local_dropped,
-                export_dropped,
-                export_rejected,
-                export_unknown,
-                local_persist_failures,
-                worker_restarts,
-                last_worker_error,
-                last_local_persist_error,
-            ));
+        health
+            .local_persist_failures
+            .fetch_add(1, Ordering::Relaxed);
+        *health.last_local_persist_error.write() = Some(reason.clone());
+        if let Some(runtime_health) = health.runtime_health.read().clone() {
+            runtime_health.update_nbi_collector(health.snapshot());
             if total_loss {
                 runtime_health
                     .set_nbi_pipeline_loss(format!("local NBI persistence failure: {}", reason));
@@ -1095,15 +1065,7 @@ impl NbiCollector {
     }
 
     fn record_worker_exit_shared(
-        runtime_health_ref: &Arc<parking_lot::RwLock<Option<Arc<nettrap_api::RuntimeHealth>>>>,
-        local_dropped: &Arc<AtomicU64>,
-        export_dropped: &Arc<AtomicU64>,
-        export_rejected: &Arc<AtomicU64>,
-        export_unknown: &Arc<AtomicU64>,
-        local_persist_failures: &Arc<AtomicU64>,
-        worker_restarts: &Arc<AtomicU64>,
-        last_worker_error: &Arc<parking_lot::RwLock<Option<String>>>,
-        last_local_persist_error: &Arc<parking_lot::RwLock<Option<String>>>,
+        health: &WorkerHealthRefs,
         worker_name: &str,
         queued: &Arc<AtomicUsize>,
         dropped: &Arc<AtomicU64>,
@@ -1113,7 +1075,7 @@ impl NbiCollector {
         if lost > 0 {
             dropped.fetch_add(lost, Ordering::Relaxed);
         }
-        worker_restarts.fetch_add(1, Ordering::Relaxed);
+        health.worker_restarts.fetch_add(1, Ordering::Relaxed);
         let reason = if lost > 0 {
             format!(
                 "{} worker {} (dropped {} queued events)",
@@ -1122,18 +1084,9 @@ impl NbiCollector {
         } else {
             format!("{} worker {}", worker_name, reason)
         };
-        *last_worker_error.write() = Some(reason.clone());
-        if let Some(runtime_health) = runtime_health_ref.read().clone() {
-            runtime_health.update_nbi_collector(Self::build_health_snapshot(
-                local_dropped,
-                export_dropped,
-                export_rejected,
-                export_unknown,
-                local_persist_failures,
-                worker_restarts,
-                last_worker_error,
-                last_local_persist_error,
-            ));
+        *health.last_worker_error.write() = Some(reason.clone());
+        if let Some(runtime_health) = health.runtime_health.read().clone() {
+            runtime_health.update_nbi_collector(health.snapshot());
             if worker_name.contains("local") {
                 if lost > 0 {
                     runtime_health.set_nbi_pipeline_loss(reason.clone());
@@ -1163,149 +1116,59 @@ impl NbiCollector {
             }
         }
 
-        let runtime_health = Arc::clone(&self.runtime_health);
-        let fanout = Arc::clone(&self.fanout);
-        let retired_fanouts = Arc::clone(&self.retired_fanouts);
-        let local_handle = Arc::clone(&self.local_worker.handle);
-        let local_queued = Arc::clone(&self.local_worker.queued);
-        let local_dropped = Arc::clone(&self.local_worker.dropped);
-        let export_handle = Arc::clone(&self.export_worker.handle);
-        let export_queued = Arc::clone(&self.export_worker.queued);
-        let export_dropped = Arc::clone(&self.export_worker.dropped);
-        let export_rejected = Arc::clone(&self.export_rejected);
-        let export_unknown = Arc::clone(&self.export_unknown);
-        let local_persist_failures = Arc::clone(&self.local_persist_failures);
-        let worker_restarts = Arc::clone(&self.worker_restarts);
-        let last_worker_error = Arc::clone(&self.last_worker_error);
-        let last_local_persist_error = Arc::clone(&self.last_local_persist_error);
+        let supervisor = WorkerSupervisorContext {
+            health: self.worker_health_refs(),
+            fanout: Arc::clone(&self.fanout),
+            retired_fanouts: Arc::clone(&self.retired_fanouts),
+            local: self.local_worker.refs(),
+            export: self.export_worker.refs(),
+        };
 
         *handle = Some(runtime.spawn(async move {
-            NbiCollector::run_worker_supervisor(
-                runtime_health,
-                fanout,
-                retired_fanouts,
-                local_handle,
-                local_queued,
-                local_dropped,
-                export_handle,
-                export_queued,
-                export_dropped,
-                export_rejected,
-                export_unknown,
-                local_persist_failures,
-                worker_restarts,
-                last_worker_error,
-                last_local_persist_error,
-            )
-            .await;
+            NbiCollector::run_worker_supervisor(supervisor).await;
         }));
     }
 
-    async fn run_worker_supervisor(
-        runtime_health: Arc<parking_lot::RwLock<Option<Arc<nettrap_api::RuntimeHealth>>>>,
-        fanout: Arc<parking_lot::RwLock<Option<Arc<crate::distributed::EventFanout>>>>,
-        retired_fanouts: Arc<parking_lot::RwLock<Vec<Arc<crate::distributed::EventFanout>>>>,
-        local_handle: Arc<parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>>,
-        local_queued: Arc<AtomicUsize>,
-        local_dropped: Arc<AtomicU64>,
-        export_handle: Arc<parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>>,
-        export_queued: Arc<AtomicUsize>,
-        export_dropped: Arc<AtomicU64>,
-        export_rejected: Arc<AtomicU64>,
-        export_unknown: Arc<AtomicU64>,
-        local_persist_failures: Arc<AtomicU64>,
-        worker_restarts: Arc<AtomicU64>,
-        last_worker_error: Arc<parking_lot::RwLock<Option<String>>>,
-        last_local_persist_error: Arc<parking_lot::RwLock<Option<String>>>,
-    ) {
+    async fn run_worker_supervisor(ctx: WorkerSupervisorContext) {
         let interval = std::time::Duration::from_millis(NBI_WORKER_SUPERVISOR_INTERVAL_MS);
         loop {
             tokio::time::sleep(interval).await;
 
-            NbiCollector::check_worker_exit(
-                &runtime_health,
-                &local_dropped,
-                &export_dropped,
-                &export_rejected,
-                &export_unknown,
-                &local_persist_failures,
-                &worker_restarts,
-                &last_worker_error,
-                &last_local_persist_error,
-                "NBI local",
-                &local_handle,
-                &local_queued,
-                &local_dropped,
-            )
-            .await;
+            NbiCollector::check_worker_exit(&ctx.health, "NBI local", &ctx.local).await;
 
-            let active_fanout = { fanout.read().clone() };
+            let active_fanout = { ctx.fanout.read().clone() };
             let draining_fanouts =
-                NbiCollector::collect_draining_fanouts(active_fanout.clone(), &retired_fanouts);
+                NbiCollector::collect_draining_fanouts(active_fanout.clone(), &ctx.retired_fanouts);
             let supervise_export = !draining_fanouts.is_empty()
-                || export_handle.lock().as_ref().is_some()
-                || export_queued.load(Ordering::Relaxed) > 0;
+                || ctx.export.handle.lock().as_ref().is_some()
+                || ctx.export.queued.load(Ordering::Relaxed) > 0;
             if supervise_export {
-                NbiCollector::check_export_worker_exit(
-                    &runtime_health,
-                    &local_dropped,
-                    &export_dropped,
-                    &export_rejected,
-                    &export_unknown,
-                    &local_persist_failures,
-                    &worker_restarts,
-                    &last_worker_error,
-                    &last_local_persist_error,
-                    &active_fanout,
-                    &retired_fanouts,
-                    &export_handle,
-                    &export_queued,
-                    &export_dropped,
-                )
-                .await;
+                NbiCollector::check_export_worker_exit(&ctx, &active_fanout).await;
                 for draining_fanout in &draining_fanouts {
                     let _ = draining_fanout.flush_stale_batches().await;
                     let unknown = draining_fanout.consume_unknown_sink_events() as u64;
                     NbiCollector::note_export_delivery_unknown_shared(
-                        &runtime_health,
-                        &local_dropped,
-                        &export_dropped,
-                        &export_rejected,
-                        &export_unknown,
-                        &local_persist_failures,
-                        &worker_restarts,
-                        &last_worker_error,
-                        &last_local_persist_error,
+                        &ctx.health,
                         unknown,
                         "distributed export stale flush left delivery state unknown",
                     );
                 }
                 NbiCollector::prune_retired_fanouts_shared(
-                    &retired_fanouts,
+                    &ctx.retired_fanouts,
                     active_fanout,
-                    &runtime_health,
+                    &ctx.health.runtime_health,
                 );
             }
         }
     }
 
     async fn check_worker_exit(
-        runtime_health: &Arc<parking_lot::RwLock<Option<Arc<nettrap_api::RuntimeHealth>>>>,
-        local_dropped: &Arc<AtomicU64>,
-        export_dropped: &Arc<AtomicU64>,
-        export_rejected: &Arc<AtomicU64>,
-        export_unknown: &Arc<AtomicU64>,
-        local_persist_failures: &Arc<AtomicU64>,
-        worker_restarts: &Arc<AtomicU64>,
-        last_worker_error: &Arc<parking_lot::RwLock<Option<String>>>,
-        last_local_persist_error: &Arc<parking_lot::RwLock<Option<String>>>,
+        health: &WorkerHealthRefs,
         worker_name: &str,
-        handle: &Arc<parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>>,
-        queued: &Arc<AtomicUsize>,
-        dropped: &Arc<AtomicU64>,
+        slot: &WorkerSlotRefs,
     ) {
         let finished = {
-            let mut guard = handle.lock();
+            let mut guard = slot.handle.lock();
             if guard.as_ref().is_some_and(|worker| worker.is_finished()) {
                 guard.take()
             } else {
@@ -1320,41 +1183,21 @@ impl NbiCollector {
                 Err(err) => format!("panicked unexpectedly while idle: {}", err),
             };
             Self::record_worker_exit_shared(
-                runtime_health,
-                local_dropped,
-                export_dropped,
-                export_rejected,
-                export_unknown,
-                local_persist_failures,
-                worker_restarts,
-                last_worker_error,
-                last_local_persist_error,
+                health,
                 worker_name,
-                queued,
-                dropped,
+                &slot.queued,
+                &slot.dropped,
                 reason,
             );
         }
     }
 
     async fn check_export_worker_exit(
-        runtime_health: &Arc<parking_lot::RwLock<Option<Arc<nettrap_api::RuntimeHealth>>>>,
-        local_dropped: &Arc<AtomicU64>,
-        export_dropped: &Arc<AtomicU64>,
-        export_rejected: &Arc<AtomicU64>,
-        export_unknown: &Arc<AtomicU64>,
-        local_persist_failures: &Arc<AtomicU64>,
-        worker_restarts: &Arc<AtomicU64>,
-        last_worker_error: &Arc<parking_lot::RwLock<Option<String>>>,
-        last_local_persist_error: &Arc<parking_lot::RwLock<Option<String>>>,
+        ctx: &WorkerSupervisorContext,
         active_fanout: &Option<Arc<crate::distributed::EventFanout>>,
-        retired_fanouts: &Arc<parking_lot::RwLock<Vec<Arc<crate::distributed::EventFanout>>>>,
-        handle: &Arc<parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>>,
-        queued: &Arc<AtomicUsize>,
-        dropped: &Arc<AtomicU64>,
     ) {
         let finished = {
-            let mut guard = handle.lock();
+            let mut guard = ctx.export.handle.lock();
             if guard.as_ref().is_some_and(|worker| worker.is_finished()) {
                 guard.take()
             } else {
@@ -1368,24 +1211,27 @@ impl NbiCollector {
                 Err(err) if err.is_cancelled() => "aborted unexpectedly while idle".to_string(),
                 Err(err) => format!("panicked unexpectedly while idle: {}", err),
             };
-            let lost_from_queue = queued.swap(0, Ordering::Relaxed) as u64;
+            let lost_from_queue = ctx.export.queued.swap(0, Ordering::Relaxed) as u64;
             let lost_from_fanouts =
-                Self::collect_draining_fanouts(active_fanout.clone(), retired_fanouts)
+                Self::collect_draining_fanouts(active_fanout.clone(), &ctx.retired_fanouts)
                     .into_iter()
                     .map(|fanout| fanout.drop_queued_records() as u64)
                     .sum::<u64>();
-            let unknown = Self::collect_draining_fanouts(active_fanout.clone(), retired_fanouts)
-                .into_iter()
-                .map(|fanout| fanout.mark_inflight_unknown() as u64)
-                .sum::<u64>();
+            let unknown =
+                Self::collect_draining_fanouts(active_fanout.clone(), &ctx.retired_fanouts)
+                    .into_iter()
+                    .map(|fanout| fanout.mark_inflight_unknown() as u64)
+                    .sum::<u64>();
             let lost = lost_from_queue.max(lost_from_fanouts);
             if lost > 0 {
-                dropped.fetch_add(lost, Ordering::Relaxed);
+                ctx.export.dropped.fetch_add(lost, Ordering::Relaxed);
             }
             if unknown > 0 {
-                export_unknown.fetch_add(unknown, Ordering::Relaxed);
+                ctx.health
+                    .export_unknown
+                    .fetch_add(unknown, Ordering::Relaxed);
             }
-            worker_restarts.fetch_add(1, Ordering::Relaxed);
+            ctx.health.worker_restarts.fetch_add(1, Ordering::Relaxed);
             let reason = if lost > 0 {
                 format!(
                     "NBI export worker {} (dropped {} queued events)",
@@ -1399,31 +1245,20 @@ impl NbiCollector {
             } else {
                 format!("NBI export worker {}", reason)
             };
-            *last_worker_error.write() = Some(reason.clone());
-            if let Some(runtime_health) = runtime_health.read().clone() {
-                runtime_health.update_nbi_collector(Self::build_health_snapshot(
-                    local_dropped,
-                    export_dropped,
-                    export_rejected,
-                    export_unknown,
-                    local_persist_failures,
-                    worker_restarts,
-                    last_worker_error,
-                    last_local_persist_error,
-                ));
+            *ctx.health.last_worker_error.write() = Some(reason.clone());
+            if let Some(runtime_health) = ctx.health.runtime_health.read().clone() {
+                runtime_health.update_nbi_collector(ctx.health.snapshot());
                 if lost > 0 {
                     runtime_health.set_distributed_export_loss(reason.clone());
-                } else if unknown > 0 {
-                    runtime_health.set_distributed_export_degraded(reason.clone());
                 } else {
                     runtime_health.set_distributed_export_degraded(reason.clone());
                 }
             }
             tracing::warn!("{}", reason);
             Self::prune_retired_fanouts_shared(
-                retired_fanouts,
+                &ctx.retired_fanouts,
                 active_fanout.clone(),
-                runtime_health,
+                &ctx.health.runtime_health,
             );
         }
     }
@@ -1459,35 +1294,14 @@ impl NbiCollector {
             return false;
         };
 
-        let path = self.path.clone();
-        let database = Arc::clone(&self.database);
-        let runtime_health = Arc::clone(&self.runtime_health);
-        let queued_events = Arc::clone(&self.local_worker.queued);
-        let local_dropped = Arc::clone(&self.local_worker.dropped);
-        let export_dropped = Arc::clone(&self.export_worker.dropped);
-        let export_rejected = Arc::clone(&self.export_rejected);
-        let export_unknown = Arc::clone(&self.export_unknown);
-        let local_persist_failures = Arc::clone(&self.local_persist_failures);
-        let worker_restarts = Arc::clone(&self.worker_restarts);
-        let last_worker_error = Arc::clone(&self.last_worker_error);
-        let last_local_persist_error = Arc::clone(&self.last_local_persist_error);
+        let worker_ctx = LocalWorkerContext {
+            path: self.path.clone(),
+            database: Arc::clone(&self.database),
+            health: self.worker_health_refs(),
+            queued_events: Arc::clone(&self.local_worker.queued),
+        };
         let worker_handle = runtime.spawn(async move {
-            NbiCollector::run_local_worker(
-                worker_rx,
-                path,
-                database,
-                runtime_health,
-                queued_events,
-                local_dropped,
-                export_dropped,
-                export_rejected,
-                export_unknown,
-                local_persist_failures,
-                worker_restarts,
-                last_worker_error,
-                last_local_persist_error,
-            )
-            .await;
+            NbiCollector::run_local_worker(worker_rx, worker_ctx).await;
         });
         *handle = Some(worker_handle);
         drop(handle);
@@ -1524,35 +1338,14 @@ impl NbiCollector {
             return false;
         };
 
-        let fanout = Arc::clone(&self.fanout);
-        let retired_fanouts = Arc::clone(&self.retired_fanouts);
-        let runtime_health = Arc::clone(&self.runtime_health);
-        let queued_events = Arc::clone(&self.export_worker.queued);
-        let local_dropped = Arc::clone(&self.local_worker.dropped);
-        let export_dropped = Arc::clone(&self.export_worker.dropped);
-        let export_rejected = Arc::clone(&self.export_rejected);
-        let export_unknown = Arc::clone(&self.export_unknown);
-        let local_persist_failures = Arc::clone(&self.local_persist_failures);
-        let worker_restarts = Arc::clone(&self.worker_restarts);
-        let last_worker_error = Arc::clone(&self.last_worker_error);
-        let last_local_persist_error = Arc::clone(&self.last_local_persist_error);
+        let worker_ctx = ExportWorkerContext {
+            active_fanout: Arc::clone(&self.fanout),
+            retired_fanouts: Arc::clone(&self.retired_fanouts),
+            health: self.worker_health_refs(),
+            queued_events: Arc::clone(&self.export_worker.queued),
+        };
         let worker_handle = runtime.spawn(async move {
-            NbiCollector::run_export_worker(
-                worker_rx,
-                fanout,
-                retired_fanouts,
-                runtime_health,
-                queued_events,
-                local_dropped,
-                export_dropped,
-                export_rejected,
-                export_unknown,
-                local_persist_failures,
-                worker_restarts,
-                last_worker_error,
-                last_local_persist_error,
-            )
-            .await;
+            NbiCollector::run_export_worker(worker_rx, worker_ctx).await;
         });
         *handle = Some(worker_handle);
         drop(handle);
@@ -1562,56 +1355,27 @@ impl NbiCollector {
 
     async fn run_local_worker(
         mut worker_rx: tokio::sync::mpsc::Receiver<LocalWorkerCommand>,
-        path: Option<PathBuf>,
-        database: Arc<parking_lot::RwLock<Option<Arc<crate::database::DatabaseBackend>>>>,
-        runtime_health: Arc<parking_lot::RwLock<Option<Arc<nettrap_api::RuntimeHealth>>>>,
-        queued_events: Arc<AtomicUsize>,
-        local_dropped: Arc<AtomicU64>,
-        export_dropped: Arc<AtomicU64>,
-        export_rejected: Arc<AtomicU64>,
-        export_unknown: Arc<AtomicU64>,
-        local_persist_failures: Arc<AtomicU64>,
-        worker_restarts: Arc<AtomicU64>,
-        last_worker_error: Arc<parking_lot::RwLock<Option<String>>>,
-        last_local_persist_error: Arc<parking_lot::RwLock<Option<String>>>,
+        ctx: LocalWorkerContext,
     ) {
         while let Some(command) = worker_rx.recv().await {
             match command {
                 LocalWorkerCommand::Record(nbi) => {
                     let outcome =
-                        NbiCollector::persist_local_record(path.as_ref(), &database, &nbi).await;
+                        NbiCollector::persist_local_record(ctx.path.as_ref(), &ctx.database, &nbi)
+                            .await;
                     if let Some(error) = outcome.error_summary() {
                         NbiCollector::note_local_persist_issue_shared(
-                            &runtime_health,
-                            &local_dropped,
-                            &export_dropped,
-                            &export_rejected,
-                            &export_unknown,
-                            &local_persist_failures,
-                            &worker_restarts,
-                            &last_worker_error,
-                            &last_local_persist_error,
+                            &ctx.health,
                             error,
                             outcome.is_total_failure(),
                         );
                     } else if outcome.any_target_configured() {
-                        if let Some(runtime_health) = runtime_health.read().clone() {
+                        if let Some(runtime_health) = ctx.health.runtime_health.read().clone() {
                             runtime_health.set_nbi_pipeline_running();
-                            runtime_health.update_nbi_collector(
-                                NbiCollector::build_health_snapshot(
-                                    &local_dropped,
-                                    &export_dropped,
-                                    &export_rejected,
-                                    &export_unknown,
-                                    &local_persist_failures,
-                                    &worker_restarts,
-                                    &last_worker_error,
-                                    &last_local_persist_error,
-                                ),
-                            );
+                            runtime_health.update_nbi_collector(ctx.health.snapshot());
                         }
                     }
-                    queued_events.fetch_sub(1, Ordering::Relaxed);
+                    ctx.queued_events.fetch_sub(1, Ordering::Relaxed);
                 }
                 LocalWorkerCommand::Flush(flush_tx) => {
                     let _ = flush_tx.send(());
@@ -1622,25 +1386,14 @@ impl NbiCollector {
 
     async fn run_export_worker(
         mut worker_rx: tokio::sync::mpsc::Receiver<ExportWorkerCommand>,
-        active_fanout: Arc<parking_lot::RwLock<Option<Arc<crate::distributed::EventFanout>>>>,
-        retired_fanouts: Arc<parking_lot::RwLock<Vec<Arc<crate::distributed::EventFanout>>>>,
-        runtime_health: Arc<parking_lot::RwLock<Option<Arc<nettrap_api::RuntimeHealth>>>>,
-        queued_events: Arc<AtomicUsize>,
-        local_dropped: Arc<AtomicU64>,
-        export_dropped: Arc<AtomicU64>,
-        export_rejected: Arc<AtomicU64>,
-        export_unknown: Arc<AtomicU64>,
-        local_persist_failures: Arc<AtomicU64>,
-        worker_restarts: Arc<AtomicU64>,
-        last_worker_error: Arc<parking_lot::RwLock<Option<String>>>,
-        last_local_persist_error: Arc<parking_lot::RwLock<Option<String>>>,
+        ctx: ExportWorkerContext,
     ) {
         while let Some(command) = worker_rx.recv().await {
             match command {
                 ExportWorkerCommand::Record(nbi, fanout) => {
                     let event_id = nbi.normalized_event_id();
                     fanout.note_send_started(&event_id);
-                    queued_events.fetch_sub(1, Ordering::Relaxed);
+                    ctx.queued_events.fetch_sub(1, Ordering::Relaxed);
                     let outcome = fanout.send(&nbi).await;
                     let outcome_error = outcome.error.clone();
                     let completion = fanout.note_dequeued_record(&event_id);
@@ -1649,30 +1402,11 @@ impl NbiCollector {
                             "distributed export lost an accepted event without retry buffer"
                                 .to_string()
                         });
-                        NbiCollector::note_export_delivery_loss_shared(
-                            &runtime_health,
-                            &local_dropped,
-                            &export_dropped,
-                            &export_rejected,
-                            &export_unknown,
-                            &local_persist_failures,
-                            &worker_restarts,
-                            &last_worker_error,
-                            &last_local_persist_error,
-                            reason,
-                        );
+                        NbiCollector::note_export_delivery_loss_shared(&ctx.health, reason);
                     }
                     if completion.became_unknown {
                         NbiCollector::note_export_delivery_unknown_shared(
-                            &runtime_health,
-                            &local_dropped,
-                            &export_dropped,
-                            &export_rejected,
-                            &export_unknown,
-                            &local_persist_failures,
-                            &worker_restarts,
-                            &last_worker_error,
-                            &last_local_persist_error,
+                            &ctx.health,
                             1,
                             outcome_error.unwrap_or_else(|| {
                                 "distributed export send was interrupted before completion"
@@ -1684,8 +1418,8 @@ impl NbiCollector {
                 ExportWorkerCommand::Flush(current_fanout, flush_tx) => {
                     let mut flush_errors = Vec::new();
                     let fanouts_to_flush = NbiCollector::collect_draining_fanouts(
-                        current_fanout.or_else(|| active_fanout.read().clone()),
-                        &retired_fanouts,
+                        current_fanout.or_else(|| ctx.active_fanout.read().clone()),
+                        &ctx.retired_fanouts,
                     );
                     for fanout in &fanouts_to_flush {
                         if let Err(err) = fanout.flush_all().await {
@@ -1693,23 +1427,15 @@ impl NbiCollector {
                         }
                         let unknown = fanout.consume_unknown_sink_events() as u64;
                         NbiCollector::note_export_delivery_unknown_shared(
-                            &runtime_health,
-                            &local_dropped,
-                            &export_dropped,
-                            &export_rejected,
-                            &export_unknown,
-                            &local_persist_failures,
-                            &worker_restarts,
-                            &last_worker_error,
-                            &last_local_persist_error,
+                            &ctx.health,
                             unknown,
                             "distributed export flush left delivery state unknown",
                         );
                     }
                     NbiCollector::prune_retired_fanouts_shared(
-                        &retired_fanouts,
-                        active_fanout.read().clone(),
-                        &runtime_health,
+                        &ctx.retired_fanouts,
+                        ctx.active_fanout.read().clone(),
+                        &ctx.health.runtime_health,
                     );
                     let _ = if flush_errors.is_empty() {
                         flush_tx.send(Ok(()))
@@ -1719,30 +1445,22 @@ impl NbiCollector {
                 }
                 ExportWorkerCommand::Shutdown(shutdown_tx) => {
                     let fanouts_to_flush = NbiCollector::collect_draining_fanouts(
-                        active_fanout.read().clone(),
-                        &retired_fanouts,
+                        ctx.active_fanout.read().clone(),
+                        &ctx.retired_fanouts,
                     );
                     for fanout in &fanouts_to_flush {
                         let _ = fanout.flush_all().await;
                         let unknown = fanout.consume_unknown_sink_events() as u64;
                         NbiCollector::note_export_delivery_unknown_shared(
-                            &runtime_health,
-                            &local_dropped,
-                            &export_dropped,
-                            &export_rejected,
-                            &export_unknown,
-                            &local_persist_failures,
-                            &worker_restarts,
-                            &last_worker_error,
-                            &last_local_persist_error,
+                            &ctx.health,
                             unknown,
                             "distributed export shutdown flush left delivery state unknown",
                         );
                     }
                     NbiCollector::prune_retired_fanouts_shared(
-                        &retired_fanouts,
-                        active_fanout.read().clone(),
-                        &runtime_health,
+                        &ctx.retired_fanouts,
+                        ctx.active_fanout.read().clone(),
+                        &ctx.health.runtime_health,
                     );
                     let _ = shutdown_tx.send(());
                     break;
@@ -1855,7 +1573,7 @@ impl NbiCollector {
         }
 
         self.local_worker.queued.fetch_add(1, Ordering::Relaxed);
-        let mut command = Some(LocalWorkerCommand::Record(nbi));
+        let mut command = Some(LocalWorkerCommand::Record(Box::new(nbi)));
         for attempt in 0..2 {
             let tx = self.local_worker.sender();
             match tx.try_send(command.take().expect("local worker command missing")) {
@@ -1901,7 +1619,10 @@ impl NbiCollector {
 
         let event_id = nbi.normalized_event_id();
         self.export_worker.queued.fetch_add(1, Ordering::Relaxed);
-        let mut command = Some(ExportWorkerCommand::Record(nbi, Arc::clone(&fanout)));
+        let mut command = Some(ExportWorkerCommand::Record(
+            Box::new(nbi),
+            Arc::clone(&fanout),
+        ));
         for attempt in 0..2 {
             let tx = self.export_worker.sender();
             match tx.try_send(command.take().expect("export worker command missing")) {
@@ -2014,15 +1735,7 @@ impl NbiCollector {
                     .map(|fanout| fanout.mark_inflight_unknown() as u64)
                     .sum::<u64>();
             Self::note_export_delivery_unknown_shared(
-                &self.runtime_health,
-                &self.local_worker.dropped,
-                &self.export_worker.dropped,
-                &self.export_rejected,
-                &self.export_unknown,
-                &self.local_persist_failures,
-                &self.worker_restarts,
-                &self.last_worker_error,
-                &self.last_local_persist_error,
+                &self.worker_health_refs(),
                 unknown,
                 "distributed export shutdown timed out while deliveries were still in flight",
             );
@@ -2042,15 +1755,7 @@ impl NbiCollector {
                 let _ = fanout.flush_all().await;
                 let unknown = fanout.consume_unknown_sink_events() as u64;
                 Self::note_export_delivery_unknown_shared(
-                    &self.runtime_health,
-                    &self.local_worker.dropped,
-                    &self.export_worker.dropped,
-                    &self.export_rejected,
-                    &self.export_unknown,
-                    &self.local_persist_failures,
-                    &self.worker_restarts,
-                    &self.last_worker_error,
-                    &self.last_local_persist_error,
+                    &self.worker_health_refs(),
                     unknown,
                     "distributed export shutdown fallback left delivery state unknown",
                 );
@@ -2106,7 +1811,7 @@ impl NbiCollector {
     ) -> std::io::Result<()> {
         use crate::i18n::t;
         let title = t("report_title", lang);
-        let title_escaped = html_escape(&title);
+        let title_escaped = html_escape(title);
         let mut html = format!(
             r#"<!DOCTYPE html>
 <html><head>
@@ -2253,15 +1958,7 @@ tr:hover {{ background: #f8f9fa; }}
                 let _ = fanout.flush_all().await;
                 let unknown = fanout.consume_unknown_sink_events() as u64;
                 Self::note_export_delivery_unknown_shared(
-                    &self.runtime_health,
-                    &self.local_worker.dropped,
-                    &self.export_worker.dropped,
-                    &self.export_rejected,
-                    &self.export_unknown,
-                    &self.local_persist_failures,
-                    &self.worker_restarts,
-                    &self.last_worker_error,
-                    &self.last_local_persist_error,
+                    &self.worker_health_refs(),
                     unknown,
                     "distributed export flush fallback left delivery state unknown",
                 );
@@ -2309,15 +2006,7 @@ tr:hover {{ background: #f8f9fa; }}
                     let _ = fanout.flush_all().await;
                     let unknown = fanout.consume_unknown_sink_events() as u64;
                     Self::note_export_delivery_unknown_shared(
-                        &self.runtime_health,
-                        &self.local_worker.dropped,
-                        &self.export_worker.dropped,
-                        &self.export_rejected,
-                        &self.export_unknown,
-                        &self.local_persist_failures,
-                        &self.worker_restarts,
-                        &self.last_worker_error,
-                        &self.last_local_persist_error,
+                        &self.worker_health_refs(),
                         unknown,
                         "distributed export flush fallback left delivery state unknown",
                     );
