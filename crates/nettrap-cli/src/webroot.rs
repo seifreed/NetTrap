@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::io::Read;
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 const MAX_FILE_RESPONSE_BYTES: u64 = 10 * 1024 * 1024;
@@ -113,7 +114,7 @@ impl WebrootServer {
                     tracing::warn!("Path traversal attempt blocked: {:?}", candidate);
                     continue;
                 }
-                match self.read_candidate(&canonical_candidate) {
+                match self.read_candidate(&candidate) {
                     WebrootServeResult::NotFound => {}
                     result => return result,
                 }
@@ -242,11 +243,14 @@ fn simple_http_response(code: u16, reason: &str, body: &str) -> Vec<u8> {
 }
 
 fn read_limited_file(path: &Path, max_bytes: u64) -> std::io::Result<LimitedFileRead> {
-    let file = std::fs::File::open(path)?;
+    let file = match open_regular_file_no_final_symlink(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::InvalidInput => {
+            return Ok(LimitedFileRead::NotFile);
+        }
+        Err(err) => return Err(err),
+    };
     let metadata = file.metadata()?;
-    if !metadata.is_file() {
-        return Ok(LimitedFileRead::NotFile);
-    }
     if metadata.len() > max_bytes {
         return Ok(LimitedFileRead::TooLarge);
     }
@@ -259,6 +263,45 @@ fn read_limited_file(path: &Path, max_bytes: u64) -> std::io::Result<LimitedFile
     }
 
     Ok(LimitedFileRead::Content(content))
+}
+
+#[cfg(unix)]
+fn open_regular_file_no_final_symlink(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    ensure_regular_file(file)
+}
+
+#[cfg(windows)]
+fn open_regular_file_no_final_symlink(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    ensure_regular_file(file)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_regular_file_no_final_symlink(path: &Path) -> io::Result<File> {
+    ensure_regular_file(File::open(path)?)
+}
+
+fn ensure_regular_file(file: File) -> io::Result<File> {
+    if file.metadata()?.is_file() {
+        Ok(file)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ))
+    }
 }
 
 /// Generate a fake file with appropriate content and MIME type for a given extension.
@@ -573,6 +616,23 @@ mod tests {
 
         assert!(response.starts_with(b"HTTP/1.1 200 OK"));
         assert!(String::from_utf8_lossy(&response[..128]).contains("Content-Length: 10485760"));
+        std::fs::remove_dir_all(root).expect("cleanup temp root");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_http_response_rejects_final_symlink_inside_root() {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_temp_dir("nettrap-webroot-symlink");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create temp root");
+        std::fs::write(root.join("real.html"), b"<html>secret</html>").expect("write fixture");
+        symlink("real.html", root.join("link.html")).expect("create symlink");
+
+        let response = WebrootServer::new(&root).build_http_response("/link.html");
+
+        assert!(!String::from_utf8_lossy(&response).contains("secret"));
         std::fs::remove_dir_all(root).expect("cleanup temp root");
     }
 

@@ -16,3 +16,4 @@ chrono.workspace = true
 tracing.workspace = true
 memchr.workspace = true
 hostname.workspace = true
+libc.workspace = true

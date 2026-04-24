@@ -1,3 +1,7 @@
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read};
+use std::path::Path;
+
 fn has_path_traversal(s: &str) -> bool {
     let lower = s.to_lowercase();
     s.contains("..")
@@ -19,6 +23,23 @@ const MAX_FTP_LIST_ENTRIES: usize = 4096;
 const MAX_FTP_LIST_BYTES: usize = 1024 * 1024;
 const FTP_LIST_OK_MESSAGE: &str = "Directory send OK.";
 const FTP_LIST_TRUNCATED_MESSAGE: &str = "Directory send OK (truncated).";
+
+fn command_verb(command: &str) -> String {
+    command
+        .split_ascii_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_end_matches('\r')
+        .to_ascii_uppercase()
+}
+
+fn command_arg(command: &str) -> &str {
+    let trimmed = command.trim();
+    let verb_end = trimmed
+        .find(|ch: char| ch.is_ascii_whitespace())
+        .unwrap_or(trimmed.len());
+    trimmed[verb_end..].trim()
+}
 
 pub struct FtpHandler {
     banner: String,
@@ -119,19 +140,62 @@ const VIRTUAL_FILES: &[(&str, u64)] = &[
     ("setup.exe", 16),
 ];
 
-fn read_file_limited(path: &std::path::Path) -> std::io::Result<Option<Vec<u8>>> {
-    let file = std::fs::File::open(path)?;
+#[cfg(unix)]
+fn open_regular_file_no_final_symlink(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
             "not a regular file",
         ));
     }
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn open_regular_file_no_final_symlink(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_regular_file_no_final_symlink(path: &Path) -> io::Result<File> {
+    let file = File::open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+    Ok(file)
+}
+
+fn read_file_limited(path: &std::path::Path) -> std::io::Result<Option<Vec<u8>>> {
+    let file = open_regular_file_no_final_symlink(path)?;
 
     let mut content = Vec::new();
-    let mut limited = std::io::Read::take(file, MAX_FTP_RETR_BYTES + 1);
-    std::io::Read::read_to_end(&mut limited, &mut content)?;
+    let mut limited = file.take(MAX_FTP_RETR_BYTES + 1);
+    limited.read_to_end(&mut content)?;
     if content.len() as u64 > MAX_FTP_RETR_BYTES {
         Ok(None)
     } else {
@@ -229,9 +293,9 @@ impl FtpHandler {
     }
 
     pub fn prepare_data_transfer(&self, command: &str) -> Result<FtpDataTransfer, FtpResponse> {
-        let upper = command.to_uppercase();
+        let verb = command_verb(command);
 
-        if upper.starts_with("LIST") {
+        if verb == "LIST" {
             let entries = self
                 .root_dir
                 .as_ref()
@@ -251,7 +315,7 @@ impl FtpHandler {
             });
         }
 
-        if upper.starts_with("NLST") {
+        if verb == "NLST" {
             let entries = self
                 .root_dir
                 .as_ref()
@@ -272,7 +336,7 @@ impl FtpHandler {
             });
         }
 
-        if upper.starts_with("RETR") {
+        if verb == "RETR" {
             return self.prepare_retr_transfer(command);
         }
 
@@ -280,7 +344,7 @@ impl FtpHandler {
     }
 
     fn prepare_retr_transfer(&self, command: &str) -> Result<FtpDataTransfer, FtpResponse> {
-        let filename = command.get(5..).unwrap_or("").trim();
+        let filename = command_arg(command);
 
         if has_path_traversal(filename) {
             tracing::warn!("FTP path traversal attempt blocked: {:?}", filename);
@@ -316,7 +380,7 @@ impl FtpHandler {
                 return Err(FtpResponse::new(550, "Access denied"));
             }
 
-            match read_file_limited(&canonical_path) {
+            match read_file_limited(&path) {
                 Ok(Some(content)) => Ok(Self::retr_transfer(filename, content)),
                 Ok(None) => {
                     tracing::warn!(
@@ -326,14 +390,7 @@ impl FtpHandler {
                     );
                     Err(FtpResponse::new(552, "File too large"))
                 }
-                Err(_) => {
-                    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                    if let Some(content) = default_file_for_extension(ext) {
-                        Ok(Self::retr_transfer(filename, content.to_vec()))
-                    } else {
-                        Err(FtpResponse::new(550, "File not found"))
-                    }
-                }
+                Err(_) => Err(FtpResponse::new(550, "File not found")),
             }
         } else {
             Ok(FtpDataTransfer {
@@ -360,17 +417,17 @@ impl FtpHandler {
     }
 
     pub fn handle(&self, command: &str) -> FtpResponse {
-        let upper = command.to_uppercase();
+        let verb = command_verb(command);
 
-        if upper.starts_with("USER") {
+        if verb == "USER" {
             FtpResponse::new(331, "Username OK, need password")
-        } else if upper.starts_with("PASS") {
+        } else if verb == "PASS" {
             FtpResponse::new(230, "User logged in")
-        } else if upper.starts_with("PWD") {
+        } else if verb == "PWD" {
             FtpResponse::new(257, "/")
-        } else if upper.starts_with("TYPE") {
+        } else if verb == "TYPE" {
             FtpResponse::new(200, "Type set to I")
-        } else if upper.starts_with("PASV") {
+        } else if verb == "PASV" {
             let port = self.next_passive_port();
             let p1 = port / 256;
             let p2 = port % 256;
@@ -381,22 +438,19 @@ impl FtpHandler {
                     self.pasv_address, p1, p2
                 ),
             )
-        } else if upper.starts_with("LIST")
-            || upper.starts_with("NLST")
-            || upper.starts_with("RETR")
-        {
+        } else if matches!(verb.as_str(), "LIST" | "NLST" | "RETR") {
             FtpResponse::new(425, "Use PASV or EPSV first")
-        } else if upper.starts_with("PORT") || upper.starts_with("EPRT") {
+        } else if matches!(verb.as_str(), "PORT" | "EPRT") {
             FtpResponse::new(502, "Active mode is not supported")
-        } else if upper.starts_with("EPSV") {
+        } else if verb == "EPSV" {
             let port = self.next_passive_port();
             FtpResponse::new(
                 229,
                 format!("Entering Extended Passive Mode (|||{}|)", port),
             )
-        } else if upper.starts_with("SYST") {
+        } else if verb == "SYST" {
             FtpResponse::new(215, "UNIX Type: L8")
-        } else if upper.starts_with("FEAT") {
+        } else if verb == "FEAT" {
             FtpResponse {
                 code: 0,
                 message:
@@ -404,8 +458,8 @@ impl FtpHandler {
                         .to_string(),
                 raw: None,
             }
-        } else if upper.starts_with("SIZE") {
-            let filename = command.get(5..).unwrap_or("").trim();
+        } else if verb == "SIZE" {
+            let filename = command_arg(command);
             if has_path_traversal(filename) {
                 return FtpResponse::new(550, "Invalid path");
             }
@@ -429,44 +483,49 @@ impl FtpHandler {
                         return FtpResponse::new(550, "File not found");
                     }
                 };
-                if canonical_path.starts_with(&canonical_root) && canonical_path.is_file() {
-                    let size = std::fs::metadata(&canonical_path)
-                        .map(|m| m.len())
-                        .unwrap_or(0);
-                    FtpResponse::new(213, size.to_string())
+                if !canonical_path.starts_with(&canonical_root) {
+                    return FtpResponse::new(550, "File not found");
+                }
+                let file = match open_regular_file_no_final_symlink(&path) {
+                    Ok(file) => file,
+                    Err(_) => return FtpResponse::new(550, "File not found"),
+                };
+                let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+                if size > MAX_FTP_RETR_BYTES {
+                    FtpResponse::new(552, "File too large")
                 } else {
-                    // File exists but outside root or not a file — deny without extension fallback
-                    FtpResponse::new(550, "File not found")
+                    FtpResponse::new(213, size.to_string())
                 }
             } else {
                 FtpResponse::new(213, "0")
             }
-        } else if upper.starts_with("MDTM") {
+        } else if verb == "MDTM" {
             FtpResponse::new(213, "20240101000000")
-        } else if upper.starts_with("CWD") || upper.starts_with("CDUP") {
+        } else if matches!(verb.as_str(), "CWD" | "CDUP") {
             FtpResponse::new(250, "Directory changed")
-        } else if upper.starts_with("MKD") || upper.starts_with("XMKD") {
-            let dir = command.get(4..).unwrap_or("/new").trim();
+        } else if matches!(verb.as_str(), "MKD" | "XMKD") {
+            let dir = command_arg(command);
+            let dir = if dir.is_empty() { "/new" } else { dir };
             FtpResponse::new(257, format!("\"{}\" directory created", dir))
-        } else if upper.starts_with("RMD") || upper.starts_with("XRMD") {
+        } else if matches!(verb.as_str(), "RMD" | "XRMD") {
             FtpResponse::new(250, "Directory removed")
-        } else if upper.starts_with("DELE") {
+        } else if verb == "DELE" {
             FtpResponse::new(250, "File deleted")
-        } else if upper.starts_with("RNFR") {
+        } else if verb == "RNFR" {
             FtpResponse::new(350, "Ready for RNTO")
-        } else if upper.starts_with("RNTO") {
+        } else if verb == "RNTO" {
             FtpResponse::new(250, "Rename successful")
-        } else if upper.starts_with("STOR") || upper.starts_with("APPE") {
+        } else if matches!(verb.as_str(), "STOR" | "APPE") {
             FtpResponse::new(502, "Upload data transfers are not supported")
-        } else if upper.starts_with("NOOP") {
+        } else if verb == "NOOP" {
             FtpResponse::new(200, "NOOP ok")
-        } else if upper.starts_with("HELP") {
+        } else if verb == "HELP" {
             FtpResponse { code: 0, message: "214-The following commands are recognized:\r\n USER PASS CWD CDUP QUIT PASV EPSV TYPE RETR\r\n PWD LIST NLST SIZE MDTM SYST STAT HELP NOOP\r\n214 Help OK.\r\n".to_string(), raw: None }
-        } else if upper.starts_with("STAT") {
+        } else if verb == "STAT" {
             FtpResponse::new(211, "NetTrap FTP Server status OK")
-        } else if upper.starts_with("ABOR") {
+        } else if verb == "ABOR" {
             FtpResponse::new(226, "Abort successful")
-        } else if upper.starts_with("QUIT") {
+        } else if verb == "QUIT" {
             FtpResponse::new(221, "Goodbye")
         } else {
             FtpResponse::new(200, "OK")
@@ -784,6 +843,42 @@ mod tests {
         let response = FtpHandler::new().handle("LIST");
 
         assert_eq!(response.code, 425);
+    }
+
+    #[test]
+    fn prefixed_data_verbs_do_not_trigger_transfers() {
+        let handler = FtpHandler::new();
+
+        let response = handler
+            .prepare_data_transfer("LISTEN")
+            .expect_err("LISTEN must not be parsed as LIST");
+        assert_eq!(response.code, 502);
+
+        let response = handler.handle("RETRIEVE file.txt");
+        assert_ne!(response.code, 425);
+
+        let response = handler.handle("PASVXYZ");
+        assert_ne!(response.code, 227);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retr_rejects_final_symlink_inside_root() {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_temp_dir("nettrap-ftp-symlink");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create temp root");
+        std::fs::write(root.join("real.txt"), b"secret").expect("write fixture");
+        symlink("real.txt", root.join("link.txt")).expect("create symlink");
+
+        let response = FtpHandler::new()
+            .with_root_dir(&root)
+            .prepare_data_transfer("RETR link.txt")
+            .expect_err("final symlink should be rejected");
+
+        assert_eq!(response.code, 550);
+        std::fs::remove_dir_all(root).expect("cleanup temp root");
     }
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {

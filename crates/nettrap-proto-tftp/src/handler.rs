@@ -1,9 +1,49 @@
 use crate::prelude::*;
 use async_trait::async_trait;
-use std::io::{Read, Seek, SeekFrom};
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 const MAX_TFTP_SERVE_BYTES: u64 = 8 * 1024 * 1024;
+
+#[cfg(unix)]
+fn open_regular_file_no_final_symlink(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    ensure_regular_file(file)
+}
+
+#[cfg(windows)]
+fn open_regular_file_no_final_symlink(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    ensure_regular_file(file)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_regular_file_no_final_symlink(path: &Path) -> io::Result<File> {
+    ensure_regular_file(File::open(path)?)
+}
+
+fn ensure_regular_file(file: File) -> io::Result<File> {
+    if file.metadata()?.is_file() {
+        Ok(file)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ))
+    }
+}
 
 pub struct TftpHandler {
     root_dir: Option<PathBuf>,
@@ -75,8 +115,8 @@ impl TftpHandler {
             }
         };
         let path = canonical_root.join(filename);
-        let canonical_path = match path.canonicalize() {
-            Ok(p) if p.starts_with(&canonical_root) => p,
+        match path.canonicalize() {
+            Ok(p) if p.starts_with(&canonical_root) => {}
             Ok(_) => {
                 tracing::warn!("TFTP path traversal attempt: {}", filename);
                 return TftpPacket::Error {
@@ -90,14 +130,24 @@ impl TftpHandler {
                     data: self.default_content_block(block),
                 };
             }
+        }
+
+        let mut file = match open_regular_file_no_final_symlink(&path) {
+            Ok(file) => file,
+            Err(_) => {
+                return TftpPacket::Error {
+                    code: 2,
+                    message: "Access violation".to_string(),
+                };
+            }
         };
 
-        let metadata = match canonical_path.metadata() {
+        let metadata = match file.metadata() {
             Ok(metadata) => metadata,
             Err(_) => {
-                return TftpPacket::Data {
-                    block,
-                    data: self.default_content_block(block),
+                return TftpPacket::Error {
+                    code: 2,
+                    message: "Access violation".to_string(),
                 };
             }
         };
@@ -116,15 +166,6 @@ impl TftpHandler {
             };
         }
 
-        let mut file = match std::fs::File::open(&canonical_path) {
-            Ok(file) => file,
-            Err(_) => {
-                return TftpPacket::Data {
-                    block,
-                    data: self.default_content_block(block),
-                };
-            }
-        };
         if file.seek(SeekFrom::Start(offset)).is_err() {
             return TftpPacket::Data {
                 block,
@@ -256,6 +297,24 @@ mod tests {
 
         assert!(matches!(packet, TftpPacket::Error { code: 2, .. }));
 
+        std::fs::remove_dir_all(root).expect("cleanup temp root");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_final_symlink_inside_root() {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_temp_dir("nettrap-tftp-symlink");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create temp root");
+        std::fs::write(root.join("real.bin"), b"secret").expect("write fixture");
+        symlink("real.bin", root.join("link.bin")).expect("create symlink");
+
+        let handler = TftpHandler::new().with_root_dir(&root);
+        let packet = handler.handle_read_request_block("link.bin", 1);
+
+        assert!(matches!(packet, TftpPacket::Error { code: 2, .. }));
         std::fs::remove_dir_all(root).expect("cleanup temp root");
     }
 
