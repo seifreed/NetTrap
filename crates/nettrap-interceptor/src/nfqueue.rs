@@ -34,8 +34,6 @@ pub enum NetworkMode {
 
 #[derive(Debug, Clone)]
 struct IptablesRule {
-    table: String,
-    chain: String,
     rule_args: Vec<String>,
 }
 
@@ -44,6 +42,7 @@ pub struct PortRedirect {
     pub source_port: Option<u16>,
     pub target_port: u16,
     pub is_tcp: bool,
+    pub exclude_uid: Option<u32>,
 }
 
 impl PortRedirect {
@@ -52,6 +51,7 @@ impl PortRedirect {
             source_port: Some(source_port),
             target_port,
             is_tcp,
+            exclude_uid: None,
         }
     }
 
@@ -60,8 +60,58 @@ impl PortRedirect {
             source_port: None,
             target_port,
             is_tcp,
+            exclude_uid: Some(nix::unistd::Uid::current().as_raw()),
         }
     }
+}
+
+fn build_redirect_rule_args(
+    mode: NetworkMode,
+    interface: Option<&str>,
+    redirect: &PortRedirect,
+    proto: &str,
+) -> (&'static str, Vec<String>) {
+    let chain = match mode {
+        NetworkMode::SingleHost => "OUTPUT",
+        NetworkMode::MultiHost => "PREROUTING",
+    };
+    let mut args = vec![
+        "-t".to_string(),
+        "nat".to_string(),
+        "-A".to_string(),
+        chain.to_string(),
+        "-p".to_string(),
+        proto.to_string(),
+    ];
+
+    if let Some(source_port) = redirect.source_port {
+        args.extend_from_slice(&["--dport".to_string(), source_port.to_string()]);
+    }
+
+    args.extend_from_slice(&["!".to_string(), "-d".to_string(), "127.0.0.0/8".to_string()]);
+
+    if mode == NetworkMode::SingleHost {
+        if let Some(uid) = redirect.exclude_uid {
+            args.extend_from_slice(&[
+                "-m".to_string(),
+                "owner".to_string(),
+                "!".to_string(),
+                "--uid-owner".to_string(),
+                uid.to_string(),
+            ]);
+        }
+    } else if let Some(iface) = interface {
+        args.extend_from_slice(&["-i".to_string(), iface.to_string()]);
+    }
+
+    args.extend_from_slice(&[
+        "-j".to_string(),
+        "REDIRECT".to_string(),
+        "--to-port".to_string(),
+        redirect.target_port.to_string(),
+    ]);
+
+    (chain, args)
 }
 
 impl NfqueueInterceptor {
@@ -170,85 +220,11 @@ impl NfqueueInterceptor {
 
         for redirect in &self.redirect_rules {
             let proto = if redirect.is_tcp { "tcp" } else { "udp" };
+            let (_chain, args) =
+                build_redirect_rule_args(self.mode, self.interface.as_deref(), redirect, proto);
 
-            match self.mode {
-                NetworkMode::SingleHost => {
-                    // OUTPUT chain: redirect local outbound to localhost
-                    let mut args = vec![
-                        "-t".to_string(),
-                        "nat".to_string(),
-                        "-A".to_string(),
-                        "OUTPUT".to_string(),
-                        "-p".to_string(),
-                        proto.to_string(),
-                    ];
-
-                    if let Some(source_port) = redirect.source_port {
-                        args.extend_from_slice(&["--dport".to_string(), source_port.to_string()]);
-                    }
-
-                    // Don't redirect loopback
-                    args.extend_from_slice(&[
-                        "!".to_string(),
-                        "-d".to_string(),
-                        "127.0.0.0/8".to_string(),
-                    ]);
-
-                    args.extend_from_slice(&[
-                        "-j".to_string(),
-                        "REDIRECT".to_string(),
-                        "--to-port".to_string(),
-                        redirect.target_port.to_string(),
-                    ]);
-
-                    self.run_iptables(&args)?;
-                    installed.push(IptablesRule {
-                        table: "nat".to_string(),
-                        chain: "OUTPUT".to_string(),
-                        rule_args: args,
-                    });
-                }
-                NetworkMode::MultiHost => {
-                    // PREROUTING chain: redirect incoming traffic from external hosts
-                    let mut args = vec![
-                        "-t".to_string(),
-                        "nat".to_string(),
-                        "-A".to_string(),
-                        "PREROUTING".to_string(),
-                        "-p".to_string(),
-                        proto.to_string(),
-                    ];
-
-                    if let Some(source_port) = redirect.source_port {
-                        args.extend_from_slice(&["--dport".to_string(), source_port.to_string()]);
-                    }
-
-                    // Don't redirect loopback traffic
-                    args.extend_from_slice(&[
-                        "!".to_string(),
-                        "-d".to_string(),
-                        "127.0.0.0/8".to_string(),
-                    ]);
-
-                    if let Some(ref iface) = self.interface {
-                        args.extend_from_slice(&["-i".to_string(), iface.clone()]);
-                    }
-
-                    args.extend_from_slice(&[
-                        "-j".to_string(),
-                        "REDIRECT".to_string(),
-                        "--to-port".to_string(),
-                        redirect.target_port.to_string(),
-                    ]);
-
-                    self.run_iptables(&args)?;
-                    installed.push(IptablesRule {
-                        table: "nat".to_string(),
-                        chain: "PREROUTING".to_string(),
-                        rule_args: args,
-                    });
-                }
-            }
+            self.run_iptables(&args)?;
+            installed.push(IptablesRule { rule_args: args });
 
             if let Some(source_port) = redirect.source_port {
                 tracing::debug!(
@@ -432,5 +408,45 @@ impl Interceptor for NfqueueInterceptor {
 
     fn is_running(&self) -> bool {
         *self.running.read()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn contains_args(args: &[String], needle: &[&str]) -> bool {
+        args.windows(needle.len())
+            .any(|window| window.iter().map(String::as_str).eq(needle.iter().copied()))
+    }
+
+    #[test]
+    fn single_host_catch_all_excludes_current_uid() {
+        let redirect = PortRedirect::catch_all(true, 8080);
+        let (chain, args) =
+            build_redirect_rule_args(NetworkMode::SingleHost, None, &redirect, "tcp");
+
+        assert_eq!(chain, "OUTPUT");
+        assert!(contains_args(&args, &["-m", "owner", "!", "--uid-owner"]));
+    }
+
+    #[test]
+    fn single_host_explicit_redirect_keeps_owner_match_out() {
+        let redirect = PortRedirect::new(80, true, 8080);
+        let (_chain, args) =
+            build_redirect_rule_args(NetworkMode::SingleHost, None, &redirect, "tcp");
+
+        assert!(!contains_args(&args, &["-m", "owner", "!", "--uid-owner"]));
+    }
+
+    #[test]
+    fn multihost_catch_all_does_not_use_owner_match() {
+        let redirect = PortRedirect::catch_all(false, 5353);
+        let (chain, args) =
+            build_redirect_rule_args(NetworkMode::MultiHost, Some("eth0"), &redirect, "udp");
+
+        assert_eq!(chain, "PREROUTING");
+        assert!(!contains_args(&args, &["-m", "owner", "!", "--uid-owner"]));
+        assert!(contains_args(&args, &["-i", "eth0"]));
     }
 }

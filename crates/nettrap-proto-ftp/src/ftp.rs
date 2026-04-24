@@ -17,8 +17,8 @@ fn has_path_traversal(s: &str) -> bool {
 const MAX_FTP_RETR_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_FTP_LIST_ENTRIES: usize = 4096;
 const MAX_FTP_LIST_BYTES: usize = 1024 * 1024;
-const FTP_LIST_OK_TRAILER: &str = "226 Directory send OK.\r\n";
-const FTP_LIST_TRUNCATED_TRAILER: &str = "226 Directory send OK (truncated).\r\n";
+const FTP_LIST_OK_MESSAGE: &str = "Directory send OK.";
+const FTP_LIST_TRUNCATED_MESSAGE: &str = "Directory send OK (truncated).";
 
 pub struct FtpHandler {
     banner: String,
@@ -62,6 +62,24 @@ impl FtpHandler {
         self.pasv_address = addr.into();
         self
     }
+
+    pub fn passive_ports(&self) -> (u16, u16) {
+        (self.pasv_port_start, self.pasv_port_end)
+    }
+
+    pub fn next_passive_port(&self) -> u16 {
+        let current = self
+            .pasv_port_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed) as u32;
+        let start = self.pasv_port_start as u32;
+        let end = self.pasv_port_end as u32;
+        let range = end.saturating_sub(start).saturating_add(1).max(1);
+        (start + (current % range)) as u16
+    }
+
+    pub fn passive_address(&self) -> &str {
+        &self.pasv_address
+    }
 }
 
 impl Default for FtpHandler {
@@ -101,10 +119,37 @@ const VIRTUAL_FILES: &[(&str, u64)] = &[
     ("setup.exe", 16),
 ];
 
+fn read_file_limited(path: &std::path::Path) -> std::io::Result<Option<Vec<u8>>> {
+    let file = std::fs::File::open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+
+    let mut content = Vec::new();
+    let mut limited = std::io::Read::take(file, MAX_FTP_RETR_BYTES + 1);
+    std::io::Read::read_to_end(&mut limited, &mut content)?;
+    if content.len() as u64 > MAX_FTP_RETR_BYTES {
+        Ok(None)
+    } else {
+        Ok(Some(content))
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum FtpListStyle {
     Detailed,
     NamesOnly,
+}
+
+#[derive(Debug, Clone)]
+pub struct FtpDataTransfer {
+    pub start_response: FtpResponse,
+    pub data: Vec<u8>,
+    pub complete_response: FtpResponse,
 }
 
 impl FtpHandler {
@@ -112,7 +157,7 @@ impl FtpHandler {
         if listing
             .len()
             .saturating_add(line.len())
-            .saturating_add(FTP_LIST_TRUNCATED_TRAILER.len())
+            .saturating_add(FTP_LIST_TRUNCATED_MESSAGE.len())
             > MAX_FTP_LIST_BYTES
         {
             return false;
@@ -136,11 +181,11 @@ impl FtpHandler {
         }
     }
 
-    fn build_listing_response(
+    fn build_listing_payload(
         entries: Option<std::fs::ReadDir>,
         style: FtpListStyle,
-    ) -> FtpResponse {
-        let mut listing = String::from("150 Here comes the directory listing.\r\n");
+    ) -> (String, bool) {
+        let mut listing = String::new();
         let mut saw_entry = false;
         let mut listed_entries = 0usize;
         let mut truncated = false;
@@ -180,15 +225,137 @@ impl FtpHandler {
             Self::append_virtual_listing(&mut listing, style);
         }
 
-        listing.push_str(if truncated {
-            FTP_LIST_TRUNCATED_TRAILER
+        (listing, truncated)
+    }
+
+    pub fn prepare_data_transfer(&self, command: &str) -> Result<FtpDataTransfer, FtpResponse> {
+        let upper = command.to_uppercase();
+
+        if upper.starts_with("LIST") {
+            let entries = self
+                .root_dir
+                .as_ref()
+                .and_then(|root| std::fs::read_dir(root).ok());
+            let (listing, truncated) = Self::build_listing_payload(entries, FtpListStyle::Detailed);
+            return Ok(FtpDataTransfer {
+                start_response: FtpResponse::new(150, "Here comes the directory listing."),
+                data: listing.into_bytes(),
+                complete_response: FtpResponse::new(
+                    226,
+                    if truncated {
+                        FTP_LIST_TRUNCATED_MESSAGE
+                    } else {
+                        FTP_LIST_OK_MESSAGE
+                    },
+                ),
+            });
+        }
+
+        if upper.starts_with("NLST") {
+            let entries = self
+                .root_dir
+                .as_ref()
+                .and_then(|root| std::fs::read_dir(root).ok());
+            let (listing, truncated) =
+                Self::build_listing_payload(entries, FtpListStyle::NamesOnly);
+            return Ok(FtpDataTransfer {
+                start_response: FtpResponse::new(150, "Here comes the directory listing."),
+                data: listing.into_bytes(),
+                complete_response: FtpResponse::new(
+                    226,
+                    if truncated {
+                        FTP_LIST_TRUNCATED_MESSAGE
+                    } else {
+                        FTP_LIST_OK_MESSAGE
+                    },
+                ),
+            });
+        }
+
+        if upper.starts_with("RETR") {
+            return self.prepare_retr_transfer(command);
+        }
+
+        Err(FtpResponse::new(502, "Data command not implemented"))
+    }
+
+    fn prepare_retr_transfer(&self, command: &str) -> Result<FtpDataTransfer, FtpResponse> {
+        let filename = command.get(5..).unwrap_or("").trim();
+
+        if has_path_traversal(filename) {
+            tracing::warn!("FTP path traversal attempt blocked: {:?}", filename);
+            return Err(FtpResponse::new(550, "Invalid path"));
+        }
+
+        if let Some(ref root) = self.root_dir {
+            let path = root.join(filename);
+            let canonical_root = match root.canonicalize() {
+                Ok(p) => p,
+                Err(_) => {
+                    tracing::warn!("FTP root directory cannot be canonicalized");
+                    return Err(FtpResponse::new(550, "Server configuration error"));
+                }
+            };
+            let canonical_path = match path.canonicalize() {
+                Ok(p) => p,
+                Err(_) => {
+                    if let Some(content) = default_file_for_extension(
+                        std::path::Path::new(filename)
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .unwrap_or(""),
+                    ) {
+                        return Ok(Self::retr_transfer(filename, content.to_vec()));
+                    }
+                    return Err(FtpResponse::new(550, "File not found"));
+                }
+            };
+
+            if !canonical_path.starts_with(&canonical_root) {
+                tracing::warn!("Path traversal attempt blocked: {:?}", canonical_path);
+                return Err(FtpResponse::new(550, "Access denied"));
+            }
+
+            match read_file_limited(&canonical_path) {
+                Ok(Some(content)) => Ok(Self::retr_transfer(filename, content)),
+                Ok(None) => {
+                    tracing::warn!(
+                        "FTP RETR file {:?} exceeds response size limit ({})",
+                        canonical_path,
+                        MAX_FTP_RETR_BYTES
+                    );
+                    Err(FtpResponse::new(552, "File too large"))
+                }
+                Err(_) => {
+                    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                    if let Some(content) = default_file_for_extension(ext) {
+                        Ok(Self::retr_transfer(filename, content.to_vec()))
+                    } else {
+                        Err(FtpResponse::new(550, "File not found"))
+                    }
+                }
+            }
         } else {
-            FTP_LIST_OK_TRAILER
-        });
-        FtpResponse {
-            code: 0,
-            message: listing,
-            raw: None,
+            Ok(FtpDataTransfer {
+                start_response: FtpResponse::new(150, "Opening data connection"),
+                data: Vec::new(),
+                complete_response: FtpResponse::new(226, "Transfer complete."),
+            })
+        }
+    }
+
+    fn retr_transfer(filename: &str, content: Vec<u8>) -> FtpDataTransfer {
+        FtpDataTransfer {
+            start_response: FtpResponse::new(
+                150,
+                format!(
+                    "Opening BINARY mode data connection for {} ({} bytes).",
+                    filename,
+                    content.len()
+                ),
+            ),
+            data: content,
+            complete_response: FtpResponse::new(226, "Transfer complete."),
         }
     }
 
@@ -204,17 +371,7 @@ impl FtpHandler {
         } else if upper.starts_with("TYPE") {
             FtpResponse::new(200, "Type set to I")
         } else if upper.starts_with("PASV") {
-            // Round-robin port allocation across the configured range
-            let port = {
-                let current = self
-                    .pasv_port_counter
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                    as u32;
-                let start = self.pasv_port_start as u32;
-                let end = self.pasv_port_end as u32;
-                let range = end.saturating_sub(start).saturating_add(1).max(1);
-                (start + (current % range)) as u16
-            };
+            let port = self.next_passive_port();
             let p1 = port / 256;
             let p2 = port % 256;
             FtpResponse::new(
@@ -224,116 +381,15 @@ impl FtpHandler {
                     self.pasv_address, p1, p2
                 ),
             )
-        } else if upper.starts_with("LIST") {
-            let entries = self
-                .root_dir
-                .as_ref()
-                .and_then(|root| std::fs::read_dir(root).ok());
-            Self::build_listing_response(entries, FtpListStyle::Detailed)
-        } else if upper.starts_with("RETR") {
-            let filename = command.get(5..).unwrap_or("").trim();
-
-            if has_path_traversal(filename) {
-                tracing::warn!("FTP path traversal attempt blocked: {:?}", filename);
-                return FtpResponse::new(550, "Invalid path");
-            }
-
-            if let Some(ref root) = self.root_dir {
-                let path = root.join(filename);
-                // Canonicalize root first - if it fails, reject the request
-                let canonical_root = match root.canonicalize() {
-                    Ok(p) => p,
-                    Err(_) => {
-                        tracing::warn!("FTP root directory cannot be canonicalized");
-                        return FtpResponse::new(550, "Server configuration error");
-                    }
-                };
-                // Canonicalize the requested path - if it fails, file doesn't exist
-                let canonical_path = match path.canonicalize() {
-                    Ok(p) => p,
-                    Err(_) => {
-                        // File doesn't exist, try extension-based fallback
-                        let ext = std::path::Path::new(filename)
-                            .extension()
-                            .and_then(|e| e.to_str())
-                            .unwrap_or("");
-                        if let Some(content) = default_file_for_extension(ext) {
-                            let mut resp = format!(
-                                "150 Opening BINARY mode data connection for {} ({} bytes).\r\n",
-                                filename,
-                                content.len()
-                            )
-                            .into_bytes();
-                            resp.extend_from_slice(content);
-                            resp.extend_from_slice(b"226 Transfer complete.\r\n");
-                            return FtpResponse::raw(resp);
-                        }
-                        return FtpResponse::new(550, "File not found");
-                    }
-                };
-                // Verify the resolved path is still under root
-                if !canonical_path.starts_with(&canonical_root) {
-                    tracing::warn!("Path traversal attempt blocked: {:?}", canonical_path);
-                    return FtpResponse::new(550, "Access denied");
-                }
-                if let Ok(metadata) = canonical_path.metadata() {
-                    if metadata.is_file() {
-                        if metadata.len() > MAX_FTP_RETR_BYTES {
-                            tracing::warn!(
-                                "FTP RETR file {:?} exceeds response size limit ({} > {})",
-                                canonical_path,
-                                metadata.len(),
-                                MAX_FTP_RETR_BYTES
-                            );
-                            return FtpResponse::new(552, "File too large");
-                        }
-                        if let Ok(content) = std::fs::read(&canonical_path) {
-                            let mut resp = format!(
-                                "150 Opening BINARY mode data connection for {} ({} bytes).\r\n",
-                                filename,
-                                content.len()
-                            )
-                            .into_bytes();
-                            resp.extend_from_slice(&content);
-                            resp.extend_from_slice(b"226 Transfer complete.\r\n");
-                            return FtpResponse::raw(resp);
-                        }
-                    }
-                }
-                // Try extension-based fallback
-                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                if let Some(content) = default_file_for_extension(ext) {
-                    let mut resp = format!(
-                        "150 Opening BINARY mode data connection for {} ({} bytes).\r\n",
-                        filename,
-                        content.len()
-                    )
-                    .into_bytes();
-                    resp.extend_from_slice(content);
-                    resp.extend_from_slice(b"226 Transfer complete.\r\n");
-                    return FtpResponse::raw(resp);
-                }
-                FtpResponse::new(550, "File not found")
-            } else {
-                // No root dir configured: return simple response
-                FtpResponse::new(150, "Opening data connection")
-            }
-        } else if upper.starts_with("PORT") {
-            // Parse PORT h1,h2,h3,h4,p1,p2
-            FtpResponse::new(200, "PORT command successful")
-        } else if upper.starts_with("EPRT") {
-            FtpResponse::new(200, "EPRT command successful")
+        } else if upper.starts_with("LIST")
+            || upper.starts_with("NLST")
+            || upper.starts_with("RETR")
+        {
+            FtpResponse::new(425, "Use PASV or EPSV first")
+        } else if upper.starts_with("PORT") || upper.starts_with("EPRT") {
+            FtpResponse::new(502, "Active mode is not supported")
         } else if upper.starts_with("EPSV") {
-            let port = {
-                let current = self
-                    .pasv_port_counter
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                    as u32;
-                let start = self.pasv_port_start as u32;
-                let end = self.pasv_port_end as u32;
-                let range = end.saturating_sub(start).saturating_add(1).max(1);
-                (start + (current % range)) as u16
-            };
+            let port = self.next_passive_port();
             FtpResponse::new(
                 229,
                 format!("Entering Extended Passive Mode (|||{}|)", port),
@@ -343,8 +399,9 @@ impl FtpHandler {
         } else if upper.starts_with("FEAT") {
             FtpResponse {
                 code: 0,
-                message: "211-Features:\r\n PASV\r\n UTF8\r\n SIZE\r\n MDTM\r\n211 End\r\n"
-                    .to_string(),
+                message:
+                    "211-Features:\r\n PASV\r\n EPSV\r\n UTF8\r\n SIZE\r\n MDTM\r\n211 End\r\n"
+                        .to_string(),
                 raw: None,
             }
         } else if upper.starts_with("SIZE") {
@@ -400,21 +457,15 @@ impl FtpHandler {
         } else if upper.starts_with("RNTO") {
             FtpResponse::new(250, "Rename successful")
         } else if upper.starts_with("STOR") || upper.starts_with("APPE") {
-            FtpResponse::new(150, "Opening data connection for file transfer")
+            FtpResponse::new(502, "Upload data transfers are not supported")
         } else if upper.starts_with("NOOP") {
             FtpResponse::new(200, "NOOP ok")
         } else if upper.starts_with("HELP") {
-            FtpResponse { code: 0, message: "214-The following commands are recognized:\r\n USER PASS ACCT CWD CDUP SMNT QUIT REIN PORT PASV TYPE STRU\r\n MODE RETR STOR STOU APPE ALLO REST RNFR RNTO DELE RMD MKD\r\n PWD LIST NLST SITE SYST STAT HELP NOOP\r\n214 Help OK.\r\n".to_string(), raw: None }
+            FtpResponse { code: 0, message: "214-The following commands are recognized:\r\n USER PASS CWD CDUP QUIT PASV EPSV TYPE RETR\r\n PWD LIST NLST SIZE MDTM SYST STAT HELP NOOP\r\n214 Help OK.\r\n".to_string(), raw: None }
         } else if upper.starts_with("STAT") {
             FtpResponse::new(211, "NetTrap FTP Server status OK")
         } else if upper.starts_with("ABOR") {
             FtpResponse::new(226, "Abort successful")
-        } else if upper.starts_with("NLST") {
-            let entries = self
-                .root_dir
-                .as_ref()
-                .and_then(|root| std::fs::read_dir(root).ok());
-            Self::build_listing_response(entries, FtpListStyle::NamesOnly)
         } else if upper.starts_with("QUIT") {
             FtpResponse::new(221, "Goodbye")
         } else {
@@ -431,6 +482,7 @@ impl FtpHandler {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FtpResponse {
     pub code: u16,
     pub message: String,
@@ -678,7 +730,8 @@ mod tests {
 
         let response = FtpHandler::new()
             .with_root_dir(&root)
-            .handle("RETR large.bin");
+            .prepare_data_transfer("RETR large.bin")
+            .expect_err("large file should be rejected");
 
         assert_eq!(response.code, 552);
         assert!(response.raw.is_none());
@@ -699,11 +752,14 @@ mod tests {
 
     #[test]
     fn nlst_without_root_returns_bounded_virtual_listing() {
-        let response = FtpHandler::new().handle("NLST");
+        let transfer = FtpHandler::new()
+            .prepare_data_transfer("NLST")
+            .expect("nlst transfer");
 
-        assert_eq!(response.code, 0);
-        assert!(response.message.contains("index.html\r\n"));
-        assert!(response.message.len() <= MAX_FTP_LIST_BYTES);
+        assert_eq!(transfer.start_response.code, 150);
+        assert!(String::from_utf8_lossy(&transfer.data).contains("index.html\r\n"));
+        assert!(transfer.data.len() <= MAX_FTP_LIST_BYTES);
+        assert_eq!(transfer.complete_response.code, 226);
     }
 
     #[test]
@@ -711,12 +767,23 @@ mod tests {
         let root = unique_temp_dir("nettrap-ftp-empty-list");
         std::fs::create_dir_all(&root).expect("create temp root");
 
-        let response = FtpHandler::new().with_root_dir(&root).handle("LIST");
+        let transfer = FtpHandler::new()
+            .with_root_dir(&root)
+            .prepare_data_transfer("LIST")
+            .expect("list transfer");
 
-        assert_eq!(response.code, 0);
-        assert!(response.message.contains("index.html"));
-        assert!(response.message.len() <= MAX_FTP_LIST_BYTES);
+        assert_eq!(transfer.start_response.code, 150);
+        assert!(String::from_utf8_lossy(&transfer.data).contains("index.html"));
+        assert!(transfer.data.len() <= MAX_FTP_LIST_BYTES);
+        assert_eq!(transfer.complete_response.code, 226);
         std::fs::remove_dir_all(root).expect("cleanup temp root");
+    }
+
+    #[test]
+    fn handle_list_requires_passive_connection() {
+        let response = FtpHandler::new().handle("LIST");
+
+        assert_eq!(response.code, 425);
     }
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {

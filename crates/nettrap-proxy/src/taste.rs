@@ -741,7 +741,7 @@ impl ProtocolTaste for SyslogRecvTaste {
 pub struct DummyTaste;
 impl ProtocolTaste for DummyTaste {
     fn taste(&self, _data: &[u8], _dst_port: u16) -> TasteScore {
-        2 // Just above raw fallback, configurable catch-all
+        0
     }
     fn protocol_name(&self) -> &'static str {
         "dummy"

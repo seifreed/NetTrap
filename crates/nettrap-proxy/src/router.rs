@@ -211,6 +211,17 @@ mod tests {
     }
 
     #[test]
+    fn route_tcp_prefers_default_over_dummy_catch_all() {
+        let router = ProtocolRouter::new().with_default_tcp("http");
+        router.register("dummy", Box::new(crate::taste::DummyTaste), true);
+        router.register("raw", Box::new(crate::taste::RawTaste), false);
+
+        let routed = router.route_tcp(b"\x00\x01", 31337);
+
+        assert_eq!(routed, Some(("http".to_string(), 0)));
+    }
+
+    #[test]
     fn empty_default_handler_is_ignored() {
         let router = ProtocolRouter::new().with_default_udp("");
         router.register("never", Box::new(NeverMatchTaste), false);

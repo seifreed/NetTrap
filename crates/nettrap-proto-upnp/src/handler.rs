@@ -44,13 +44,21 @@ impl UpnpHandler {
             return Vec::new();
         }
 
-        if text.contains("DeletePortMapping") {
+        if path != "/upnp/control/WANIPConn1" {
+            return Vec::new();
+        }
+
+        let Some(action) = header_value(&text, "SOAPAction") else {
+            return Vec::new();
+        };
+
+        if action_contains(action, "DeletePortMapping") {
             tracing::warn!(
                 "UPnP delete port mapping attempt: {}",
                 text.lines().take(3).collect::<Vec<_>>().join(" | ")
             );
             http_xml_response(delete_port_mapping_response())
-        } else if text.contains("AddPortMapping") {
+        } else if action_contains(action, "AddPortMapping") {
             tracing::warn!(
                 "UPnP add port mapping attempt: {}",
                 text.lines().take(3).collect::<Vec<_>>().join(" | ")
@@ -122,6 +130,10 @@ fn header_value<'a>(text: &'a str, name: &str) -> Option<&'a str> {
     None
 }
 
+fn action_contains(action: &str, operation: &str) -> bool {
+    action.contains("urn:schemas-upnp-org:service:WANIPConnection:1#") && action.contains(operation)
+}
+
 fn http_xml_response(body: &str) -> Vec<u8> {
     format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/xml; charset=\"utf-8\"\r\nContent-Length: {}\r\nServer: Linux/3.14 UPnP/1.1 NetTrap/1.0\r\n\r\n{}",
@@ -186,5 +198,24 @@ mod tests {
 
         assert!(response.starts_with(b"HTTP/1.1 200 OK"));
         assert!(String::from_utf8_lossy(&response).contains("AddPortMappingResponse"));
+    }
+
+    #[test]
+    fn http_post_without_soap_action_is_not_upnp() {
+        let request =
+            b"POST /upnp/control/WANIPConn1 HTTP/1.1\r\nHost: router\r\n\r\nAddPortMapping";
+
+        let response = UpnpHandler::new().handle_http(request);
+
+        assert!(response.is_empty());
+    }
+
+    #[test]
+    fn http_post_on_wrong_path_is_not_upnp() {
+        let request = b"POST /submit HTTP/1.1\r\nHost: router\r\nSOAPAction: \"urn:schemas-upnp-org:service:WANIPConnection:1#AddPortMapping\"\r\nContent-Length: 14\r\n\r\nAddPortMapping";
+
+        let response = UpnpHandler::new().handle_http(request);
+
+        assert!(response.is_empty());
     }
 }

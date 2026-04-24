@@ -51,20 +51,27 @@ mod tests {
     fn test_ftp_list() {
         let handler = FtpHandler::new();
         let response = handler.handle("LIST");
-        assert_eq!(response.code, 0); // raw response with full listing
-        assert!(
-            response
-                .message
-                .contains("150 Here comes the directory listing")
-        );
-        assert!(response.message.contains("226 Directory send OK"));
+        assert_eq!(response.code, 425);
+
+        let transfer = handler
+            .prepare_data_transfer("LIST")
+            .expect("list transfer should be prepared");
+        assert_eq!(transfer.start_response.code, 150);
+        assert!(String::from_utf8_lossy(&transfer.data).contains("index.html"));
+        assert_eq!(transfer.complete_response.code, 226);
     }
 
     #[test]
     fn test_ftp_retr() {
         let handler = FtpHandler::new();
         let response = handler.handle("RETR file.txt");
-        assert_eq!(response.code, 150);
+        assert_eq!(response.code, 425);
+
+        let transfer = handler
+            .prepare_data_transfer("RETR file.txt")
+            .expect("retr transfer should be prepared");
+        assert_eq!(transfer.start_response.code, 150);
+        assert_eq!(transfer.complete_response.code, 226);
     }
 
     #[test]
