@@ -17,7 +17,14 @@ use crate::utils::{
 
 const MAX_HTTP_HEADER_SIZE: usize = 64 * 1024;
 const MAX_HTTP_REQUEST_SIZE: usize = 10 * 1024 * 1024;
+const MAX_LINE_FRAME_SIZE: usize = 64 * 1024;
+const MAX_SOCKS4_FRAME_SIZE: usize = 8 * 1024;
 const MAX_SMTP_DATA_SIZE: usize = 50 * 1024 * 1024;
+const MAX_MQTT_FRAME_SIZE: usize = 1024 * 1024;
+const MAX_REDIS_FRAME_SIZE: usize = 1024 * 1024;
+const MAX_REDIS_ARRAY_COUNT: usize = 1024;
+const MAX_MEMCACHED_LINE_SIZE: usize = 64 * 1024;
+const MAX_MEMCACHED_FRAME_SIZE: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TcpFrameMode {
@@ -34,6 +41,8 @@ enum TcpFrameMode {
     Rdp,
     Ldap,
     Mqtt,
+    Redis,
+    Memcached,
     Immediate,
 }
 
@@ -71,16 +80,18 @@ fn next_tcp_frame(
     match mode {
         TcpFrameMode::DnsTcp => optional_frame(extract_length_prefixed_frame(buffer)),
         TcpFrameMode::Http => extract_http_request(buffer),
-        TcpFrameMode::Line | TcpFrameMode::SshBanner => optional_frame(extract_line_frame(buffer)),
+        TcpFrameMode::Line | TcpFrameMode::SshBanner => extract_line_frame(buffer),
         TcpFrameMode::SmtpData => extract_smtp_data_frame(buffer),
         TcpFrameMode::SshPayload => optional_frame(extract_ssh_payload_frame(buffer)),
         TcpFrameMode::Mysql => optional_frame(extract_mysql_frame(buffer)),
         TcpFrameMode::Postgres => optional_frame(extract_postgres_frame(buffer)),
-        TcpFrameMode::Socks => optional_frame(extract_socks_frame(buffer)),
+        TcpFrameMode::Socks => extract_socks_frame(buffer),
         TcpFrameMode::Smb => optional_frame(extract_smb_frame(buffer)),
         TcpFrameMode::Rdp => optional_frame(extract_rdp_frame(buffer)),
         TcpFrameMode::Ldap => optional_frame(extract_ldap_frame(buffer)),
         TcpFrameMode::Mqtt => extract_mqtt_frame(buffer),
+        TcpFrameMode::Redis => extract_redis_frame(buffer),
+        TcpFrameMode::Memcached => extract_memcached_frame(buffer),
         TcpFrameMode::Immediate => optional_frame(extract_immediate_frame(buffer)),
     }
 }
@@ -168,8 +179,15 @@ fn tcp_frame_mode(
         return TcpFrameMode::Ldap;
     }
 
-    if listener == "mqtt" || listener.starts_with("mqtt") || matches!(destination_port, 1883 | 8883)
-    {
+    if listener == "redis" || listener.starts_with("redis") || destination_port == 6379 {
+        return TcpFrameMode::Redis;
+    }
+
+    if listener == "memcached" || listener.starts_with("memcached") || destination_port == 11211 {
+        return TcpFrameMode::Memcached;
+    }
+
+    if listener == "mqtt" || listener.starts_with("mqtt") || destination_port == 1883 {
         return TcpFrameMode::Mqtt;
     }
 
@@ -192,6 +210,8 @@ fn tcp_frame_mode(
             "rdp" => TcpFrameMode::Rdp,
             "ldap" => TcpFrameMode::Ldap,
             "mqtt" => TcpFrameMode::Mqtt,
+            "redis" => TcpFrameMode::Redis,
+            "memcached" => TcpFrameMode::Memcached,
             _ => TcpFrameMode::Immediate,
         };
     }
@@ -213,9 +233,26 @@ fn extract_length_prefixed_frame(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
     Some(buffer.drain(..total_len).collect())
 }
 
-fn extract_line_frame(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
-    let line_end = buffer.iter().position(|&byte| byte == b'\n')?;
-    Some(buffer.drain(..=line_end).collect())
+fn extract_line_frame(buffer: &mut Vec<u8>) -> TcpFrameResult {
+    extract_limited_line_frame(buffer, MAX_LINE_FRAME_SIZE)
+}
+
+fn extract_limited_line_frame(buffer: &mut Vec<u8>, max_len: usize) -> TcpFrameResult {
+    if let Some(line_end) = buffer.iter().position(|&byte| byte == b'\n') {
+        let frame_len = line_end + 1;
+        if frame_len > max_len {
+            buffer.clear();
+            return TcpFrameResult::TooLarge { response: None };
+        }
+        return TcpFrameResult::Complete(buffer.drain(..frame_len).collect());
+    }
+
+    if buffer.len() > max_len {
+        buffer.clear();
+        return TcpFrameResult::TooLarge { response: None };
+    }
+
+    TcpFrameResult::Incomplete
 }
 
 fn extract_ssh_payload_frame(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
@@ -463,6 +500,12 @@ fn extract_mqtt_frame(buffer: &mut Vec<u8>) -> TcpFrameResult {
         return TcpFrameResult::Incomplete;
     }
 
+    let packet_type = (buffer[0] >> 4) & 0x0F;
+    if !(1..=14).contains(&packet_type) {
+        buffer.clear();
+        return TcpFrameResult::Invalid { response: None };
+    }
+
     let mut multiplier = 1usize;
     let mut remaining_len = 0usize;
 
@@ -473,12 +516,20 @@ fn extract_mqtt_frame(buffer: &mut Vec<u8>) -> TcpFrameResult {
 
         let byte = buffer[i];
         remaining_len += ((byte & 0x7F) as usize) * multiplier;
+        if remaining_len > MAX_MQTT_FRAME_SIZE {
+            buffer.clear();
+            return TcpFrameResult::TooLarge { response: None };
+        }
         if byte & 0x80 == 0 {
             let header_len = i + 1;
             let Some(total_len) = header_len.checked_add(remaining_len) else {
                 buffer.clear();
                 return TcpFrameResult::TooLarge { response: None };
             };
+            if total_len > MAX_MQTT_FRAME_SIZE {
+                buffer.clear();
+                return TcpFrameResult::TooLarge { response: None };
+            }
             if buffer.len() < total_len {
                 return TcpFrameResult::Incomplete;
             }
@@ -547,30 +598,40 @@ fn is_postgres_typed_message(byte: u8) -> bool {
     )
 }
 
-fn extract_socks_frame(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
-    match buffer.first().copied()? {
-        0x04 => extract_socks4_frame(buffer),
-        0x05 => extract_socks5_frame(buffer),
-        _ => extract_immediate_frame(buffer),
+fn extract_socks_frame(buffer: &mut Vec<u8>) -> TcpFrameResult {
+    match buffer.first().copied() {
+        Some(0x04) => extract_socks4_frame(buffer),
+        Some(0x05) => optional_frame(extract_socks5_frame(buffer)),
+        Some(_) => optional_frame(extract_immediate_frame(buffer)),
+        None => TcpFrameResult::Incomplete,
     }
 }
 
-fn extract_socks4_frame(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
-    if buffer.len() < 9 {
-        return None;
+fn extract_socks4_frame(buffer: &mut Vec<u8>) -> TcpFrameResult {
+    if buffer.len() > MAX_SOCKS4_FRAME_SIZE {
+        buffer.clear();
+        return TcpFrameResult::TooLarge { response: None };
     }
 
-    let user_end = buffer[8..].iter().position(|&b| b == 0)?;
+    if buffer.len() < 9 {
+        return TcpFrameResult::Incomplete;
+    }
+
+    let Some(user_end) = buffer[8..].iter().position(|&b| b == 0) else {
+        return TcpFrameResult::Incomplete;
+    };
     let mut total_len = 8 + user_end + 1;
     let is_socks4a = buffer[4] == 0 && buffer[5] == 0 && buffer[6] == 0 && buffer[7] != 0;
 
     if is_socks4a {
         let host_start = total_len;
-        let host_end = buffer[host_start..].iter().position(|&b| b == 0)?;
+        let Some(host_end) = buffer[host_start..].iter().position(|&b| b == 0) else {
+            return TcpFrameResult::Incomplete;
+        };
         total_len = host_start + host_end + 1;
     }
 
-    Some(buffer.drain(..total_len).collect())
+    TcpFrameResult::Complete(buffer.drain(..total_len).collect())
 }
 
 fn extract_socks5_frame(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
@@ -709,6 +770,197 @@ fn parse_ber_length(data: &[u8]) -> Option<(usize, usize)> {
     Some((len, 1 + num_bytes))
 }
 
+fn extract_redis_frame(buffer: &mut Vec<u8>) -> TcpFrameResult {
+    if buffer.is_empty() {
+        return TcpFrameResult::Incomplete;
+    }
+
+    if buffer.len() > MAX_REDIS_FRAME_SIZE {
+        buffer.clear();
+        return TcpFrameResult::TooLarge { response: None };
+    }
+
+    if buffer[0] == b'*' {
+        extract_redis_resp_array_frame(buffer)
+    } else {
+        extract_limited_line_frame(buffer, MAX_LINE_FRAME_SIZE)
+    }
+}
+
+fn extract_redis_resp_array_frame(buffer: &mut Vec<u8>) -> TcpFrameResult {
+    let Some(header_end) = find_crlf_from(buffer, 0) else {
+        return TcpFrameResult::Incomplete;
+    };
+
+    let Ok(count_text) = std::str::from_utf8(&buffer[1..header_end]) else {
+        buffer.clear();
+        return TcpFrameResult::Invalid { response: None };
+    };
+    let Ok(count) = count_text.parse::<usize>() else {
+        buffer.clear();
+        return TcpFrameResult::Invalid { response: None };
+    };
+    if count > MAX_REDIS_ARRAY_COUNT {
+        buffer.clear();
+        return TcpFrameResult::TooLarge { response: None };
+    }
+
+    let mut pos = header_end + 2;
+    for _ in 0..count {
+        if pos >= buffer.len() {
+            return TcpFrameResult::Incomplete;
+        }
+        if buffer[pos] != b'$' {
+            buffer.clear();
+            return TcpFrameResult::Invalid { response: None };
+        }
+
+        let Some(bulk_header_end) = find_crlf_from(buffer, pos) else {
+            return TcpFrameResult::Incomplete;
+        };
+        let Ok(bulk_len_text) = std::str::from_utf8(&buffer[pos + 1..bulk_header_end]) else {
+            buffer.clear();
+            return TcpFrameResult::Invalid { response: None };
+        };
+        let Ok(bulk_len) = bulk_len_text.parse::<isize>() else {
+            buffer.clear();
+            return TcpFrameResult::Invalid { response: None };
+        };
+
+        pos = bulk_header_end + 2;
+        if bulk_len == -1 {
+            continue;
+        }
+        if bulk_len < -1 {
+            buffer.clear();
+            return TcpFrameResult::Invalid { response: None };
+        }
+
+        let bulk_len = bulk_len as usize;
+        let Some(data_end) = pos.checked_add(bulk_len) else {
+            buffer.clear();
+            return TcpFrameResult::TooLarge { response: None };
+        };
+        let Some(frame_pos) = data_end.checked_add(2) else {
+            buffer.clear();
+            return TcpFrameResult::TooLarge { response: None };
+        };
+        if frame_pos > MAX_REDIS_FRAME_SIZE {
+            buffer.clear();
+            return TcpFrameResult::TooLarge { response: None };
+        }
+        if buffer.len() < frame_pos {
+            return TcpFrameResult::Incomplete;
+        }
+        if &buffer[data_end..frame_pos] != b"\r\n" {
+            buffer.clear();
+            return TcpFrameResult::Invalid { response: None };
+        }
+        pos = frame_pos;
+    }
+
+    TcpFrameResult::Complete(buffer.drain(..pos).collect())
+}
+
+fn extract_memcached_frame(buffer: &mut Vec<u8>) -> TcpFrameResult {
+    if buffer.is_empty() {
+        return TcpFrameResult::Incomplete;
+    }
+
+    if buffer[0] == 0x80 {
+        return extract_memcached_binary_frame(buffer);
+    }
+
+    let Some(line_end) = buffer.iter().position(|&byte| byte == b'\n') else {
+        if buffer.len() > MAX_MEMCACHED_LINE_SIZE {
+            buffer.clear();
+            return TcpFrameResult::TooLarge { response: None };
+        }
+        return TcpFrameResult::Incomplete;
+    };
+
+    let header_len = line_end + 1;
+    if header_len > MAX_MEMCACHED_LINE_SIZE {
+        buffer.clear();
+        return TcpFrameResult::TooLarge { response: None };
+    }
+
+    let header = &buffer[..line_end];
+    let header = header.strip_suffix(b"\r").unwrap_or(header);
+    let Ok(header_text) = std::str::from_utf8(header) else {
+        buffer.clear();
+        return TcpFrameResult::Invalid { response: None };
+    };
+
+    if let Some(body_len) = memcached_storage_body_len(header_text) {
+        let Some(body_end) = header_len.checked_add(body_len) else {
+            buffer.clear();
+            return TcpFrameResult::TooLarge { response: None };
+        };
+        let Some(total_len) = body_end.checked_add(2) else {
+            buffer.clear();
+            return TcpFrameResult::TooLarge { response: None };
+        };
+        if total_len > MAX_MEMCACHED_FRAME_SIZE {
+            buffer.clear();
+            return TcpFrameResult::TooLarge { response: None };
+        }
+        if buffer.len() < total_len {
+            return TcpFrameResult::Incomplete;
+        }
+        if &buffer[body_end..total_len] != b"\r\n" {
+            buffer.clear();
+            return TcpFrameResult::Invalid { response: None };
+        }
+        return TcpFrameResult::Complete(buffer.drain(..total_len).collect());
+    }
+
+    TcpFrameResult::Complete(buffer.drain(..header_len).collect())
+}
+
+fn extract_memcached_binary_frame(buffer: &mut Vec<u8>) -> TcpFrameResult {
+    if buffer.len() < 24 {
+        return TcpFrameResult::Incomplete;
+    }
+
+    let body_len = u32::from_be_bytes([buffer[8], buffer[9], buffer[10], buffer[11]]) as usize;
+    let Some(total_len) = 24usize.checked_add(body_len) else {
+        buffer.clear();
+        return TcpFrameResult::TooLarge { response: None };
+    };
+    if total_len > MAX_MEMCACHED_FRAME_SIZE {
+        buffer.clear();
+        return TcpFrameResult::TooLarge { response: None };
+    }
+    if buffer.len() < total_len {
+        return TcpFrameResult::Incomplete;
+    }
+
+    TcpFrameResult::Complete(buffer.drain(..total_len).collect())
+}
+
+fn memcached_storage_body_len(header: &str) -> Option<usize> {
+    let mut parts = header.split_whitespace();
+    let command = parts.next()?.to_ascii_lowercase();
+    if !matches!(
+        command.as_str(),
+        "set" | "add" | "replace" | "append" | "prepend" | "cas"
+    ) {
+        return None;
+    }
+
+    let bytes = header.split_whitespace().nth(4)?;
+    bytes.parse().ok()
+}
+
+fn find_crlf_from(haystack: &[u8], start: usize) -> Option<usize> {
+    haystack
+        .get(start..)?
+        .windows(2)
+        .position(|window| window == b"\r\n")
+        .map(|offset| start + offset)
+}
+
 fn extract_immediate_frame(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
     if buffer.is_empty() {
         None
@@ -761,6 +1013,7 @@ pub async fn handle_tcp_connection(
     let mut smtp_data_buf: Vec<u8> = Vec::new();
     let mut smtp_auth_state = nettrap_proto_smtp::SmtpAuthState::None;
     let mut irc_nick = "unknown".to_string();
+    let mut redis_authenticated = false;
     let mut ssh_first_packet = true;
     let mut connection_buf: Vec<u8> = Vec::new();
 
@@ -916,6 +1169,7 @@ pub async fn handle_tcp_connection(
                                 &mut smtp_data_buf,
                                 &mut smtp_auth_state,
                                 &mut irc_nick,
+                                &mut redis_authenticated,
                                 &mut ssh_first_packet,
                             )
                             .await;
@@ -998,6 +1252,7 @@ async fn handle_tcp_protocol(
     smtp_data_buf: &mut Vec<u8>,
     smtp_auth_state: &mut nettrap_proto_smtp::SmtpAuthState,
     irc_nick: &mut String,
+    redis_authenticated: &mut bool,
     ssh_first_packet: &mut bool,
 ) -> Vec<u8> {
     if let Some(response) = dispatch_named_tcp_protocol(
@@ -1026,6 +1281,7 @@ async fn handle_tcp_protocol(
         smtp_data_buf,
         smtp_auth_state,
         irc_nick,
+        redis_authenticated,
         ssh_first_packet,
     )
     .await
@@ -1059,6 +1315,7 @@ async fn handle_tcp_protocol(
             smtp_data_buf,
             smtp_auth_state,
             irc_nick,
+            redis_authenticated,
             ssh_first_packet,
         )
         .await
@@ -1092,6 +1349,7 @@ async fn dispatch_named_tcp_protocol(
     smtp_data_buf: &mut Vec<u8>,
     smtp_auth_state: &mut nettrap_proto_smtp::SmtpAuthState,
     irc_nick: &mut String,
+    redis_authenticated: &mut bool,
     ssh_first_packet: &mut bool,
 ) -> Option<Vec<u8>> {
     if name == "dns" || name.starts_with("dns") {
@@ -1199,7 +1457,7 @@ async fn dispatch_named_tcp_protocol(
             "redis",
         )
         .await;
-        Some(redis_handler.handle_command(data))
+        Some(redis_handler.handle_command_with_auth_state(data, redis_authenticated))
     } else if name == "mysql" || name.starts_with("mysql") {
         crate::protocol_handlers::log_tcp_event(
             ctx,
@@ -1505,6 +1763,7 @@ async fn handle_detected_protocol(
     smtp_data_buf: &mut Vec<u8>,
     smtp_auth_state: &mut nettrap_proto_smtp::SmtpAuthState,
     irc_nick: &mut String,
+    redis_authenticated: &mut bool,
     ssh_first_packet: &mut bool,
 ) -> Vec<u8> {
     if let Some((detected_name, score)) = ctx.runtime.router.route_tcp(data, destination.port) {
@@ -1547,6 +1806,7 @@ async fn handle_detected_protocol(
                 smtp_data_buf,
                 smtp_auth_state,
                 irc_nick,
+                redis_authenticated,
                 ssh_first_packet,
             )
             .await
@@ -1607,6 +1867,7 @@ pub async fn handle_wrapped_connection(
     let mut smtp_data_buf: Vec<u8> = Vec::new();
     let mut smtp_auth_state = nettrap_proto_smtp::SmtpAuthState::None;
     let mut irc_nick = "unknown".to_string();
+    let mut redis_authenticated = false;
     let mut ssh_first_packet = true;
     let mut connection_buf: Vec<u8> = Vec::new();
 
@@ -1686,6 +1947,7 @@ pub async fn handle_wrapped_connection(
                                 &mut smtp_data_buf,
                                 &mut smtp_auth_state,
                                 &mut irc_nick,
+                                &mut redis_authenticated,
                                 &mut ssh_first_packet,
                             )
                             .await;
@@ -2000,6 +2262,32 @@ mod tests {
         }
     }
 
+    fn assert_terminal_without_response(result: TcpFrameResult) {
+        assert!(
+            matches!(
+                result,
+                TcpFrameResult::Invalid { response: None }
+                    | TcpFrameResult::TooLarge { response: None }
+            ),
+            "{result:?}"
+        );
+    }
+
+    fn encode_mqtt_remaining_len(mut value: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let mut byte = (value % 128) as u8;
+            value /= 128;
+            if value > 0 {
+                byte |= 0x80;
+            }
+            out.push(byte);
+            if value == 0 {
+                return out;
+            }
+        }
+    }
+
     #[test]
     fn dns_tcp_frame_waits_for_full_declared_payload() {
         let mut buffer = vec![0x00, 0x05, b'h', b'e'];
@@ -2159,6 +2447,15 @@ mod tests {
     }
 
     #[test]
+    fn line_frame_rejects_oversized_unterminated_line() {
+        let mut buffer = vec![b'A'; MAX_LINE_FRAME_SIZE + 1];
+
+        assert_terminal_without_response(extract_line_frame(&mut buffer));
+
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
     fn http_chunked_frame_waits_for_complete_message() {
         let mut buffer = b"POST /chunk HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\n\r\n4\r\ntes"
             .to_vec();
@@ -2202,7 +2499,17 @@ mod tests {
     }
 
     #[test]
-    fn mqtt_frame_mode_uses_port_and_router_detection() {
+    fn mqtt_frame_rejects_oversized_remaining_length() {
+        let mut buffer = vec![0x10];
+        buffer.extend_from_slice(&encode_mqtt_remaining_len(MAX_MQTT_FRAME_SIZE + 1));
+
+        assert_terminal_without_response(extract_mqtt_frame(&mut buffer));
+
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn mqtt_frame_mode_uses_plain_port_and_router_detection() {
         let connect = vec![
             0x10, 0x0c, 0x00, 0x04, b'M', b'Q', b'T', b'T', 0x04, 0x02, 0x00, 0x3c, 0x00, 0x00,
         ];
@@ -2218,6 +2525,18 @@ mod tests {
         assert_eq!(
             tcp_frame_mode("tcp", &connect, 12345, &router, false, false),
             TcpFrameMode::Mqtt
+        );
+    }
+
+    #[test]
+    fn mqtt_frame_mode_does_not_treat_8883_as_plain_mqtt_by_port() {
+        let tls_client_hello = vec![0x16, 0x03, 0x03, 0x00, 0x2a];
+        let router = nettrap_proxy::ProtocolRouter::new();
+        router.register("mqtt", Box::new(nettrap_proxy::MqttTaste), false);
+
+        assert_eq!(
+            tcp_frame_mode("tcp", &tls_client_hello, 8883, &router, false, false),
+            TcpFrameMode::Immediate
         );
     }
 
@@ -2259,25 +2578,77 @@ mod tests {
     #[test]
     fn socks_frames_wait_for_complete_greeting_and_request() {
         let mut greeting = vec![0x05, 0x01];
-        assert!(extract_socks_frame(&mut greeting).is_none());
+        assert_incomplete(extract_socks_frame(&mut greeting));
 
         greeting.push(0x00);
-        let greeting_frame =
-            extract_socks_frame(&mut greeting).expect("socks5 greeting should be complete");
+        let greeting_frame = expect_complete(extract_socks_frame(&mut greeting));
         assert_eq!(greeting_frame, vec![0x05, 0x01, 0x00]);
         assert!(greeting.is_empty());
 
         let mut request = vec![0x05, 0x01, 0x00, 0x03, 0x0C, b'e', b'x', b'a'];
-        assert!(extract_socks_frame(&mut request).is_none());
+        assert_incomplete(extract_socks_frame(&mut request));
 
         request.extend_from_slice(b"mple.test\0P");
-        let request_frame =
-            extract_socks_frame(&mut request).expect("socks5 request should be complete");
+        let request_frame = expect_complete(extract_socks_frame(&mut request));
         assert_eq!(
             request_frame,
             b"\x05\x01\x00\x03\x0Cexample.test\x00P".to_vec()
         );
         assert!(request.is_empty());
+    }
+
+    #[test]
+    fn socks4_frame_rejects_oversized_missing_nul() {
+        let mut buffer = vec![0x04; MAX_SOCKS4_FRAME_SIZE + 1];
+
+        assert_terminal_without_response(extract_socks_frame(&mut buffer));
+
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn redis_frame_waits_for_complete_resp_array() {
+        let mut buffer = b"*1\r\n$4\r\nPI".to_vec();
+        assert_incomplete(extract_redis_frame(&mut buffer));
+
+        buffer.extend_from_slice(b"NG\r\n");
+        assert_eq!(
+            expect_complete(extract_redis_frame(&mut buffer)),
+            b"*1\r\n$4\r\nPING\r\n".to_vec()
+        );
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn memcached_binary_frame_waits_for_complete_body() {
+        let mut buffer = vec![0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        buffer.extend_from_slice(&4u32.to_be_bytes());
+        buffer.extend_from_slice(&[0; 12]);
+        buffer.extend_from_slice(b"he");
+        assert_incomplete(extract_memcached_frame(&mut buffer));
+
+        buffer.extend_from_slice(b"lo");
+        assert_eq!(expect_complete(extract_memcached_frame(&mut buffer)), {
+            let mut frame = vec![0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+            frame.extend_from_slice(&4u32.to_be_bytes());
+            frame.extend_from_slice(&[0; 12]);
+            frame.extend_from_slice(b"helo");
+            frame
+        });
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn memcached_text_storage_waits_for_complete_body() {
+        let mut buffer = b"set key 0 0 5\r\nhel".to_vec();
+        assert_incomplete(extract_memcached_frame(&mut buffer));
+
+        buffer.extend_from_slice(b"lo\r\n");
+        assert_eq!(
+            expect_complete(extract_memcached_frame(&mut buffer)),
+            b"set key 0 0 5\r\nhello\r\n".to_vec()
+        );
+        assert!(buffer.is_empty());
     }
 
     #[test]

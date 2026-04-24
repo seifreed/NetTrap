@@ -45,11 +45,26 @@ impl ProtocolRouter {
     /// Determine the best handler for given data and port.
     /// Returns (handler_name, confidence_score).
     pub fn route(&self, data: &[u8], dst_port: u16) -> Option<(String, TasteScore)> {
+        self.route_filtered(data, dst_port, |_| true)
+    }
+
+    fn route_filtered<F>(
+        &self,
+        data: &[u8],
+        dst_port: u16,
+        mut include: F,
+    ) -> Option<(String, TasteScore)>
+    where
+        F: FnMut(&str) -> bool,
+    {
         let handlers = self.handlers.read();
         let mut best_name: Option<String> = None;
         let mut best_score: TasteScore = 0;
 
         for handler in handlers.iter() {
+            if !include(&handler.name) {
+                continue;
+            }
             let score = handler.taster.taste(data, dst_port);
             if score > best_score {
                 best_score = score;
@@ -63,26 +78,35 @@ impl ProtocolRouter {
     /// Determine the best TCP handler, falling back to the configured default
     /// when no detector yields a positive score.
     pub fn route_tcp(&self, data: &[u8], dst_port: u16) -> Option<(String, TasteScore)> {
-        self.route_with_default(data, dst_port, self.default_tcp.as_deref())
+        self.route_with_default(data, dst_port, self.default_tcp.as_deref(), |_| true)
     }
 
     /// Determine the best UDP handler, falling back to the configured default
     /// when no detector yields a positive score.
     pub fn route_udp(&self, data: &[u8], dst_port: u16) -> Option<(String, TasteScore)> {
-        self.route_with_default(data, dst_port, self.default_udp.as_deref())
+        self.route_with_default(
+            data,
+            dst_port,
+            self.default_udp.as_deref(),
+            is_udp_supported_handler,
+        )
     }
 
-    fn route_with_default(
+    fn route_with_default<F>(
         &self,
         data: &[u8],
         dst_port: u16,
         default_handler: Option<&str>,
-    ) -> Option<(String, TasteScore)> {
-        match self.route(data, dst_port) {
+        mut include: F,
+    ) -> Option<(String, TasteScore)>
+    where
+        F: FnMut(&str) -> bool + Copy,
+    {
+        match self.route_filtered(data, dst_port, include) {
             Some((name, score)) if score > 1 => Some((name, score)),
             Some((name, score)) if score == 1 && default_handler.is_none() => Some((name, score)),
             _ => default_handler
-                .filter(|name| !name.trim().is_empty())
+                .filter(|name| !name.trim().is_empty() && include(name))
                 .map(|name| (name.to_string(), 0)),
         }
     }
@@ -118,6 +142,13 @@ fn normalize_default_name(name: String) -> Option<String> {
     } else {
         Some(name)
     }
+}
+
+fn is_udp_supported_handler(name: &str) -> bool {
+    matches!(
+        name,
+        "dns" | "tftp" | "snmp" | "sip" | "upnp" | "ntp" | "coap" | "raw"
+    )
 }
 
 #[cfg(test)]
@@ -193,5 +224,24 @@ mod tests {
         let routed = router.route_udp(b"\x00\x01", 53530);
 
         assert_eq!(routed, Some(("raw".to_string(), 1)));
+    }
+
+    #[test]
+    fn route_udp_ignores_tcp_only_mqtt_taster() {
+        let router = ProtocolRouter::new();
+        router.register("mqtt", Box::new(crate::taste::MqttTaste), false);
+
+        let routed = router.route_udp(b"\x10\x0c\x00\x04MQTT\x04\x02\x00\x3c\x00\x00", 1883);
+
+        assert_eq!(routed, None);
+    }
+
+    #[test]
+    fn route_udp_ignores_tcp_only_default_handler() {
+        let router = ProtocolRouter::new().with_default_udp("mqtt");
+
+        let routed = router.route_udp(b"??", 1883);
+
+        assert_eq!(routed, None);
     }
 }

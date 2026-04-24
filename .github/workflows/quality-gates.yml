@@ -157,15 +157,17 @@ jobs:
         run: cargo +nightly udeps --all-targets --all-features
 
       - name: Run coverage report
-        run: cargo tarpaulin --out Xml --out Html
+        run: |
+          mkdir -p target/quality-gates/coverage
+          cargo tarpaulin --out Xml --out Html --output-dir target/quality-gates/coverage
 
       - name: Upload coverage reports
         uses: actions/upload-artifact@v4
         with:
           name: coverage-reports
           path: |
-            cobertura.xml
-            tarpaulin-report.html
+            target/quality-gates/coverage/cobertura.xml
+            target/quality-gates/coverage/tarpaulin-report.html
 
       - name: Build fuzz targets
         run: cargo +nightly fuzz build

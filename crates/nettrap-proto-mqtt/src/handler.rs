@@ -29,14 +29,16 @@ impl MqttHandler {
         match packet_type {
             MQTT_CONNECT => {
                 // Parse CONNECT: extract client_id, username, password
-                if let Some(info) = Self::parse_connect(data) {
-                    tracing::info!(
-                        "MQTT CONNECT: client_id={}, username={:?}, password={:?}",
-                        info.client_id,
-                        info.username,
-                        info.password
-                    );
-                }
+                let Some(info) = Self::parse_connect(data) else {
+                    tracing::debug!("Malformed MQTT CONNECT packet");
+                    return Vec::new();
+                };
+                tracing::info!(
+                    "MQTT CONNECT: client_id={}, username={:?}, password={:?}",
+                    info.client_id,
+                    info.username,
+                    info.password
+                );
                 // Send CONNACK (accepted)
                 vec![
                     (MQTT_CONNACK << 4), // Fixed header
@@ -155,95 +157,72 @@ impl MqttHandler {
     }
 
     fn parse_connect(data: &[u8]) -> Option<MqttConnectInfo> {
-        let start = Self::remaining_length_end(data);
-        if start >= data.len() {
+        let (remaining_len, start) = Self::parse_remaining_length(data)?;
+        if start.checked_add(remaining_len)? != data.len() {
             return None;
         }
         let payload = &data[start..];
-        if payload.len() < 10 {
+
+        let mut proto_pos = 0usize;
+        let proto_name = Self::read_mqtt_string(payload, &mut proto_pos)?;
+        let proto_level_pos = proto_pos;
+        if proto_level_pos + 4 > payload.len() {
+            return None;
+        }
+        let proto_level = payload[proto_level_pos];
+        if !matches!(
+            (proto_name.as_slice(), proto_level),
+            (b"MQTT", 4 | 5) | (b"MQIsdp", 3)
+        ) {
             return None;
         }
 
-        // Skip protocol name + level + flags + keepalive
-        let proto_len = u16::from_be_bytes([payload[0], payload[1]]) as usize;
-        // Validate proto_len doesn't exceed payload
-        let flags_offset = 2 + proto_len + 1; // offset to connect flags byte
-        if flags_offset >= payload.len() {
+        let flags = payload[proto_level_pos + 1];
+        if flags & 0x01 != 0 {
             return None;
         }
-        let flags = payload[flags_offset]; // connect flags
-        let mut pos = flags_offset + 1 + 2; // flags + keepalive
+        let will_flag = flags & 0x04 != 0;
+        let will_qos = (flags >> 3) & 0x03;
+        let will_retain = flags & 0x20 != 0;
+        if will_qos == 0x03 || (!will_flag && (will_qos != 0 || will_retain)) {
+            return None;
+        }
 
-        // Client ID
-        if pos + 2 > payload.len() {
-            return None;
+        let mut pos = proto_level_pos + 4; // protocol level + flags + keepalive
+        if proto_level == 5 {
+            let properties_len = Self::read_variable_int(payload, &mut pos)?;
+            pos = pos.checked_add(properties_len)?;
+            if pos > payload.len() {
+                return None;
+            }
         }
-        let id_len = u16::from_be_bytes([payload[pos], payload[pos + 1]]) as usize;
-        pos += 2;
-        let safe_id_len = id_len.min(payload.len().saturating_sub(pos));
-        let client_id = String::from_utf8_lossy(&payload[pos..pos + safe_id_len]).to_string();
-        pos += safe_id_len; // Clamp to prevent pos from exceeding payload.len()
+
+        let client_id =
+            String::from_utf8_lossy(&Self::read_mqtt_string(payload, &mut pos)?).to_string();
 
         let mut username = None;
         let mut password = None;
 
         // Skip Will Topic and Will Message if Will Flag (bit 2) is set
-        if flags & 0x04 != 0 {
-            // Will Topic (length-prefixed string)
-            if pos + 2 > payload.len() {
-                return Some(MqttConnectInfo {
-                    client_id,
-                    username,
-                    password,
-                });
-            }
-            let will_topic_len = u16::from_be_bytes([payload[pos], payload[pos + 1]]) as usize;
-            pos += 2;
-            if pos + will_topic_len > payload.len() {
-                return Some(MqttConnectInfo {
-                    client_id,
-                    username,
-                    password,
-                });
-            }
-            pos += will_topic_len;
-            // Will Message (length-prefixed bytes)
-            if pos + 2 > payload.len() {
-                return Some(MqttConnectInfo {
-                    client_id,
-                    username,
-                    password,
-                });
-            }
-            let will_msg_len = u16::from_be_bytes([payload[pos], payload[pos + 1]]) as usize;
-            pos += 2;
-            if pos + will_msg_len > payload.len() {
-                return Some(MqttConnectInfo {
-                    client_id,
-                    username,
-                    password,
-                });
-            }
-            pos += will_msg_len;
+        if will_flag {
+            Self::read_mqtt_string(payload, &mut pos)?;
+            Self::read_mqtt_string(payload, &mut pos)?;
         }
 
-        // Username (if flag set)
-        if flags & 0x80 != 0 && pos + 2 <= payload.len() {
-            let len = u16::from_be_bytes([payload[pos], payload[pos + 1]]) as usize;
-            pos += 2;
-            if pos + len <= payload.len() {
-                username = Some(String::from_utf8_lossy(&payload[pos..pos + len]).to_string());
-                pos += len;
-            }
+        if flags & 0x80 != 0 {
+            username = Some(
+                String::from_utf8_lossy(&Self::read_mqtt_string(payload, &mut pos)?).to_string(),
+            );
         }
 
-        // Password (if flag set)
-        if flags & 0x40 != 0 && pos + 2 <= payload.len() {
-            let len = u16::from_be_bytes([payload[pos], payload[pos + 1]]) as usize;
-            pos += 2;
-            if pos + len <= payload.len() {
-                password = Some(String::from_utf8_lossy(&payload[pos..pos + len]).to_string());
-            }
+        if flags & 0x40 != 0 {
+            password = Some(
+                String::from_utf8_lossy(&Self::read_mqtt_string(payload, &mut pos)?).to_string(),
+            );
+        }
+
+        if pos != payload.len() {
+            return None;
         }
 
         Some(MqttConnectInfo {
@@ -251,6 +230,39 @@ impl MqttHandler {
             username,
             password,
         })
+    }
+
+    fn read_mqtt_string(data: &[u8], pos: &mut usize) -> Option<Vec<u8>> {
+        if *pos + 2 > data.len() {
+            return None;
+        }
+        let len = u16::from_be_bytes([data[*pos], data[*pos + 1]]) as usize;
+        *pos += 2;
+        let end = (*pos).checked_add(len)?;
+        if end > data.len() {
+            return None;
+        }
+        let value = data[*pos..end].to_vec();
+        *pos = end;
+        Some(value)
+    }
+
+    fn read_variable_int(data: &[u8], pos: &mut usize) -> Option<usize> {
+        let mut multiplier = 1usize;
+        let mut value = 0usize;
+        for _ in 0..4 {
+            if *pos >= data.len() {
+                return None;
+            }
+            let byte = data[*pos];
+            *pos += 1;
+            value = value.checked_add(((byte & 0x7F) as usize).checked_mul(multiplier)?)?;
+            if byte & 0x80 == 0 {
+                return Some(value);
+            }
+            multiplier = multiplier.checked_mul(128)?;
+        }
+        None
     }
 
     fn parse_publish(data: &[u8]) -> Option<(String, Vec<u8>)> {
@@ -294,5 +306,38 @@ pub struct MqttConnectInfo {
 impl Default for MqttHandler {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connect_returns_connack_when_well_formed() {
+        let packet = vec![
+            0x10, 0x0c, 0x00, 0x04, b'M', b'Q', b'T', b'T', 0x04, 0x02, 0x00, 0x3c, 0x00, 0x00,
+        ];
+
+        assert_eq!(
+            MqttHandler::new().handle_packet(&packet),
+            vec![0x20, 0x02, 0x00, 0x00]
+        );
+    }
+
+    #[test]
+    fn connect_returns_empty_when_truncated() {
+        let packet = vec![0x10, 0x0c, 0x00, 0x04, b'M', b'Q'];
+
+        assert!(MqttHandler::new().handle_packet(&packet).is_empty());
+    }
+
+    #[test]
+    fn connect_returns_empty_when_protocol_name_is_invalid() {
+        let packet = vec![
+            0x10, 0x0c, 0x00, 0x04, b'M', b'Q', b'T', b'X', 0x04, 0x02, 0x00, 0x3c, 0x00, 0x00,
+        ];
+
+        assert!(MqttHandler::new().handle_packet(&packet).is_empty());
     }
 }

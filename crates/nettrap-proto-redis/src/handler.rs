@@ -3,6 +3,9 @@ pub struct RedisHandler {
     require_auth: bool,
 }
 
+const MAX_RESP_ARRAY_COUNT: usize = 1024;
+const MAX_RESP_BULK_SIZE: usize = 64 * 1024;
+
 impl RedisHandler {
     pub fn new() -> Self {
         Self {
@@ -22,8 +25,12 @@ impl RedisHandler {
     }
 
     pub fn handle_command(&self, data: &[u8]) -> Vec<u8> {
-        let text = String::from_utf8_lossy(data);
-        let commands = Self::parse_resp(&text);
+        let mut authenticated = !self.require_auth;
+        self.handle_command_with_auth_state(data, &mut authenticated)
+    }
+
+    pub fn handle_command_with_auth_state(&self, data: &[u8], authenticated: &mut bool) -> Vec<u8> {
+        let commands = Self::parse_resp(data);
 
         let mut response = Vec::new();
         for cmd_parts in commands {
@@ -32,6 +39,11 @@ impl RedisHandler {
             }
             let cmd = cmd_parts[0].to_uppercase();
             let args: Vec<&str> = cmd_parts[1..].iter().map(|s| s.as_str()).collect();
+
+            if self.require_auth && !*authenticated && cmd != "AUTH" {
+                response.extend_from_slice(b"-NOAUTH Authentication required.\r\n");
+                continue;
+            }
 
             let resp = match cmd.as_str() {
                 "PING" => "+PONG\r\n".to_string(),
@@ -44,7 +56,7 @@ impl RedisHandler {
                 }
                 "AUTH" => {
                     // Capture credentials: AUTH [username] password
-                    // Always accept (honeypot) — no per-connection state needed
+                    // Always accept (honeypot) and mark this connection authenticated.
                     if args.len() >= 2 {
                         tracing::warn!(
                             "REDIS AUTH attempt: username='{}', password='{}'",
@@ -56,6 +68,7 @@ impl RedisHandler {
                     } else {
                         tracing::warn!("REDIS AUTH attempt (no credentials)");
                     }
+                    *authenticated = true;
                     "+OK\r\n".to_string()
                 }
                 "SET" => {
@@ -120,82 +133,171 @@ impl RedisHandler {
             response.extend_from_slice(resp.as_bytes());
         }
 
-        if response.is_empty() {
-            b"+OK\r\n".to_vec()
+        if response.is_empty() && !data.is_empty() {
+            b"-ERR Protocol error\r\n".to_vec()
+        } else if response.is_empty() {
+            Vec::new()
         } else {
             response
         }
     }
 
     /// Parse RESP protocol (Redis Serialization Protocol)
-    fn parse_resp(data: &str) -> Vec<Vec<String>> {
-        const MAX_ARRAY_COUNT: usize = 1024; // Limit number of array elements
-        const MAX_BULK_SIZE: usize = 64 * 1024; // 64KB max per bulk string
-
+    fn parse_resp(data: &[u8]) -> Vec<Vec<String>> {
         let mut commands = Vec::new();
-        let lines: Vec<&str> = data.lines().collect();
-        let mut i = 0;
+        let mut pos = 0usize;
 
-        while i < lines.len() {
-            if lines[i].starts_with('*') {
-                // Array: *N followed by $len\r\ndata pairs (cap at 1024 to prevent abuse)
-                let count: usize = lines[i][1..]
-                    .trim()
-                    .parse()
-                    .unwrap_or(0)
-                    .min(MAX_ARRAY_COUNT);
-                let mut parts = Vec::new();
-                i += 1;
-                for _ in 0..count {
-                    if i < lines.len() && lines[i].starts_with('$') {
-                        // Parse bulk string length (signed to handle $-1 null bulk strings)
-                        let bulk_len: isize = lines[i][1..].trim().parse().unwrap_or(0);
-
-                        if bulk_len < 0 {
-                            // Null bulk string ($-1): no data line follows
-                            i += 1;
-                            continue;
-                        }
-
-                        // Limit bulk string size
-                        if bulk_len as usize > MAX_BULK_SIZE {
-                            tracing::warn!("RESP bulk string too large ({}), rejecting", bulk_len);
-                            return commands; // Return what we have so far
-                        }
-
-                        i += 1; // skip $len
-                        if i < lines.len() {
-                            // Additional validation: ensure data doesn't exceed claimed length
-                            let data = lines[i].trim();
-                            if data.len() <= MAX_BULK_SIZE {
-                                parts.push(data.to_string());
-                            }
-                            i += 1;
-                        }
-                    } else {
-                        // Non-bulk element in array — skip to avoid infinite loop
-                        i += 1;
-                    }
-                }
-                if !parts.is_empty() {
-                    commands.push(parts);
-                }
-            } else {
-                // Inline command
-                let parts: Vec<String> =
-                    lines[i].split_whitespace().map(|s| s.to_string()).collect();
-                if !parts.is_empty() {
-                    commands.push(parts);
-                }
-                i += 1;
+        while pos < data.len() {
+            while matches!(data.get(pos), Some(b'\r' | b'\n')) {
+                pos += 1;
             }
+            if pos >= data.len() {
+                break;
+            }
+
+            if data[pos] == b'*' {
+                let Some((parts, next_pos)) = Self::parse_resp_array_at(data, pos) else {
+                    break;
+                };
+                if !parts.is_empty() {
+                    commands.push(parts);
+                }
+                pos = next_pos;
+                continue;
+            }
+
+            let Some(line_end) = find_lf_from(data, pos) else {
+                break;
+            };
+            let line = &data[pos..line_end];
+            let line = line.strip_suffix(b"\r").unwrap_or(line);
+            let text = String::from_utf8_lossy(line);
+            let parts: Vec<String> = text.split_whitespace().map(|s| s.to_string()).collect();
+            if !parts.is_empty() {
+                commands.push(parts);
+            }
+            pos = line_end + 1;
         }
         commands
     }
+
+    fn parse_resp_array_at(data: &[u8], start: usize) -> Option<(Vec<String>, usize)> {
+        let header_end = find_crlf_from(data, start)?;
+        let count_text = std::str::from_utf8(&data[start + 1..header_end]).ok()?;
+        let count = count_text.parse::<usize>().ok()?;
+        if count > MAX_RESP_ARRAY_COUNT {
+            tracing::warn!("RESP array too large ({count}), rejecting");
+            return None;
+        }
+
+        let mut pos = header_end + 2;
+        let mut parts = Vec::new();
+        for _ in 0..count {
+            if data.get(pos) != Some(&b'$') {
+                return None;
+            }
+
+            let bulk_header_end = find_crlf_from(data, pos)?;
+            let bulk_len_text = std::str::from_utf8(&data[pos + 1..bulk_header_end]).ok()?;
+            let bulk_len = bulk_len_text.parse::<isize>().ok()?;
+            pos = bulk_header_end + 2;
+
+            if bulk_len == -1 {
+                continue;
+            }
+            if bulk_len < -1 {
+                return None;
+            }
+
+            let bulk_len = bulk_len as usize;
+            if bulk_len > MAX_RESP_BULK_SIZE {
+                tracing::warn!("RESP bulk string too large ({bulk_len}), rejecting");
+                return None;
+            }
+            let data_end = pos.checked_add(bulk_len)?;
+            let frame_end = data_end.checked_add(2)?;
+            if frame_end > data.len() || &data[data_end..frame_end] != b"\r\n" {
+                return None;
+            }
+
+            parts.push(String::from_utf8_lossy(&data[pos..data_end]).to_string());
+            pos = frame_end;
+        }
+
+        Some((parts, pos))
+    }
+}
+
+fn find_lf_from(haystack: &[u8], start: usize) -> Option<usize> {
+    haystack
+        .get(start..)?
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .map(|offset| start + offset)
+}
+
+fn find_crlf_from(haystack: &[u8], start: usize) -> Option<usize> {
+    haystack
+        .get(start..)?
+        .windows(2)
+        .position(|window| window == b"\r\n")
+        .map(|offset| start + offset)
 }
 
 impl Default for RedisHandler {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resp_parser_respects_bulk_lengths() {
+        let handler = RedisHandler::new();
+
+        assert_eq!(
+            handler.handle_command(b"*1\r\n$4\r\nPING\r\n"),
+            b"+PONG\r\n".to_vec()
+        );
+        assert_eq!(
+            handler.handle_command(b"*1\r\n$4\r\nPI\r\n"),
+            b"-ERR Protocol error\r\n".to_vec()
+        );
+    }
+
+    #[test]
+    fn with_auth_blocks_commands_until_auth_succeeds() {
+        let handler = RedisHandler::new().with_auth(true);
+        let mut authenticated = false;
+
+        assert_eq!(
+            handler.handle_command_with_auth_state(b"PING\r\n", &mut authenticated),
+            b"-NOAUTH Authentication required.\r\n".to_vec()
+        );
+        assert!(!authenticated);
+
+        assert_eq!(
+            handler.handle_command_with_auth_state(b"AUTH secret\r\n", &mut authenticated),
+            b"+OK\r\n".to_vec()
+        );
+        assert!(authenticated);
+
+        assert_eq!(
+            handler.handle_command_with_auth_state(b"PING\r\n", &mut authenticated),
+            b"+PONG\r\n".to_vec()
+        );
+    }
+
+    #[test]
+    fn handle_command_enforces_auth_for_stateless_calls() {
+        let handler = RedisHandler::new().with_auth(true);
+
+        assert_eq!(
+            handler.handle_command(b"PING\r\n"),
+            b"-NOAUTH Authentication required.\r\n".to_vec()
+        );
     }
 }

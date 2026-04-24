@@ -877,23 +877,6 @@ async fn handle_detected_udp(
                     )
                     .await;
                 }
-                "mqtt" => {
-                    let response =
-                        nettrap_proto_mqtt::MqttHandler::new().handle_packet(packet.query_data);
-                    crate::protocol_handlers::handle_udp_generic(
-                        ctx,
-                        socket,
-                        crate::protocol_handlers::UdpGenericResponse {
-                            response: &response,
-                            src: *packet.src,
-                            destination: packet.destination,
-                            len: packet.len,
-                            output_path: packet.output_path,
-                            protocol_name: "mqtt",
-                        },
-                    )
-                    .await;
-                }
                 _ => {
                     log_event(
                         packet.output_path,

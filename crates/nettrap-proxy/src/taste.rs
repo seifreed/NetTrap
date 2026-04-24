@@ -431,7 +431,7 @@ impl ProtocolTaste for LdapTaste {
 pub struct MqttTaste;
 impl ProtocolTaste for MqttTaste {
     fn taste(&self, data: &[u8], dst_port: u16) -> TasteScore {
-        if dst_port == 1883 || dst_port == 8883 {
+        if dst_port == 1883 {
             return 90;
         }
         // MQTT CONNECT packet: fixed header type 1, then variable-length remaining length (1-4 bytes)

@@ -56,6 +56,13 @@ run_quick() {
     ensure_lockfile_clean
 }
 
+run_coverage() {
+    local coverage_dir="target/quality-gates/coverage"
+    mkdir -p "$coverage_dir"
+    rm -f cobertura.xml tarpaulin-report.html
+    run cargo tarpaulin --out Xml --out Html --output-dir "$coverage_dir"
+}
+
 run_full() {
     require_command cargo-udeps
     require_command cargo-tarpaulin
@@ -64,7 +71,7 @@ run_full() {
 
     run_quick
     run cargo +nightly udeps --all-targets --all-features
-    run cargo tarpaulin --out Xml --out Html
+    run_coverage
     run cargo +nightly fuzz build
     run cargo +nightly fuzz run http_request_parse -- -max_total_time=10
     run cargo bench --no-fail-fast
