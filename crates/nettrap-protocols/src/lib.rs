@@ -51,7 +51,12 @@ pub mod traits {
 }
 
 pub mod tcp {
+    pub use nettrap_proto_chargen::ChargenHandler;
+    pub use nettrap_proto_daytime::DaytimeHandler;
+    pub use nettrap_proto_dummy::DummyHandler;
+    pub use nettrap_proto_finger::FingerHandler;
     pub use nettrap_proto_ftp::FtpHandler;
+    pub use nettrap_proto_ident::IdentHandler;
     pub use nettrap_proto_irc::IrcHandler;
     pub use nettrap_proto_ldap::LdapHandler;
     pub use nettrap_proto_memcached::MemcachedHandler;
@@ -60,23 +65,31 @@ pub mod tcp {
     pub use nettrap_proto_nkn::NknHandler;
     pub use nettrap_proto_pop3::Pop3Handler;
     pub use nettrap_proto_postgres::PostgresHandler;
+    pub use nettrap_proto_quotd::QuotdHandler;
     pub use nettrap_proto_rdp::RdpHandler;
     pub use nettrap_proto_redis::RedisHandler;
     pub use nettrap_proto_smb::SmbHandler;
     pub use nettrap_proto_smtp::SmtpHandler;
     pub use nettrap_proto_socks::SocksHandler;
     pub use nettrap_proto_ssh::SshHandler;
+    pub use nettrap_proto_syslogrecv::SyslogRecvHandler;
     pub use nettrap_proto_telnet::TelnetHandler;
+    pub use nettrap_proto_time::TimeHandler;
 }
 
 pub mod udp {
+    pub use nettrap_proto_chargen::ChargenHandler;
     pub use nettrap_proto_coap::CoapHandler;
+    pub use nettrap_proto_daytime::DaytimeHandler;
     pub use nettrap_proto_dns::handler::DnsHandler;
     pub use nettrap_proto_mqtt::MqttHandler;
     pub use nettrap_proto_ntp::NtpHandler;
+    pub use nettrap_proto_quotd::QuotdHandler;
     pub use nettrap_proto_sip::SipHandler;
     pub use nettrap_proto_snmp::SnmpHandler;
+    pub use nettrap_proto_syslogrecv::SyslogRecvHandler;
     pub use nettrap_proto_tftp::TftpHandler;
+    pub use nettrap_proto_time::TimeHandler;
     pub use nettrap_proto_upnp::UpnpHandler;
 }
 

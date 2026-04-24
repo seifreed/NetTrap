@@ -123,6 +123,14 @@ impl HandlerRegistry {
             "postgres" => Some(Box::new(PostgresHandler::new())),
             "smb" => Some(Box::new(SmbHandler::new())),
             "telnet" => Some(Box::new(TelnetHandler::new())),
+            "finger" => Some(Box::new(FingerHandler::new())),
+            "ident" => Some(Box::new(IdentHandler::new())),
+            "daytime" => Some(Box::new(DaytimeHandler::new())),
+            "time" => Some(Box::new(TimeHandler::new())),
+            "chargen" => Some(Box::new(ChargenHandler::new())),
+            "quotd" => Some(Box::new(QuotdHandler::new())),
+            "syslogrecv" => Some(Box::new(SyslogRecvHandler::new())),
+            "dummy" => Some(Box::new(DummyHandler::new())),
             _ => None,
         }
     }
@@ -142,6 +150,14 @@ impl HandlerRegistry {
                 | "postgres"
                 | "smb"
                 | "telnet"
+                | "finger"
+                | "ident"
+                | "daytime"
+                | "time"
+                | "chargen"
+                | "quotd"
+                | "syslogrecv"
+                | "dummy"
         )
     }
 
@@ -248,6 +264,56 @@ impl SimpleTcpHandler for TelnetHandler {
     }
 }
 
+impl SimpleTcpHandler for FingerHandler {
+    fn handle_tcp(&self, data: &[u8]) -> Option<Vec<u8>> {
+        Some(self.handle(&String::from_utf8_lossy(data)).into_bytes())
+    }
+}
+
+impl SimpleTcpHandler for IdentHandler {
+    fn handle_tcp(&self, data: &[u8]) -> Option<Vec<u8>> {
+        Some(self.handle(&String::from_utf8_lossy(data)).into_bytes())
+    }
+}
+
+impl SimpleTcpHandler for DaytimeHandler {
+    fn handle_tcp(&self, _data: &[u8]) -> Option<Vec<u8>> {
+        Some(self.handle().into_bytes())
+    }
+}
+
+impl SimpleTcpHandler for TimeHandler {
+    fn handle_tcp(&self, _data: &[u8]) -> Option<Vec<u8>> {
+        Some(self.handle())
+    }
+}
+
+impl SimpleTcpHandler for ChargenHandler {
+    fn handle_tcp(&self, _data: &[u8]) -> Option<Vec<u8>> {
+        let mut handler = ChargenHandler::new();
+        Some(handler.handle(6))
+    }
+}
+
+impl SimpleTcpHandler for QuotdHandler {
+    fn handle_tcp(&self, _data: &[u8]) -> Option<Vec<u8>> {
+        Some(self.handle().into_bytes())
+    }
+}
+
+impl SimpleTcpHandler for SyslogRecvHandler {
+    fn handle_tcp(&self, data: &[u8]) -> Option<Vec<u8>> {
+        let _ = self.handle(data);
+        Some(Vec::new())
+    }
+}
+
+impl SimpleTcpHandler for DummyHandler {
+    fn handle_tcp(&self, data: &[u8]) -> Option<Vec<u8>> {
+        Some(self.handle(data))
+    }
+}
+
 impl Default for HandlerRegistry {
     fn default() -> Self {
         Self::new()
@@ -322,6 +388,9 @@ mod tests {
         assert!(has_simple_tcp_handler("ssh"));
         assert!(has_simple_tcp_handler("mysql"));
         assert!(has_simple_tcp_handler("rdp"));
+        assert!(has_simple_tcp_handler("finger"));
+        assert!(has_simple_tcp_handler("syslogrecv"));
+        assert!(has_simple_tcp_handler("dummy"));
         assert!(!has_simple_tcp_handler("unknown"));
     }
 

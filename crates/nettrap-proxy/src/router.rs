@@ -147,7 +147,20 @@ fn normalize_default_name(name: String) -> Option<String> {
 fn is_udp_supported_handler(name: &str) -> bool {
     matches!(
         name,
-        "dns" | "tftp" | "snmp" | "sip" | "upnp" | "ntp" | "coap" | "quic" | "raw"
+        "dns"
+            | "tftp"
+            | "snmp"
+            | "sip"
+            | "upnp"
+            | "ntp"
+            | "coap"
+            | "quic"
+            | "daytime"
+            | "time"
+            | "chargen"
+            | "quotd"
+            | "syslogrecv"
+            | "raw"
     )
 }
 
@@ -253,5 +266,28 @@ mod tests {
         let routed = router.route_udp(&[0xc3, 0x00, 0x00, 0x00, 0x01, 0, 0, 0, 0], 443);
 
         assert_eq!(routed, Some(("quic".to_string(), 85)));
+    }
+
+    #[test]
+    fn route_udp_allows_registered_datagram_utility_handlers() {
+        for (name, taster, port) in [
+            (
+                "daytime",
+                Box::new(crate::taste::DaytimeTaste) as Box<dyn ProtocolTaste>,
+                13,
+            ),
+            ("time", Box::new(crate::taste::TimeTaste), 37),
+            ("chargen", Box::new(crate::taste::ChargenTaste), 19),
+            ("quotd", Box::new(crate::taste::QuotdTaste), 17),
+            ("syslogrecv", Box::new(crate::taste::SyslogRecvTaste), 514),
+        ] {
+            let router = ProtocolRouter::new();
+            router.register(name, taster, false);
+
+            assert_eq!(
+                router.route_udp(b"<13>test", port),
+                Some((name.to_string(), 90))
+            );
+        }
     }
 }

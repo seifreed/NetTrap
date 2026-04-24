@@ -9,7 +9,17 @@ impl NtpHandler {
         if data.len() < 48 {
             return Vec::new();
         }
-        tracing::info!("NTP request received (mode={})", data[0] & 0x07);
+        let version = (data[0] >> 3) & 0x07;
+        let mode = data[0] & 0x07;
+        if !(3..=4).contains(&version) || mode != 3 {
+            tracing::debug!(
+                "Ignoring non-client NTP packet (version={}, mode={})",
+                version,
+                mode
+            );
+            return Vec::new();
+        }
+        tracing::info!("NTP client request received (version={})", version);
 
         // Build NTP response (mode 4 = server)
         let mut resp = vec![0u8; 48];
@@ -39,5 +49,39 @@ impl NtpHandler {
 impl Default for NtpHandler {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn client_request_gets_server_response() {
+        let mut request = vec![0u8; 48];
+        request[0] = 0x23; // LI=0, version=4, mode=3
+        request[40..44].copy_from_slice(&0x01020304u32.to_be_bytes());
+
+        let response = NtpHandler::new().handle(&request);
+
+        assert_eq!(response.len(), 48);
+        assert_eq!(response[0] & 0x07, 4);
+        assert_eq!(&response[24..28], &request[40..44]);
+    }
+
+    #[test]
+    fn server_mode_packet_is_not_answered() {
+        let mut packet = vec![0u8; 48];
+        packet[0] = 0x24; // LI=0, version=4, mode=4
+
+        assert!(NtpHandler::new().handle(&packet).is_empty());
+    }
+
+    #[test]
+    fn unsupported_version_is_not_answered() {
+        let mut packet = vec![0u8; 48];
+        packet[0] = 0x03; // version=0, mode=3
+
+        assert!(NtpHandler::new().handle(&packet).is_empty());
     }
 }

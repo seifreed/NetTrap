@@ -566,7 +566,7 @@ impl ProtocolTaste for NtpTaste {
         if dst_port == 123 {
             return 90;
         }
-        if data.len() == 48 || data.len() == 68 {
+        if looks_like_ntp_client_request(data) {
             return 60;
         }
         0
@@ -576,13 +576,22 @@ impl ProtocolTaste for NtpTaste {
     }
 }
 
+fn looks_like_ntp_client_request(data: &[u8]) -> bool {
+    if data.len() < 48 || data.len() % 4 != 0 {
+        return false;
+    }
+    let version = (data[0] >> 3) & 0x07;
+    let mode = data[0] & 0x07;
+    (3..=4).contains(&version) && mode == 3
+}
+
 pub struct CoapTaste;
 impl ProtocolTaste for CoapTaste {
     fn taste(&self, data: &[u8], dst_port: u16) -> TasteScore {
         if dst_port == 5683 || dst_port == 5684 {
             return 90;
         }
-        if data.len() >= 4 && (data[0] >> 6) == 1 {
+        if looks_like_plain_coap_request(data) {
             return 50;
         }
         0
@@ -590,6 +599,17 @@ impl ProtocolTaste for CoapTaste {
     fn protocol_name(&self) -> &'static str {
         "coap"
     }
+}
+
+fn looks_like_plain_coap_request(data: &[u8]) -> bool {
+    if data.len() < 4 || (data[0] >> 6) != 1 {
+        return false;
+    }
+    let msg_type = (data[0] >> 4) & 0x03;
+    let tkl = (data[0] & 0x0F) as usize;
+    let code_class = data[1] >> 5;
+    let code_detail = data[1] & 0x1F;
+    msg_type <= 1 && tkl <= 8 && data.len() >= 4 + tkl && code_class == 0 && code_detail != 0
 }
 
 pub struct NknTaste;
@@ -786,6 +806,28 @@ mod tests {
             taste.taste(&[0xc3, 0x12, 0x34, 0x56, 0x78, 0, 0, 0, 0], 443),
             0
         );
+    }
+
+    #[test]
+    fn test_ntp_taste_requires_client_mode_off_standard_port() {
+        let taste = NtpTaste;
+        let mut client = vec![0u8; 48];
+        client[0] = 0x23;
+        let mut server = vec![0u8; 48];
+        server[0] = 0x24;
+
+        assert_eq!(taste.taste(&client, 12345), 60);
+        assert_eq!(taste.taste(&server, 12345), 0);
+        assert_eq!(taste.taste(&[0u8; 48], 12345), 0);
+    }
+
+    #[test]
+    fn test_coap_taste_requires_request_code_off_standard_port() {
+        let taste = CoapTaste;
+
+        assert_eq!(taste.taste(&[0x40, 0x01, 0x12, 0x34], 12345), 50);
+        assert_eq!(taste.taste(&[0x60, 0x41, 0x12, 0x34], 12345), 0);
+        assert_eq!(taste.taste(&[0x49, 0x01, 0x12, 0x34], 12345), 0);
     }
 
     #[test]

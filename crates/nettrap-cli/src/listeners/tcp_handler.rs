@@ -26,6 +26,8 @@ const MAX_REDIS_ARRAY_COUNT: usize = 1024;
 const MAX_MEMCACHED_LINE_SIZE: usize = 64 * 1024;
 const MAX_MEMCACHED_FRAME_SIZE: usize = 1024 * 1024;
 const MAX_TLS_RECORD_SIZE: usize = 64 * 1024;
+const MAX_LDAP_BER_PAYLOAD_SIZE: usize = 16 * 1024 * 1024;
+const MAX_LDAP_FRAME_SIZE: usize = MAX_LDAP_BER_PAYLOAD_SIZE + 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TcpFrameMode {
@@ -90,7 +92,7 @@ fn next_tcp_frame(
         TcpFrameMode::Socks => extract_socks_frame(buffer),
         TcpFrameMode::Smb => optional_frame(extract_smb_frame(buffer)),
         TcpFrameMode::Rdp => optional_frame(extract_rdp_frame(buffer)),
-        TcpFrameMode::Ldap => optional_frame(extract_ldap_frame(buffer)),
+        TcpFrameMode::Ldap => extract_ldap_frame(buffer),
         TcpFrameMode::Mqtt => extract_mqtt_frame(buffer),
         TcpFrameMode::Tls => extract_tls_frame(buffer),
         TcpFrameMode::Redis => extract_redis_frame(buffer),
@@ -158,6 +160,41 @@ fn tcp_frame_mode(
         return TcpFrameMode::Line;
     }
 
+    if listener == "finger" || listener.starts_with("finger") || destination_port == 79 {
+        return TcpFrameMode::Line;
+    }
+
+    if listener == "ident" || listener.starts_with("ident") || destination_port == 113 {
+        return TcpFrameMode::Line;
+    }
+
+    if listener == "syslogrecv"
+        || listener.starts_with("syslogrecv")
+        || matches!(destination_port, 514 | 601)
+    {
+        return TcpFrameMode::Line;
+    }
+
+    if listener == "daytime" || listener.starts_with("daytime") || destination_port == 13 {
+        return TcpFrameMode::Immediate;
+    }
+
+    if listener == "time" || listener.starts_with("time") || destination_port == 37 {
+        return TcpFrameMode::Immediate;
+    }
+
+    if listener == "chargen" || listener.starts_with("chargen") || destination_port == 19 {
+        return TcpFrameMode::Immediate;
+    }
+
+    if listener == "quotd" || listener.starts_with("quotd") || destination_port == 17 {
+        return TcpFrameMode::Immediate;
+    }
+
+    if listener == "dummy" || listener.starts_with("dummy") {
+        return TcpFrameMode::Immediate;
+    }
+
     if listener == "ssh" || listener.starts_with("ssh") || destination_port == 22 {
         return if ssh_first_packet {
             TcpFrameMode::SshBanner
@@ -206,7 +243,10 @@ fn tcp_frame_mode(
         return match detected.as_str() {
             "dns" => TcpFrameMode::DnsTcp,
             "http" | "https" => TcpFrameMode::Http,
-            "smtp" | "ftp" | "pop3" | "irc" | "telnet" => TcpFrameMode::Line,
+            "smtp" | "ftp" | "pop3" | "irc" | "telnet" | "finger" | "ident" | "syslogrecv" => {
+                TcpFrameMode::Line
+            }
+            "daytime" | "time" | "chargen" | "quotd" | "dummy" => TcpFrameMode::Immediate,
             "ssh" => {
                 if ssh_first_packet {
                     TcpFrameMode::SshBanner
@@ -762,55 +802,118 @@ fn extract_rdp_frame(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
     Some(buffer.drain(..total_len).collect())
 }
 
-fn extract_ldap_frame(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LdapBerLength {
+    Complete(usize),
+    Incomplete,
+    Invalid,
+    TooLarge,
+    NotLdap,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BerLengthField {
+    Complete {
+        payload_len: usize,
+        len_bytes: usize,
+    },
+    Incomplete,
+    Invalid,
+}
+
+fn extract_ldap_frame(buffer: &mut Vec<u8>) -> TcpFrameResult {
     if buffer.len() < 2 {
-        return None;
+        return TcpFrameResult::Incomplete;
     }
 
     let total_len = match ldap_total_len(buffer) {
-        Some(total_len) => total_len,
-        None if buffer[0] == 0x30 => return None,
-        None => return extract_immediate_frame(buffer),
+        LdapBerLength::Complete(total_len) => total_len,
+        LdapBerLength::Incomplete => {
+            if buffer.len() > MAX_LDAP_FRAME_SIZE {
+                buffer.clear();
+                return TcpFrameResult::TooLarge { response: None };
+            }
+            return TcpFrameResult::Incomplete;
+        }
+        LdapBerLength::Invalid => {
+            buffer.clear();
+            return TcpFrameResult::Invalid { response: None };
+        }
+        LdapBerLength::TooLarge => {
+            buffer.clear();
+            return TcpFrameResult::TooLarge { response: None };
+        }
+        LdapBerLength::NotLdap => return optional_frame(extract_immediate_frame(buffer)),
     };
 
+    if total_len > MAX_LDAP_FRAME_SIZE {
+        buffer.clear();
+        return TcpFrameResult::TooLarge { response: None };
+    }
     if buffer.len() < total_len {
-        return None;
+        if buffer.len() > MAX_LDAP_FRAME_SIZE {
+            buffer.clear();
+            return TcpFrameResult::TooLarge { response: None };
+        }
+        return TcpFrameResult::Incomplete;
     }
 
-    Some(buffer.drain(..total_len).collect())
+    TcpFrameResult::Complete(buffer.drain(..total_len).collect())
 }
 
-fn ldap_total_len(buffer: &[u8]) -> Option<usize> {
-    const MAX_BER_LENGTH: usize = 16 * 1024 * 1024;
-
-    if buffer.first().copied()? != 0x30 {
-        return None;
+fn ldap_total_len(buffer: &[u8]) -> LdapBerLength {
+    if buffer.first().copied() != Some(0x30) {
+        return LdapBerLength::NotLdap;
     }
 
-    let (payload_len, len_bytes) = parse_ber_length(&buffer[1..])?;
-    if payload_len > MAX_BER_LENGTH {
-        return None;
+    let (payload_len, len_bytes) = match parse_ber_length(&buffer[1..]) {
+        BerLengthField::Complete {
+            payload_len,
+            len_bytes,
+        } => (payload_len, len_bytes),
+        BerLengthField::Incomplete => return LdapBerLength::Incomplete,
+        BerLengthField::Invalid => return LdapBerLength::Invalid,
+    };
+    if payload_len > MAX_LDAP_BER_PAYLOAD_SIZE {
+        return LdapBerLength::TooLarge;
     }
 
-    1usize.checked_add(len_bytes)?.checked_add(payload_len)
+    match 1usize
+        .checked_add(len_bytes)
+        .and_then(|prefix_len| prefix_len.checked_add(payload_len))
+    {
+        Some(total_len) => LdapBerLength::Complete(total_len),
+        None => LdapBerLength::TooLarge,
+    }
 }
 
-fn parse_ber_length(data: &[u8]) -> Option<(usize, usize)> {
-    let first = *data.first()?;
+fn parse_ber_length(data: &[u8]) -> BerLengthField {
+    let Some(first) = data.first().copied() else {
+        return BerLengthField::Incomplete;
+    };
     if first & 0x80 == 0 {
-        return Some((first as usize, 1));
+        return BerLengthField::Complete {
+            payload_len: first as usize,
+            len_bytes: 1,
+        };
     }
 
     let num_bytes = (first & 0x7F) as usize;
-    if num_bytes == 0 || num_bytes > 4 || data.len() < 1 + num_bytes {
-        return None;
+    if num_bytes == 0 || num_bytes > 4 {
+        return BerLengthField::Invalid;
+    }
+    if data.len() < 1 + num_bytes {
+        return BerLengthField::Incomplete;
     }
 
     let mut len = 0usize;
     for byte in &data[1..=num_bytes] {
         len = (len << 8) | (*byte as usize);
     }
-    Some((len, 1 + num_bytes))
+    BerLengthField::Complete {
+        payload_len: len,
+        len_bytes: 1 + num_bytes,
+    }
 }
 
 fn extract_redis_frame(buffer: &mut Vec<u8>) -> TcpFrameResult {
@@ -1471,6 +1574,133 @@ async fn dispatch_named_tcp_protocol(
                 .handle_command(std::str::from_utf8(data).unwrap_or(""))
                 .to_vec(),
         )
+    } else if name == "finger" || name.starts_with("finger") {
+        let query = String::from_utf8_lossy(data);
+        crate::protocol_handlers::log_tcp_event(
+            ctx,
+            output_path,
+            peer,
+            destination,
+            "finger_request",
+            query.trim_end(),
+            "finger",
+        )
+        .await;
+        Some(
+            nettrap_proto_finger::FingerHandler::new()
+                .handle(&query)
+                .into_bytes(),
+        )
+    } else if name == "ident" || name.starts_with("ident") {
+        let query = String::from_utf8_lossy(data);
+        crate::protocol_handlers::log_tcp_event(
+            ctx,
+            output_path,
+            peer,
+            destination,
+            "ident_request",
+            query.trim_end(),
+            "ident",
+        )
+        .await;
+        Some(
+            nettrap_proto_ident::IdentHandler::new()
+                .handle(&query)
+                .into_bytes(),
+        )
+    } else if name == "daytime" || name.starts_with("daytime") {
+        crate::protocol_handlers::log_tcp_event(
+            ctx,
+            output_path,
+            peer,
+            destination,
+            "daytime_request",
+            &format!("{} bytes", data.len()),
+            "daytime",
+        )
+        .await;
+        Some(
+            nettrap_proto_daytime::DaytimeHandler::new()
+                .handle()
+                .into_bytes(),
+        )
+    } else if name == "time" || name.starts_with("time") {
+        crate::protocol_handlers::log_tcp_event(
+            ctx,
+            output_path,
+            peer,
+            destination,
+            "time_request",
+            &format!("{} bytes", data.len()),
+            "time",
+        )
+        .await;
+        Some(nettrap_proto_time::TimeHandler::new().handle())
+    } else if name == "chargen" || name.starts_with("chargen") {
+        crate::protocol_handlers::log_tcp_event(
+            ctx,
+            output_path,
+            peer,
+            destination,
+            "chargen_request",
+            &format!("{} bytes", data.len()),
+            "chargen",
+        )
+        .await;
+        let mut handler = nettrap_proto_chargen::ChargenHandler::new();
+        Some(handler.handle(6))
+    } else if name == "quotd" || name.starts_with("quotd") {
+        crate::protocol_handlers::log_tcp_event(
+            ctx,
+            output_path,
+            peer,
+            destination,
+            "quotd_request",
+            &format!("{} bytes", data.len()),
+            "quotd",
+        )
+        .await;
+        Some(
+            nettrap_proto_quotd::QuotdHandler::new()
+                .handle()
+                .into_bytes(),
+        )
+    } else if name == "syslogrecv" || name.starts_with("syslogrecv") {
+        let parsed = nettrap_proto_syslogrecv::SyslogRecvHandler::new().handle(data);
+        let detail = parsed.as_ref().map_or_else(
+            || format!("{} bytes, invalid", data.len()),
+            |message| {
+                format!(
+                    "{} bytes, facility={}, severity={}",
+                    data.len(),
+                    message.facility_name,
+                    message.severity_name
+                )
+            },
+        );
+        log_event(output_path, ctx.name(), peer, "syslogrecv_message", &detail).await;
+        let nbi = crate::nbi::raw_nbi(
+            ctx.name(),
+            &peer.ip().to_string(),
+            peer.port(),
+            destination,
+            data.len(),
+            "syslogrecv",
+        );
+        ctx.runtime.nbi_collector.record(&nbi).await;
+        Some(Vec::new())
+    } else if name == "dummy" || name.starts_with("dummy") {
+        crate::protocol_handlers::log_tcp_event(
+            ctx,
+            output_path,
+            peer,
+            destination,
+            "dummy_request",
+            &format!("{} bytes", data.len()),
+            "dummy",
+        )
+        .await;
+        Some(nettrap_proto_dummy::DummyHandler::new().handle(data))
     } else if name == "ssh" || name.starts_with("ssh") {
         Some(
             handle_ssh(
@@ -2802,10 +3032,10 @@ mod tests {
     #[test]
     fn ldap_frame_waits_for_complete_ber_sequence() {
         let mut buffer = vec![0x30, 0x0C, 0x02, 0x01, 0x01, 0x60];
-        assert!(extract_ldap_frame(&mut buffer).is_none());
+        assert_incomplete(extract_ldap_frame(&mut buffer));
 
         buffer.extend_from_slice(&[0x07, 0x02, 0x01, 0x03, 0x04, 0x00, 0x80, 0x00]);
-        let frame = extract_ldap_frame(&mut buffer).expect("ldap message should be complete");
+        let frame = expect_complete(extract_ldap_frame(&mut buffer));
         assert_eq!(
             frame,
             vec![
@@ -2813,6 +3043,34 @@ mod tests {
             ]
         );
         assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn ldap_frame_rejects_invalid_long_form_length() {
+        let mut buffer = vec![0x30, 0x85, 0x00, 0x00, 0x00, 0x00, 0x01];
+
+        assert_terminal_without_response(extract_ldap_frame(&mut buffer));
+
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn ldap_frame_rejects_declared_payload_over_limit() {
+        let mut buffer = vec![0x30, 0x84];
+        buffer.extend_from_slice(&(MAX_LDAP_BER_PAYLOAD_SIZE as u32 + 1).to_be_bytes());
+
+        assert_terminal_without_response(extract_ldap_frame(&mut buffer));
+
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn ldap_frame_keeps_partial_long_form_length_buffered() {
+        let mut buffer = vec![0x30, 0x84, 0x00];
+
+        assert_incomplete(extract_ldap_frame(&mut buffer));
+
+        assert_eq!(buffer, vec![0x30, 0x84, 0x00]);
     }
 
     #[test]
@@ -2846,6 +3104,32 @@ mod tests {
         assert_eq!(
             tcp_frame_mode("tcp", &[0x16, 0x03], 443, &router, false, true),
             TcpFrameMode::Tls
+        );
+    }
+
+    #[test]
+    fn tcp_frame_mode_routes_registered_utility_protocols() {
+        let router = nettrap_proxy::ProtocolRouter::new();
+
+        assert_eq!(
+            tcp_frame_mode("finger", b"user\r\n", 79, &router, false, false),
+            TcpFrameMode::Line
+        );
+        assert_eq!(
+            tcp_frame_mode("ident", b"1, 2\r\n", 113, &router, false, false),
+            TcpFrameMode::Line
+        );
+        assert_eq!(
+            tcp_frame_mode("syslogrecv", b"<13>test\n", 514, &router, false, false),
+            TcpFrameMode::Line
+        );
+        assert_eq!(
+            tcp_frame_mode("daytime", b"", 13, &router, false, false),
+            TcpFrameMode::Immediate
+        );
+        assert_eq!(
+            tcp_frame_mode("chargen", b"", 19, &router, false, false),
+            TcpFrameMode::Immediate
         );
     }
 

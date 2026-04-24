@@ -256,13 +256,15 @@ impl Pop3HandlerTrait for Pop3Handler {
             tracing::info!("POP3 APOP — user: {} digest: {}", user, digest);
             Ok(Pop3Response::ok("Authentication successful"))
         } else if upper.starts_with("CAPA") {
-            let response = "+OK Capability list follows\r\nUSER\r\nTOP\r\nUIDL\r\nSTLS\r\nSASL PLAIN LOGIN\r\n.\r\n".to_string();
+            let response =
+                "+OK Capability list follows\r\nUSER\r\nTOP\r\nUIDL\r\nSASL PLAIN LOGIN\r\n.\r\n"
+                    .to_string();
             Ok(Pop3Response {
                 positive: true,
                 message: response,
             })
         } else if upper.starts_with("STLS") {
-            Ok(Pop3Response::ok("Begin TLS negotiation"))
+            Ok(Pop3Response::err("TLS not available"))
         } else if upper.starts_with("QUIT") {
             Ok(Pop3Response::ok("Goodbye"))
         } else {
@@ -272,5 +274,49 @@ impl Pop3HandlerTrait for Pop3Handler {
 
     fn name(&self) -> &'static str {
         "pop3"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
+
+    struct NoopWake;
+
+    impl Wake for NoopWake {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    fn block_on<F: Future>(future: F) -> F::Output {
+        let waker = Waker::from(Arc::new(NoopWake));
+        let mut cx = Context::from_waker(&waker);
+        let mut future = Pin::from(Box::new(future));
+        loop {
+            match future.as_mut().poll(&mut cx) {
+                Poll::Ready(output) => return output,
+                Poll::Pending => std::thread::yield_now(),
+            }
+        }
+    }
+
+    #[test]
+    fn capa_does_not_advertise_stls_without_tls_upgrade() {
+        let response = block_on(Pop3Handler::new().handle("CAPA")).expect("CAPA response");
+
+        assert!(response.positive);
+        assert!(!response.message.contains("\r\nSTLS\r\n"));
+        assert!(response.message.contains("\r\nSASL PLAIN LOGIN\r\n"));
+    }
+
+    #[test]
+    fn stls_returns_negative_response_when_tls_upgrade_is_unavailable() {
+        let response = block_on(Pop3Handler::new().handle("STLS")).expect("STLS response");
+
+        assert!(!response.positive);
+        assert_eq!(response.to_bytes(), b"-ERR TLS not available\r\n");
     }
 }
