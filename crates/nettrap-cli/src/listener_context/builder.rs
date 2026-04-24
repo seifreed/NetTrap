@@ -43,6 +43,7 @@ pub struct ListenerContextBuilder {
     dns_response_mx: Option<String>,
     dns_response_txt: Option<String>,
     dns_nxdomains: Option<u32>,
+    dns_ncsi_response_ip: Option<String>,
     pasv_ports: Option<String>,
     max_connections: Option<u32>,
     banner_delay_ms: u64,
@@ -156,6 +157,11 @@ impl ListenerContextBuilder {
         self
     }
 
+    pub fn dns_ncsi_response_ip(mut self, ip: Option<String>) -> Self {
+        self.dns_ncsi_response_ip = ip;
+        self
+    }
+
     pub fn pasv_ports(mut self, ports: Option<String>) -> Self {
         self.pasv_ports = ports;
         self
@@ -223,6 +229,7 @@ impl ListenerContextBuilder {
             dns_response_mx: self.dns_response_mx,
             dns_response_txt: self.dns_response_txt,
             dns_nxdomains: self.dns_nxdomains,
+            dns_ncsi_response_ip: self.dns_ncsi_response_ip,
             pasv_ports: self.pasv_ports,
             max_connections: self.max_connections,
             banner_delay_ms: self.banner_delay_ms,

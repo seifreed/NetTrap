@@ -25,6 +25,7 @@ const MAX_REDIS_FRAME_SIZE: usize = 1024 * 1024;
 const MAX_REDIS_ARRAY_COUNT: usize = 1024;
 const MAX_MEMCACHED_LINE_SIZE: usize = 64 * 1024;
 const MAX_MEMCACHED_FRAME_SIZE: usize = 1024 * 1024;
+const MAX_TLS_RECORD_SIZE: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TcpFrameMode {
@@ -41,6 +42,7 @@ enum TcpFrameMode {
     Rdp,
     Ldap,
     Mqtt,
+    Tls,
     Redis,
     Memcached,
     Immediate,
@@ -90,6 +92,7 @@ fn next_tcp_frame(
         TcpFrameMode::Rdp => optional_frame(extract_rdp_frame(buffer)),
         TcpFrameMode::Ldap => optional_frame(extract_ldap_frame(buffer)),
         TcpFrameMode::Mqtt => extract_mqtt_frame(buffer),
+        TcpFrameMode::Tls => extract_tls_frame(buffer),
         TcpFrameMode::Redis => extract_redis_frame(buffer),
         TcpFrameMode::Memcached => extract_memcached_frame(buffer),
         TcpFrameMode::Immediate => optional_frame(extract_immediate_frame(buffer)),
@@ -112,6 +115,14 @@ fn tcp_frame_mode(
 
     if smtp_data_mode {
         return TcpFrameMode::SmtpData;
+    }
+
+    if listener == "tls"
+        || listener.starts_with("tls")
+        || (matches!(destination_port, 443 | 8443 | 8883 | 9443) && has_tls_record_prefix(buffer))
+        || is_tls_client_hello(buffer)
+    {
+        return TcpFrameMode::Tls;
     }
 
     if listener == "http"
@@ -210,6 +221,7 @@ fn tcp_frame_mode(
             "rdp" => TcpFrameMode::Rdp,
             "ldap" => TcpFrameMode::Ldap,
             "mqtt" => TcpFrameMode::Mqtt,
+            "tls" => TcpFrameMode::Tls,
             "redis" => TcpFrameMode::Redis,
             "memcached" => TcpFrameMode::Memcached,
             _ => TcpFrameMode::Immediate,
@@ -231,6 +243,37 @@ fn extract_length_prefixed_frame(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
     }
 
     Some(buffer.drain(..total_len).collect())
+}
+
+fn has_tls_record_prefix(buffer: &[u8]) -> bool {
+    buffer.len() >= 2 && buffer[0] == 0x16 && buffer[1] == 0x03
+}
+
+fn is_tls_client_hello(buffer: &[u8]) -> bool {
+    buffer.len() >= 6 && buffer[0] == 0x16 && buffer[1] == 0x03 && buffer[5] == 0x01
+}
+
+fn extract_tls_frame(buffer: &mut Vec<u8>) -> TcpFrameResult {
+    if buffer.len() < 5 {
+        return TcpFrameResult::Incomplete;
+    }
+    if !has_tls_record_prefix(buffer) {
+        return TcpFrameResult::Invalid { response: None };
+    }
+
+    let record_len = u16::from_be_bytes([buffer[3], buffer[4]]) as usize;
+    let total_len = 5 + record_len;
+    if total_len > MAX_TLS_RECORD_SIZE {
+        buffer.clear();
+        return TcpFrameResult::TooLarge {
+            response: Some(build_tls_alert_decode_error()),
+        };
+    }
+    if buffer.len() < total_len {
+        return TcpFrameResult::Incomplete;
+    }
+
+    TcpFrameResult::Complete(buffer.drain(..total_len).collect())
 }
 
 fn extract_line_frame(buffer: &mut Vec<u8>) -> TcpFrameResult {
@@ -1015,6 +1058,7 @@ pub async fn handle_tcp_connection(
     let mut irc_nick = "unknown".to_string();
     let mut redis_authenticated = false;
     let mut ssh_first_packet = true;
+    let mut ssh_banner_sent = false;
     let mut connection_buf: Vec<u8> = Vec::new();
 
     // Apply banner delay BEFORE sending banner to frustrate scanners
@@ -1031,6 +1075,7 @@ pub async fn handle_tcp_connection(
         {
             stream.write_all(&banner_bytes).await?;
             stream.flush().await?;
+            ssh_banner_sent = name == "ssh" || name.starts_with("ssh");
         } else if name == "ftp" || name.starts_with("ftp") {
             stream.write_all(&ftp_handler.get_banner()).await?;
             stream.flush().await?;
@@ -1171,6 +1216,7 @@ pub async fn handle_tcp_connection(
                                 &mut irc_nick,
                                 &mut redis_authenticated,
                                 &mut ssh_first_packet,
+                                ssh_banner_sent,
                             )
                             .await;
                             response.extend_from_slice(&frame_response);
@@ -1254,6 +1300,7 @@ async fn handle_tcp_protocol(
     irc_nick: &mut String,
     redis_authenticated: &mut bool,
     ssh_first_packet: &mut bool,
+    ssh_banner_sent: bool,
 ) -> Vec<u8> {
     if let Some(response) = dispatch_named_tcp_protocol(
         ctx,
@@ -1283,6 +1330,7 @@ async fn handle_tcp_protocol(
         irc_nick,
         redis_authenticated,
         ssh_first_packet,
+        ssh_banner_sent,
     )
     .await
     {
@@ -1317,6 +1365,7 @@ async fn handle_tcp_protocol(
             irc_nick,
             redis_authenticated,
             ssh_first_packet,
+            ssh_banner_sent,
         )
         .await
     }
@@ -1351,6 +1400,7 @@ async fn dispatch_named_tcp_protocol(
     irc_nick: &mut String,
     redis_authenticated: &mut bool,
     ssh_first_packet: &mut bool,
+    ssh_banner_sent: bool,
 ) -> Option<Vec<u8>> {
     if name == "dns" || name.starts_with("dns") {
         Some(handle_dns_tcp(ctx, data, peer, destination, output_path).await)
@@ -1422,7 +1472,18 @@ async fn dispatch_named_tcp_protocol(
                 .to_vec(),
         )
     } else if name == "ssh" || name.starts_with("ssh") {
-        Some(handle_ssh(ctx, data, peer, destination, output_path, ssh_first_packet).await)
+        Some(
+            handle_ssh(
+                ctx,
+                data,
+                peer,
+                destination,
+                output_path,
+                ssh_first_packet,
+                ssh_banner_sent,
+            )
+            .await,
+        )
     } else if name == "smb" || name.starts_with("smb") {
         let nbi = crate::nbi::raw_nbi(
             ctx.name(),
@@ -1527,6 +1588,8 @@ async fn dispatch_named_tcp_protocol(
         );
         ctx.runtime.nbi_collector.record(&nbi).await;
         Some(nettrap_proto_mqtt::MqttHandler::new().handle_packet(data))
+    } else if name == "tls" || name.starts_with("tls") {
+        Some(handle_tls_plain(ctx, data, peer, destination, output_path).await)
     } else if name == "nkn" || name.starts_with("nkn") {
         let handler = nettrap_proto_nkn::NknHandler::new();
         crate::protocol_handlers::log_tcp_event(
@@ -1673,6 +1736,43 @@ async fn handle_irc(
     }
 }
 
+async fn handle_tls_plain(
+    ctx: &Arc<ListenerContext>,
+    data: &[u8],
+    peer: &std::net::SocketAddr,
+    destination: &SessionDestination,
+    output_path: Option<&std::path::Path>,
+) -> Vec<u8> {
+    let sni = nettrap_proto_tls::fingerprint::extract_sni(data).unwrap_or_default();
+    let detail = if sni.is_empty() {
+        format!("{} bytes", data.len())
+    } else {
+        format!("{} bytes, sni={}", data.len(), sni)
+    };
+    log_event(output_path, ctx.name(), peer, "tls_client_hello", &detail).await;
+
+    let mut nbi = crate::nbi::tls_nbi(
+        ctx.name(),
+        &peer.ip().to_string(),
+        peer.port(),
+        destination,
+        &sni,
+    );
+    nbi.add("data_length", data.len().to_string());
+    if let Some((ja3_str, ja3_hash)) = nettrap_proto_tls::ja3::ja3_from_handshake(data) {
+        tracing::info!("JA3: {} ({})", ja3_hash, ja3_str);
+        nbi.add("ja3", ja3_str);
+        nbi.add("ja3_hash", ja3_hash);
+    }
+    if let Some(ja4) = nettrap_proto_tls::ja3::ja4_from_handshake(data) {
+        tracing::info!("JA4: {}", ja4);
+        nbi.add("ja4", ja4);
+    }
+    ctx.runtime.nbi_collector.record(&nbi).await;
+
+    build_tls_response()
+}
+
 async fn handle_ssh(
     ctx: &Arc<ListenerContext>,
     data: &[u8],
@@ -1680,6 +1780,7 @@ async fn handle_ssh(
     destination: &SessionDestination,
     output_path: Option<&std::path::Path>,
     first_packet: &mut bool,
+    banner_already_sent: bool,
 ) -> Vec<u8> {
     let handler = nettrap_proto_ssh::SshHandler::new();
 
@@ -1716,10 +1817,7 @@ async fn handle_ssh(
             )
             .await;
         }
-        // Respond with server banner + KEXINIT (no disconnect yet)
-        let mut resp = handler.get_banner();
-        resp.extend_from_slice(&handler.build_kexinit());
-        resp
+        build_ssh_first_response(&handler, banner_already_sent)
     } else {
         // Subsequent packets: log and send auth failure (disconnect)
         crate::protocol_handlers::log_tcp_event(
@@ -1734,6 +1832,19 @@ async fn handle_ssh(
         .await;
         handler.build_auth_failure()
     }
+}
+
+fn build_ssh_first_response(
+    handler: &nettrap_proto_ssh::SshHandler,
+    banner_already_sent: bool,
+) -> Vec<u8> {
+    let mut resp = if banner_already_sent {
+        Vec::new()
+    } else {
+        handler.get_banner()
+    };
+    resp.extend_from_slice(&handler.build_kexinit());
+    resp
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1765,6 +1876,7 @@ async fn handle_detected_protocol(
     irc_nick: &mut String,
     redis_authenticated: &mut bool,
     ssh_first_packet: &mut bool,
+    ssh_banner_sent: bool,
 ) -> Vec<u8> {
     if let Some((detected_name, score)) = ctx.runtime.router.route_tcp(data, destination.port) {
         let is_default = ctx.runtime.router.default_tcp_handler() == Some(detected_name.as_str());
@@ -1808,6 +1920,7 @@ async fn handle_detected_protocol(
                 irc_nick,
                 redis_authenticated,
                 ssh_first_packet,
+                ssh_banner_sent,
             )
             .await
             {
@@ -1949,6 +2062,7 @@ pub async fn handle_wrapped_connection(
                                 &mut irc_nick,
                                 &mut redis_authenticated,
                                 &mut ssh_first_packet,
+                                false,
                             )
                             .await;
                             response.extend_from_slice(&frame_response);
@@ -2225,6 +2339,10 @@ pub fn build_tls_response() -> Vec<u8> {
     response.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
     response.extend_from_slice(&handshake);
     response
+}
+
+fn build_tls_alert_decode_error() -> Vec<u8> {
+    vec![21, 0x03, 0x03, 0x00, 0x02, 0x02, 50]
 }
 
 fn is_dyn_dns_checkip_request(host: &str, path: &str) -> bool {
@@ -2529,14 +2647,14 @@ mod tests {
     }
 
     #[test]
-    fn mqtt_frame_mode_does_not_treat_8883_as_plain_mqtt_by_port() {
+    fn mqtt_frame_mode_treats_8883_client_hello_as_tls() {
         let tls_client_hello = vec![0x16, 0x03, 0x03, 0x00, 0x2a];
         let router = nettrap_proxy::ProtocolRouter::new();
         router.register("mqtt", Box::new(nettrap_proxy::MqttTaste), false);
 
         assert_eq!(
             tcp_frame_mode("tcp", &tls_client_hello, 8883, &router, false, false),
-            TcpFrameMode::Immediate
+            TcpFrameMode::Tls
         );
     }
 
@@ -2695,5 +2813,51 @@ mod tests {
             ]
         );
         assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn tls_frame_waits_for_complete_record() {
+        let mut buffer = vec![0x16, 0x03, 0x03, 0x00, 0x04, 0x01, 0x02];
+        assert_incomplete(extract_tls_frame(&mut buffer));
+
+        buffer.extend_from_slice(&[0x03, 0x04]);
+        assert_eq!(
+            expect_complete(extract_tls_frame(&mut buffer)),
+            vec![0x16, 0x03, 0x03, 0x00, 0x04, 0x01, 0x02, 0x03, 0x04]
+        );
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn tls_frame_rejects_oversized_record() {
+        let mut buffer = vec![0x16, 0x03, 0x03, 0xff, 0xff];
+
+        assert!(matches!(
+            extract_tls_frame(&mut buffer),
+            TcpFrameResult::TooLarge { response: Some(_) }
+        ));
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn tcp_frame_mode_detects_tls_on_https_port_before_http() {
+        let router = nettrap_proxy::ProtocolRouter::new();
+
+        assert_eq!(
+            tcp_frame_mode("tcp", &[0x16, 0x03], 443, &router, false, true),
+            TcpFrameMode::Tls
+        );
+    }
+
+    #[test]
+    fn ssh_first_response_omits_duplicate_banner_when_already_sent() {
+        let handler = nettrap_proto_ssh::SshHandler::new();
+
+        let response = build_ssh_first_response(&handler, true);
+        assert!(!response.is_empty());
+        assert!(!response.starts_with(b"SSH-"));
+
+        let response_with_banner = build_ssh_first_response(&handler, false);
+        assert!(response_with_banner.starts_with(b"SSH-"));
     }
 }

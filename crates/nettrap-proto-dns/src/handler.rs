@@ -87,11 +87,15 @@ impl DnsHandler {
     }
 
     pub fn add_custom_response(&self, domain: impl Into<String>, ips: Vec<String>) {
-        self.custom_responses.write().insert(domain.into(), ips);
+        self.custom_responses
+            .write()
+            .insert(normalize_domain_key(&domain.into()), ips);
     }
 
     pub fn remove_custom_response(&self, domain: &str) {
-        self.custom_responses.write().remove(domain);
+        self.custom_responses
+            .write()
+            .remove(&normalize_domain_key(domain));
     }
 
     pub fn clear_custom_responses(&self) {
@@ -212,7 +216,11 @@ impl DnsHandler {
         response.set_id(original_message.id());
         response.add_query(query.clone());
 
-        let custom_ips = self.custom_responses.read().get(domain).cloned();
+        let custom_ips = self
+            .custom_responses
+            .read()
+            .get(&normalize_domain_key(domain))
+            .cloned();
 
         let records = match query.query_type() {
             RecordType::A => self.build_a_records(domain, custom_ips, query.name())?,
@@ -390,4 +398,8 @@ impl DnsHandler {
         let record = Record::from_rdata(name.clone(), 300, RData::SOA(soa));
         Ok(vec![record])
     }
+}
+
+fn normalize_domain_key(domain: &str) -> String {
+    domain.trim().trim_end_matches('.').to_ascii_lowercase()
 }

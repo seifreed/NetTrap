@@ -493,6 +493,7 @@ pub fn build_listener_context(
         .dns_response_mx(listener.dns_response_mx.clone())
         .dns_response_txt(listener.dns_response_txt.clone())
         .dns_nxdomains(listener.dns_nxdomains)
+        .dns_ncsi_response_ip(listener.dns_ncsi_response_ip.clone())
         .pasv_ports(listener.pasv_ports.clone())
         .banner_delay_ms(listener.banner_delay_ms)
         .smtp_dir(smtp_dir)

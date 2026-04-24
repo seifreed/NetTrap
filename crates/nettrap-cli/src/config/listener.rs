@@ -70,6 +70,8 @@ pub struct ListenerConfig {
     pub dns_response_txt: Option<String>,
     #[serde(default)]
     pub dns_nxdomains: Option<u32>,
+    #[serde(default)]
+    pub dns_ncsi_response_ip: Option<String>,
     // DNS response mode: "static", "auto", or "hostname"
     #[serde(default)]
     pub dns_response_mode: Option<String>,
@@ -142,6 +144,7 @@ impl ListenerConfig {
             dns_response_mx: None,
             dns_response_txt: None,
             dns_nxdomains: None,
+            dns_ncsi_response_ip: None,
             dns_response_mode: None,
             server_version: None,
             pasv_ports: None,

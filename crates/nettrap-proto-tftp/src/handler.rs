@@ -1,6 +1,9 @@
 use crate::prelude::*;
 use async_trait::async_trait;
-use std::path::PathBuf;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+
+const MAX_TFTP_SERVE_BYTES: u64 = 8 * 1024 * 1024;
 
 pub struct TftpHandler {
     root_dir: Option<PathBuf>,
@@ -32,72 +35,118 @@ impl TftpHandler {
         self
     }
 
-    /// Handle a RRQ - returns list of DATA packets (block-segmented)
+    /// Handle a RRQ - returns only the first DATA packet.
+    ///
+    /// TFTP is lock-step: additional blocks must only be sent after ACKs.
     pub fn handle_read_request(&self, filename: &str) -> Vec<TftpPacket> {
         tracing::debug!("TFTP RRQ for file: {}", filename);
+        vec![self.handle_read_request_block(filename, 1)]
+    }
 
-        let content = if let Some(ref root) = self.root_dir {
-            let canonical_root = match root.canonicalize() {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!("TFTP root dir canonicalize failed: {}", e);
-                    return vec![TftpPacket::Error {
-                        code: 2,
-                        message: "Access violation".to_string(),
-                    }];
-                }
+    pub fn handle_read_request_block(&self, filename: &str, block: u16) -> TftpPacket {
+        tracing::debug!("TFTP RRQ block {} for file: {}", block, filename);
+
+        if block == 0 {
+            return TftpPacket::Error {
+                code: 4,
+                message: "Invalid block".to_string(),
             };
-            let path = canonical_root.join(filename);
-            // Prevent path traversal: canonicalize resolves symlinks and ../ components
-            match path.canonicalize() {
-                Ok(canonical_path) if canonical_path.starts_with(&canonical_root) => {
-                    std::fs::read(&canonical_path).unwrap_or_else(|_| self.default_content.clone())
-                }
-                Ok(_) => {
-                    tracing::warn!("TFTP path traversal attempt: {}", filename);
-                    return vec![TftpPacket::Error {
-                        code: 2,
-                        message: "Access violation".to_string(),
-                    }];
-                }
-                Err(_) => {
-                    // File doesn't exist — serve default content
-                    self.default_content.clone()
-                }
-            }
+        }
+
+        if let Some(ref root) = self.root_dir {
+            self.read_file_block(root, filename, block)
         } else {
-            self.default_content.clone()
+            TftpPacket::Data {
+                block,
+                data: self.default_content_block(block),
+            }
+        }
+    }
+
+    fn read_file_block(&self, root: &Path, filename: &str, block: u16) -> TftpPacket {
+        let canonical_root = match root.canonicalize() {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("TFTP root dir canonicalize failed: {}", e);
+                return TftpPacket::Error {
+                    code: 2,
+                    message: "Access violation".to_string(),
+                };
+            }
+        };
+        let path = canonical_root.join(filename);
+        let canonical_path = match path.canonicalize() {
+            Ok(p) if p.starts_with(&canonical_root) => p,
+            Ok(_) => {
+                tracing::warn!("TFTP path traversal attempt: {}", filename);
+                return TftpPacket::Error {
+                    code: 2,
+                    message: "Access violation".to_string(),
+                };
+            }
+            Err(_) => {
+                return TftpPacket::Data {
+                    block,
+                    data: self.default_content_block(block),
+                };
+            }
         };
 
-        let mut packets = Vec::new();
-        let chunks = content.chunks(TFTP_BLOCK_SIZE);
-        let mut block: u16 = 1;
-
-        for chunk in chunks {
-            packets.push(TftpPacket::Data {
-                block,
-                data: chunk.to_vec(),
-            });
-            block = block.wrapping_add(1);
+        let metadata = match canonical_path.metadata() {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                return TftpPacket::Data {
+                    block,
+                    data: self.default_content_block(block),
+                };
+            }
+        };
+        if !metadata.is_file() || metadata.len() > MAX_TFTP_SERVE_BYTES {
+            return TftpPacket::Error {
+                code: 2,
+                message: "Access violation".to_string(),
+            };
         }
 
-        // If content is exactly a multiple of block size, send empty final block
-        if content.len() % TFTP_BLOCK_SIZE == 0 {
-            packets.push(TftpPacket::Data {
+        let offset = (u64::from(block) - 1) * TFTP_BLOCK_SIZE as u64;
+        if offset > metadata.len() {
+            return TftpPacket::Data {
                 block,
                 data: Vec::new(),
-            });
+            };
         }
 
-        // If no content at all, send single empty data block
-        if packets.is_empty() {
-            packets.push(TftpPacket::Data {
-                block: 1,
+        let mut file = match std::fs::File::open(&canonical_path) {
+            Ok(file) => file,
+            Err(_) => {
+                return TftpPacket::Data {
+                    block,
+                    data: self.default_content_block(block),
+                };
+            }
+        };
+        if file.seek(SeekFrom::Start(offset)).is_err() {
+            return TftpPacket::Data {
+                block,
                 data: Vec::new(),
-            });
+            };
         }
 
-        packets
+        let mut data = vec![0u8; TFTP_BLOCK_SIZE];
+        let n = file.read(&mut data).unwrap_or(0);
+        data.truncate(n);
+        TftpPacket::Data { block, data }
+    }
+
+    fn default_content_block(&self, block: u16) -> Vec<u8> {
+        let offset = (usize::from(block) - 1) * TFTP_BLOCK_SIZE;
+        if offset >= self.default_content.len() {
+            return Vec::new();
+        }
+        let end = offset
+            .saturating_add(TFTP_BLOCK_SIZE)
+            .min(self.default_content.len());
+        self.default_content[offset..end].to_vec()
     }
 
     /// Handle WRQ - returns initial ACK (block 0)
@@ -146,5 +195,71 @@ impl TftpHandlerTrait for TftpHandler {
 
     fn name(&self) -> &'static str {
         "tftp"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn rrq_returns_only_first_block() {
+        let handler = TftpHandler::new().with_default_content(vec![b'a'; TFTP_BLOCK_SIZE * 3]);
+
+        let packets = handler.handle_read_request("large.bin");
+
+        assert_eq!(packets.len(), 1);
+        assert!(matches!(
+            &packets[0],
+            TftpPacket::Data { block: 1, data } if data.len() == TFTP_BLOCK_SIZE
+        ));
+    }
+
+    #[test]
+    fn reads_requested_file_block_without_loading_all_blocks() {
+        let root = unique_temp_dir("nettrap-tftp-block");
+        std::fs::create_dir_all(&root).expect("create temp root");
+        let path = root.join("firmware.bin");
+        let mut file = std::fs::File::create(&path).expect("create fixture");
+        file.write_all(&vec![b'a'; TFTP_BLOCK_SIZE])
+            .expect("write first block");
+        file.write_all(b"tail").expect("write tail");
+
+        let handler = TftpHandler::new().with_root_dir(&root);
+        let first = handler.handle_read_request("firmware.bin");
+        let second = handler.handle_read_request_block("firmware.bin", 2);
+
+        assert!(matches!(
+            &first[0],
+            TftpPacket::Data { block: 1, data } if data.len() == TFTP_BLOCK_SIZE
+        ));
+        assert!(matches!(
+            second,
+            TftpPacket::Data { block: 2, data } if data == b"tail"
+        ));
+
+        std::fs::remove_dir_all(root).expect("cleanup temp root");
+    }
+
+    #[test]
+    fn rejects_files_over_serve_limit() {
+        let root = unique_temp_dir("nettrap-tftp-limit");
+        std::fs::create_dir_all(&root).expect("create temp root");
+        let path = root.join("huge.bin");
+        let file = std::fs::File::create(&path).expect("create sparse file");
+        file.set_len(MAX_TFTP_SERVE_BYTES + 1)
+            .expect("extend sparse file");
+
+        let handler = TftpHandler::new().with_root_dir(&root);
+        let packet = handler.handle_read_request_block("huge.bin", 1);
+
+        assert!(matches!(packet, TftpPacket::Error { code: 2, .. }));
+
+        std::fs::remove_dir_all(root).expect("cleanup temp root");
+    }
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("{}-{}", prefix, std::process::id()))
     }
 }

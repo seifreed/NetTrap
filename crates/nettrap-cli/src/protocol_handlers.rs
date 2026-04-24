@@ -66,15 +66,24 @@ pub async fn handle_udp_generic(
     socket: &tokio::net::UdpSocket,
     packet: UdpGenericResponse<'_>,
 ) {
-    ctx.apply_response_delay().await;
-    ctx.write_pcap_response_udp_for_destination(packet.response, &packet.src, packet.destination);
-    let _ = socket.send_to(packet.response, packet.src).await;
+    let mut sent_bytes = 0u64;
+    if !packet.response.is_empty() {
+        ctx.apply_response_delay().await;
+        ctx.write_pcap_response_udp_for_destination(
+            packet.response,
+            &packet.src,
+            packet.destination,
+        );
+        if socket.send_to(packet.response, packet.src).await.is_ok() {
+            sent_bytes = packet.response.len() as u64;
+        }
+    }
     ctx.update_session_bytes(
         &packet.src,
         "UDP",
         packet.destination,
         packet.len as u64,
-        packet.response.len() as u64,
+        sent_bytes,
     );
     log_event(
         packet.output_path,
@@ -139,6 +148,21 @@ pub fn init_dns_handler(ctx: &ListenerContext) -> nettrap_proto_dns::handler::Dn
     }
     if let Some(n) = ctx.config.dns_nxdomains {
         dns_handler = dns_handler.with_nxdomains(n);
+    }
+    if let Some(ip) = ctx.dns_ncsi_response_ip() {
+        match ip.parse::<std::net::Ipv4Addr>() {
+            Ok(ip) => {
+                dns_handler = dns_handler.with_ncsi_response_ip(ip);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Invalid dns_ncsi_response_ip '{}' for listener {}: {}",
+                    ip,
+                    ctx.name(),
+                    e
+                );
+            }
+        }
     }
 
     if let Some(custom) = ctx.custom_response() {

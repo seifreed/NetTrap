@@ -1,6 +1,6 @@
 use crate::mqtt::{
     MQTT_CONNACK, MQTT_CONNECT, MQTT_DISCONNECT, MQTT_PINGREQ, MQTT_PINGRESP, MQTT_PUBACK,
-    MQTT_PUBLISH, MQTT_SUBACK, MQTT_SUBSCRIBE,
+    MQTT_PUBLISH, MQTT_PUBREC, MQTT_SUBACK, MQTT_SUBSCRIBE,
 };
 
 pub struct MqttHandler {
@@ -25,6 +25,14 @@ impl MqttHandler {
         }
 
         let packet_type = (data[0] >> 4) & 0x0F;
+        let Some((remaining_len, start)) = Self::parse_remaining_length(data) else {
+            return Vec::new();
+        };
+        if start.checked_add(remaining_len) != Some(data.len())
+            || !Self::valid_fixed_header(data[0], packet_type, remaining_len)
+        {
+            return Vec::new();
+        }
 
         match packet_type {
             MQTT_CONNECT => {
@@ -57,11 +65,11 @@ impl MqttHandler {
                     );
                     tracing::debug!("MQTT payload: {:?}", String::from_utf8_lossy(&payload));
                 }
-                // QoS 0 = no ack needed, QoS 1 = PUBACK
+                // QoS 0 = no ack, QoS 1 = PUBACK, QoS 2 = PUBREC
                 let qos = (data[0] >> 1) & 0x03;
-                if qos >= 1 {
+                if matches!(qos, 1 | 2) {
                     // Packet ID follows topic_length(2) + topic(var) in the variable header
-                    let remaining_start = Self::remaining_length_end(data);
+                    let remaining_start = start;
                     if remaining_start + 2 <= data.len() {
                         let topic_len =
                             u16::from_be_bytes([data[remaining_start], data[remaining_start + 1]])
@@ -70,8 +78,9 @@ impl MqttHandler {
                         if packet_id_pos + 2 <= data.len() {
                             let packet_id =
                                 u16::from_be_bytes([data[packet_id_pos], data[packet_id_pos + 1]]);
+                            let ack_type = if qos == 2 { MQTT_PUBREC } else { MQTT_PUBACK };
                             return vec![
-                                (MQTT_PUBACK << 4),
+                                (ack_type << 4),
                                 2,
                                 (packet_id >> 8) as u8,
                                 (packet_id & 0xFF) as u8,
@@ -83,7 +92,7 @@ impl MqttHandler {
             }
             MQTT_SUBSCRIBE => {
                 // Parse topics
-                let remaining_start = Self::remaining_length_end(data);
+                let remaining_start = start;
                 if remaining_start + 2 <= data.len() {
                     let packet_id =
                         u16::from_be_bytes([data[remaining_start], data[remaining_start + 1]]);
@@ -100,13 +109,28 @@ impl MqttHandler {
                 Vec::new()
             }
             MQTT_PINGREQ => {
-                vec![(MQTT_PINGRESP << 4), 0]
+                if remaining_len == 0 {
+                    vec![(MQTT_PINGRESP << 4), 0]
+                } else {
+                    Vec::new()
+                }
             }
             MQTT_DISCONNECT => {
                 tracing::debug!("MQTT DISCONNECT");
                 Vec::new()
             }
             _ => Vec::new(),
+        }
+    }
+
+    fn valid_fixed_header(first: u8, packet_type: u8, remaining_len: usize) -> bool {
+        let flags = first & 0x0F;
+        match packet_type {
+            MQTT_CONNECT => flags == 0,
+            MQTT_PINGREQ | MQTT_DISCONNECT => flags == 0 && remaining_len == 0,
+            MQTT_PUBLISH => ((flags >> 1) & 0x03) != 0x03,
+            MQTT_SUBSCRIBE => flags == 0x02,
+            _ => flags == 0,
         }
     }
 
@@ -148,15 +172,10 @@ impl MqttHandler {
         Some((value, i + 1))
     }
 
-    /// Get the start position after the remaining length field.
-    /// Returns the byte index where payload starts, or data.len() if invalid.
-    fn remaining_length_end(data: &[u8]) -> usize {
-        Self::parse_remaining_length(data)
-            .map(|(_, start)| start)
-            .unwrap_or(data.len())
-    }
-
     fn parse_connect(data: &[u8]) -> Option<MqttConnectInfo> {
+        if data.first().copied()? != (MQTT_CONNECT << 4) {
+            return None;
+        }
         let (remaining_len, start) = Self::parse_remaining_length(data)?;
         if start.checked_add(remaining_len)? != data.len() {
             return None;
@@ -203,8 +222,15 @@ impl MqttHandler {
         let mut username = None;
         let mut password = None;
 
-        // Skip Will Topic and Will Message if Will Flag (bit 2) is set
+        // MQTT 5 includes Will Properties before Will Topic and Will Message.
         if will_flag {
+            if proto_level == 5 {
+                let will_properties_len = Self::read_variable_int(payload, &mut pos)?;
+                pos = pos.checked_add(will_properties_len)?;
+                if pos > payload.len() {
+                    return None;
+                }
+            }
             Self::read_mqtt_string(payload, &mut pos)?;
             Self::read_mqtt_string(payload, &mut pos)?;
         }
@@ -266,7 +292,10 @@ impl MqttHandler {
     }
 
     fn parse_publish(data: &[u8]) -> Option<(String, Vec<u8>)> {
-        let start = Self::remaining_length_end(data);
+        let (remaining_len, start) = Self::parse_remaining_length(data)?;
+        if start.checked_add(remaining_len)? != data.len() {
+            return None;
+        }
         if start >= data.len() {
             return None;
         }
@@ -285,6 +314,9 @@ impl MqttHandler {
         // Skip packet ID for QoS 1/2
         let qos = (data[0] >> 1) & 0x03;
         if qos >= 1 {
+            if pos + 2 > payload.len() {
+                return None;
+            }
             pos += 2;
         }
 
@@ -339,5 +371,79 @@ mod tests {
         ];
 
         assert!(MqttHandler::new().handle_packet(&packet).is_empty());
+    }
+
+    #[test]
+    fn connect_returns_empty_when_fixed_header_flags_are_invalid() {
+        let packet = vec![
+            0x11, 0x0c, 0x00, 0x04, b'M', b'Q', b'T', b'T', 0x04, 0x02, 0x00, 0x3c, 0x00, 0x00,
+        ];
+
+        assert!(MqttHandler::new().handle_packet(&packet).is_empty());
+    }
+
+    #[test]
+    fn pingreq_returns_empty_when_remaining_length_is_nonzero() {
+        assert!(
+            MqttHandler::new()
+                .handle_packet(&[0xc0, 0x01, 0x00])
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn publish_qos1_returns_puback() {
+        let packet = vec![0x32, 0x06, 0x00, 0x01, b'a', 0x12, 0x34, b'x'];
+
+        assert_eq!(
+            MqttHandler::new().handle_packet(&packet),
+            vec![0x40, 0x02, 0x12, 0x34]
+        );
+    }
+
+    #[test]
+    fn publish_qos2_returns_pubrec() {
+        let packet = vec![0x34, 0x06, 0x00, 0x01, b'a', 0x12, 0x34, b'x'];
+
+        assert_eq!(
+            MqttHandler::new().handle_packet(&packet),
+            vec![0x50, 0x02, 0x12, 0x34]
+        );
+    }
+
+    #[test]
+    fn publish_qos3_is_rejected() {
+        let packet = vec![0x36, 0x06, 0x00, 0x01, b'a', 0x12, 0x34, b'x'];
+
+        assert!(MqttHandler::new().handle_packet(&packet).is_empty());
+    }
+
+    #[test]
+    fn mqtt5_connect_with_will_properties_is_accepted() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&mqtt_string(b"MQTT"));
+        payload.push(5);
+        payload.push(0x04);
+        payload.extend_from_slice(&[0x00, 0x3c]);
+        payload.push(0);
+        payload.extend_from_slice(&mqtt_string(b"client"));
+        payload.push(0);
+        payload.extend_from_slice(&mqtt_string(b"topic"));
+        payload.extend_from_slice(&mqtt_string(b"payload"));
+
+        let mut packet = vec![0x10, payload.len() as u8];
+        packet.extend_from_slice(&payload);
+
+        assert_eq!(
+            MqttHandler::new().handle_packet(&packet),
+            vec![0x20, 0x02, 0x00, 0x00]
+        );
+    }
+
+    fn mqtt_string(value: &[u8]) -> Vec<u8> {
+        let mut encoded = Vec::with_capacity(value.len() + 2);
+        encoded.extend_from_slice(&(value.len() as u16).to_be_bytes());
+        encoded.extend_from_slice(value);
+        encoded
     }
 }

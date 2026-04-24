@@ -94,6 +94,8 @@ pub struct ListenerContext {
     pub dns_response_txt: Option<String>,
     #[deprecated(note = "Use config.dns_nxdomains instead")]
     pub dns_nxdomains: Option<u32>,
+    #[deprecated(note = "Use config.dns_ncsi_response_ip instead")]
+    pub dns_ncsi_response_ip: Option<String>,
     #[deprecated(note = "Use config.pasv_ports instead")]
     pub pasv_ports: Option<String>,
     #[deprecated(note = "Use config.max_connections instead")]
@@ -302,6 +304,7 @@ impl ListenerContext {
             dns_response_mx: config.dns_response_mx.clone(),
             dns_response_txt: config.dns_response_txt.clone(),
             dns_nxdomains: config.dns_nxdomains,
+            dns_ncsi_response_ip: config.dns_ncsi_response_ip.clone(),
             pasv_ports: config.pasv_ports.clone(),
             max_connections: config.max_connections,
             banner_delay_ms: config.banner_delay_ms,
@@ -354,6 +357,7 @@ impl ListenerContext {
         dns_response_mx: Option<String>,
         dns_response_txt: Option<String>,
         dns_nxdomains: Option<u32>,
+        dns_ncsi_response_ip: Option<String>,
         pasv_ports: Option<String>,
         connection_dedup: Arc<ConnectionDedup>,
         port_forward_table: Arc<PortForwardTable>,
@@ -383,6 +387,7 @@ impl ListenerContext {
             dns_response_mx,
             dns_response_txt,
             dns_nxdomains,
+            dns_ncsi_response_ip,
             pasv_ports,
             max_connections,
             banner_delay_ms,
@@ -428,6 +433,7 @@ impl ListenerContext {
             dns_response_mx: config.dns_response_mx,
             dns_response_txt: config.dns_response_txt,
             dns_nxdomains: config.dns_nxdomains,
+            dns_ncsi_response_ip: config.dns_ncsi_response_ip,
             pasv_ports: config.pasv_ports,
             max_connections: config.max_connections,
             banner_delay_ms: config.banner_delay_ms,
@@ -732,6 +738,10 @@ impl ListenerContext {
 
     pub fn dns_response_ip(&self) -> Option<&str> {
         self.config.dns_response_ip.as_deref()
+    }
+
+    pub fn dns_ncsi_response_ip(&self) -> Option<&str> {
+        self.config.dns_ncsi_response_ip.as_deref()
     }
 
     pub fn custom_response(&self) -> Option<&str> {
@@ -1087,6 +1097,7 @@ mod tests {
             None,
             None,
             Some(100),
+            None,
             None,
             Arc::new(ConnectionDedup::new()),
             Arc::new(PortForwardTable::new()),

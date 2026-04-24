@@ -1,14 +1,45 @@
 use nettrap_proto_dns::handler::DnsHandlerTrait;
 use nettrap_proto_tftp::TftpHandlerTrait;
 use nettrap_protocols::handlers::*;
+use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
+use tokio::sync::Mutex;
 
 use crate::listener_context::ListenerContext;
 use crate::session::SessionDestination;
 use crate::utils::log_event;
+
+const TFTP_TRANSFER_TIMEOUT: Duration = Duration::from_secs(60);
+
+type TftpTransfers = Arc<Mutex<HashMap<TftpTransferKey, TftpTransferState>>>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct TftpTransferKey {
+    src: SocketAddr,
+    dst_ip: String,
+    dst_port: u16,
+}
+
+impl TftpTransferKey {
+    fn new(src: SocketAddr, destination: &SessionDestination) -> Self {
+        Self {
+            src,
+            dst_ip: destination.ip.clone(),
+            dst_port: destination.port,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TftpTransferState {
+    filename: String,
+    last_block_sent: u16,
+    last_activity: Instant,
+}
 
 #[cfg(not(target_os = "windows"))]
 #[derive(Clone, Copy, Default)]
@@ -499,6 +530,7 @@ pub async fn run_udp_listener(
     let ctx = Arc::new(ctx);
     let dns_handler = Arc::new(crate::protocol_handlers::init_dns_handler(&ctx));
     let tftp_handler = Arc::new(crate::protocol_handlers::init_tftp_handler(&ctx));
+    let tftp_transfers = Arc::new(Mutex::new(HashMap::new()));
     let output_path = output_path.map(|p| p.to_path_buf());
     let socket = Arc::new(socket);
     let listener_port = local_addr.port();
@@ -538,6 +570,7 @@ pub async fn run_udp_listener(
                 let ctx_clone = Arc::clone(&ctx);
                 let dns_handler_clone = Arc::clone(&dns_handler);
                 let tftp_handler_clone = Arc::clone(&tftp_handler);
+                let tftp_transfers_clone = Arc::clone(&tftp_transfers);
                 let socket_clone = Arc::clone(&socket);
                 let out_clone = output_path.clone();
                 let sem = Arc::clone(&udp_semaphore);
@@ -560,7 +593,14 @@ pub async fn run_udp_listener(
                             destination: &destination,
                             len,
                         };
-                        handle_tftp(&ctx_clone, &socket_clone, &tftp_handler_clone, packet).await;
+                        handle_tftp(
+                            &ctx_clone,
+                            &socket_clone,
+                            &tftp_handler_clone,
+                            &tftp_transfers_clone,
+                            packet,
+                        )
+                        .await;
                     } else if ctx_clone.name() == "dns" || ctx_clone.name().starts_with("dns") {
                         let packet = UdpPacket {
                             output_path: out_clone.as_deref(),
@@ -583,6 +623,7 @@ pub async fn run_udp_listener(
                             &socket_clone,
                             &dns_handler_clone,
                             &tftp_handler_clone,
+                            &tftp_transfers_clone,
                             packet,
                         )
                         .await;
@@ -659,6 +700,7 @@ async fn handle_tftp(
     ctx: &ListenerContext,
     socket: &UdpSocket,
     tftp_handler: &nettrap_proto_tftp::TftpHandler,
+    transfers: &TftpTransfers,
     packet: UdpPacket<'_>,
 ) {
     if let Some(tftp_packet) = nettrap_proto_tftp::TftpPacket::parse(packet.query_data) {
@@ -679,12 +721,79 @@ async fn handle_tftp(
             "",
         );
         ctx.record_nbi(&nbi).await;
-        match tftp_handler.handle_packet(&tftp_packet).await {
+        let responses_result: nettrap_core::error::Result<Vec<nettrap_proto_tftp::TftpPacket>> =
+            match &tftp_packet {
+                nettrap_proto_tftp::TftpPacket::ReadRequest { filename, .. } => {
+                    let response = tftp_handler.handle_read_request_block(filename, 1);
+                    let key = TftpTransferKey::new(*packet.src, packet.destination);
+                    let mut active = transfers.lock().await;
+                    prune_tftp_transfers(&mut active);
+                    if tftp_response_keeps_transfer(&response) {
+                        active.insert(
+                            key,
+                            TftpTransferState {
+                                filename: filename.clone(),
+                                last_block_sent: 1,
+                                last_activity: Instant::now(),
+                            },
+                        );
+                    } else {
+                        active.remove(&key);
+                    }
+                    Ok(vec![response])
+                }
+                nettrap_proto_tftp::TftpPacket::Ack { block } => {
+                    let key = TftpTransferKey::new(*packet.src, packet.destination);
+                    let next = {
+                        let mut active = transfers.lock().await;
+                        prune_tftp_transfers(&mut active);
+                        active.get(&key).and_then(|state| {
+                            if *block == state.last_block_sent {
+                                Some((state.filename.clone(), block.wrapping_add(1)))
+                            } else {
+                                None
+                            }
+                        })
+                    };
+                    if let Some((filename, next_block)) = next {
+                        let response =
+                            tftp_handler.handle_read_request_block(&filename, next_block);
+                        let mut active = transfers.lock().await;
+                        if tftp_response_keeps_transfer(&response) {
+                            active.insert(
+                                key,
+                                TftpTransferState {
+                                    filename,
+                                    last_block_sent: next_block,
+                                    last_activity: Instant::now(),
+                                },
+                            );
+                        } else {
+                            active.remove(&key);
+                        }
+                        Ok(vec![response])
+                    } else {
+                        Ok(Vec::new())
+                    }
+                }
+                nettrap_proto_tftp::TftpPacket::Error { .. } => {
+                    let key = TftpTransferKey::new(*packet.src, packet.destination);
+                    transfers.lock().await.remove(&key);
+                    tftp_handler.handle_packet(&tftp_packet).await
+                }
+                _ => tftp_handler.handle_packet(&tftp_packet).await,
+            };
+        match responses_result {
             Ok(responses) => {
                 let mut sent_bytes = 0u64;
-                ctx.apply_response_delay().await;
+                if !responses.is_empty() {
+                    ctx.apply_response_delay().await;
+                }
                 for resp in responses {
                     let resp_bytes = resp.to_bytes();
+                    if resp_bytes.is_empty() {
+                        continue;
+                    }
                     ctx.write_pcap_response_udp_for_destination(
                         &resp_bytes,
                         packet.src,
@@ -710,6 +819,18 @@ async fn handle_tftp(
             Err(e) => tracing::warn!("TFTP handler error: {}", e),
         }
     }
+}
+
+fn prune_tftp_transfers(transfers: &mut HashMap<TftpTransferKey, TftpTransferState>) {
+    transfers.retain(|_, state| state.last_activity.elapsed() <= TFTP_TRANSFER_TIMEOUT);
+}
+
+fn tftp_response_keeps_transfer(response: &nettrap_proto_tftp::TftpPacket) -> bool {
+    matches!(
+        response,
+        nettrap_proto_tftp::TftpPacket::Data { data, .. }
+            if data.len() == nettrap_proto_tftp::TFTP_BLOCK_SIZE
+    )
 }
 
 async fn handle_dns(
@@ -772,6 +893,7 @@ async fn handle_detected_udp(
     socket: &UdpSocket,
     dns_handler: &nettrap_proto_dns::handler::DnsHandler,
     tftp_handler: &nettrap_proto_tftp::TftpHandler,
+    tftp_transfers: &TftpTransfers,
     packet: UdpPacket<'_>,
 ) {
     let detected = ctx
@@ -795,7 +917,7 @@ async fn handle_detected_udp(
                     handle_dns(ctx, socket, dns_handler, packet).await;
                 }
                 "tftp" => {
-                    handle_tftp(ctx, socket, tftp_handler, packet).await;
+                    handle_tftp(ctx, socket, tftp_handler, tftp_transfers, packet).await;
                 }
                 "snmp" => {
                     let response = nettrap_proto_snmp::SnmpHandler::new().handle(packet.query_data);
@@ -877,6 +999,9 @@ async fn handle_detected_udp(
                     )
                     .await;
                 }
+                "quic" => {
+                    handle_quic_udp(ctx, packet).await;
+                }
                 _ => {
                     log_event(
                         packet.output_path,
@@ -932,6 +1057,37 @@ async fn handle_detected_udp(
             ctx.update_session_bytes(packet.src, "UDP", packet.destination, packet.len as u64, 0);
         }
     }
+}
+
+async fn handle_quic_udp(ctx: &ListenerContext, packet: UdpPacket<'_>) {
+    let handler = nettrap_proto_quic::QuicHandler::new();
+    let sni = handler.extract_sni(packet.query_data);
+    let detail = match sni.as_deref() {
+        Some(sni) => format!("{} bytes, sni={}", packet.len, sni),
+        None => format!("{} bytes", packet.len),
+    };
+    log_event(
+        packet.output_path,
+        ctx.name(),
+        packet.src,
+        "quic_packet",
+        &detail,
+    )
+    .await;
+
+    let mut nbi = crate::nbi::NetworkBehaviorIndicator::new(
+        ctx.name(),
+        "QUIC",
+        &packet.src.ip().to_string(),
+        packet.src.port(),
+        packet.destination,
+    );
+    nbi.add("data_length", packet.len.to_string());
+    if let Some(sni) = sni {
+        nbi.add("sni", sni);
+    }
+    ctx.record_nbi(&nbi).await;
+    ctx.update_session_bytes(packet.src, "UDP", packet.destination, packet.len as u64, 0);
 }
 
 #[cfg(test)]
