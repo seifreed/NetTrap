@@ -71,13 +71,16 @@ pub async fn run_tcp_listener(
                         destination.port,
                         nettrap_core::prelude::Protocol::Tcp,
                     );
-                    match tokio::task::spawn_blocking({
-                        let attr_engine = Arc::clone(attr_engine);
-                        move || attr_engine.attribute_flow(&five_tuple)
-                    })
+                    match tokio::time::timeout(
+                        std::time::Duration::from_millis(ctx.timeout_ms()),
+                        tokio::task::spawn_blocking({
+                            let attr_engine = Arc::clone(attr_engine);
+                            move || attr_engine.attribute_flow(&five_tuple)
+                        }),
+                    )
                     .await
                     {
-                        Ok(attr)
+                        Ok(Ok(attr))
                             if attr.confidence
                                 != nettrap_core::prelude::AttributionConfidence::None =>
                         {
@@ -96,9 +99,17 @@ pub async fn run_tcp_listener(
                                 attr.process.pid,
                             )
                         }
-                        Ok(_) => true,
-                        Err(e) => {
+                        Ok(Ok(_)) => true,
+                        Ok(Err(e)) => {
                             tracing::warn!("Attribution timeout/error for {}: {}", peer, e);
+                            true
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                "Attribution timed out after {} ms for {}",
+                                ctx.timeout_ms(),
+                                peer
+                            );
                             true
                         }
                     }

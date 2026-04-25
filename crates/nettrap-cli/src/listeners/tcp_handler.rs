@@ -7,8 +7,9 @@ use nettrap_proto_pop3::Pop3HandlerTrait;
 use nettrap_protocols::handlers::*;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, OnceLock};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::Semaphore;
+use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::listener_context::ListenerContext;
 use crate::session::SessionDestination;
@@ -65,12 +66,21 @@ enum TcpFrameResult {
 #[derive(Default)]
 struct FtpPassiveState {
     listener: Option<tokio::net::TcpListener>,
+    permit: Option<OwnedSemaphorePermit>,
+}
+
+impl FtpPassiveState {
+    fn clear(&mut self) {
+        self.listener = None;
+        self.permit = None;
+    }
 }
 
 enum FtpCommandAction {
     Response(Vec<u8>),
     Transfer {
         listener: tokio::net::TcpListener,
+        permit: OwnedSemaphorePermit,
         transfer: nettrap_proto_ftp::FtpDataTransfer,
     },
 }
@@ -88,14 +98,14 @@ fn optional_frame(frame: Option<Vec<u8>>) -> TcpFrameResult {
         .unwrap_or(TcpFrameResult::Incomplete)
 }
 
-fn next_tcp_frame(
+fn next_tcp_frame_with_mode(
     buffer: &mut Vec<u8>,
     listener_name: &str,
     destination_port: u16,
     router: &nettrap_proxy::ProtocolRouter,
     smtp_data_mode: bool,
     ssh_first_packet: bool,
-) -> TcpFrameResult {
+) -> (TcpFrameMode, TcpFrameResult) {
     let mode = tcp_frame_mode(
         listener_name,
         buffer,
@@ -104,7 +114,53 @@ fn next_tcp_frame(
         smtp_data_mode,
         ssh_first_packet,
     );
+    let frame = next_tcp_frame_for_mode(buffer, mode);
+    (mode, frame)
+}
 
+fn tcp_dispatch_name_for_frame(listener_name: &str, frame_mode: TcpFrameMode) -> &str {
+    if frame_mode == TcpFrameMode::Tls {
+        "tls"
+    } else {
+        listener_name
+    }
+}
+
+async fn read_tcp_with_timeout<R>(
+    ctx: &ListenerContext,
+    stream: &mut R,
+    buf: &mut [u8],
+    peer: &SocketAddr,
+    label: &str,
+) -> Option<usize>
+where
+    R: AsyncRead + Unpin,
+{
+    let timeout = Duration::from_millis(ctx.timeout_ms());
+    match tokio::time::timeout(timeout, stream.read(buf)).await {
+        Ok(Ok(0)) => {
+            tracing::debug!("{} connection closed by {}", label, peer);
+            None
+        }
+        Ok(Ok(len)) => Some(len),
+        Ok(Err(e)) => {
+            tracing::debug!("{} read error from {}: {}", label, peer, e);
+            None
+        }
+        Err(_) => {
+            tracing::debug!(
+                "{} '{}' read timed out after {} ms from {}",
+                label,
+                ctx.name(),
+                ctx.timeout_ms(),
+                peer
+            );
+            None
+        }
+    }
+}
+
+fn next_tcp_frame_for_mode(buffer: &mut Vec<u8>, mode: TcpFrameMode) -> TcpFrameResult {
     match mode {
         TcpFrameMode::DnsTcp => optional_frame(extract_length_prefixed_frame(buffer)),
         TcpFrameMode::Http => extract_http_request(buffer),
@@ -368,6 +424,10 @@ fn has_tls_record_prefix(buffer: &[u8]) -> bool {
 
 fn is_tls_client_hello(buffer: &[u8]) -> bool {
     buffer.len() >= 6 && buffer[0] == 0x16 && buffer[1] == 0x03 && buffer[5] == 0x01
+}
+
+fn is_implicit_tls_port(port: u16) -> bool {
+    matches!(port, 443 | 465 | 636 | 995 | 8443 | 8883 | 9443)
 }
 
 fn extract_tls_frame(buffer: &mut Vec<u8>) -> TcpFrameResult {
@@ -1260,8 +1320,9 @@ pub async fn handle_tcp_connection(
     }
 
     // Protocol-specific banners (only for non-TLS connections)
-    // For TLS connections, banners are sent inside handle_wrapped_connection after the handshake
-    if !ctx.use_ssl() {
+    // For TLS connections, banners are sent inside handle_wrapped_connection after the handshake.
+    // Implicit TLS ports must not receive a cleartext protocol banner before the ClientHello.
+    if !ctx.use_ssl() && !is_implicit_tls_port(destination.port) {
         if let Some(banner_bytes) =
             crate::protocol_handlers::get_protocol_banner(name, ctx.banner())
         {
@@ -1351,12 +1412,8 @@ pub async fn handle_tcp_connection(
     let mut buf = vec![0u8; 4096];
 
     loop {
-        match stream.read(&mut buf).await {
-            Ok(0) => {
-                tracing::debug!("TCP connection closed by {}", peer);
-                return Ok(());
-            }
-            Ok(len) => {
+        match read_tcp_with_timeout(&ctx, &mut stream, &mut buf, &peer, "TCP").await {
+            Some(len) => {
                 tracing::debug!("TCP '{}' received {} bytes from {}", ctx.name(), len, peer);
                 let data = &buf[..len];
 
@@ -1371,17 +1428,21 @@ pub async fn handle_tcp_connection(
                 let mut immediate_sent_bytes = 0u64;
                 let mut close_after_response = false;
                 loop {
-                    match next_tcp_frame(
+                    let (frame_mode, frame_result) = next_tcp_frame_with_mode(
                         &mut connection_buf,
                         name,
                         destination.port,
                         ctx.runtime.router.as_ref(),
                         smtp_data_mode,
                         ssh_first_packet,
-                    ) {
+                    );
+                    match frame_result {
                         TcpFrameResult::Complete(frame) => {
                             let first_bytes = &frame[..frame.len().min(20)];
-                            if should_handle_ftp_ordered(&ctx, name, &frame, &destination) {
+                            let dispatch_name = tcp_dispatch_name_for_frame(name, frame_mode);
+                            if frame_mode != TcpFrameMode::Tls
+                                && should_handle_ftp_ordered(&ctx, name, &frame, &destination)
+                            {
                                 match prepare_ordered_ftp_action(
                                     &ctx,
                                     output_path,
@@ -1399,7 +1460,11 @@ pub async fn handle_tcp_connection(
                                     FtpCommandAction::Response(frame_response) => {
                                         response.extend_from_slice(&frame_response);
                                     }
-                                    FtpCommandAction::Transfer { listener, transfer } => {
+                                    FtpCommandAction::Transfer {
+                                        listener,
+                                        permit,
+                                        transfer,
+                                    } => {
                                         let start_response = transfer.start_response.to_bytes();
                                         if !start_response.is_empty() {
                                             ctx.write_pcap_response_for_destination(
@@ -1413,14 +1478,15 @@ pub async fn handle_tcp_connection(
                                             immediate_sent_bytes += start_response.len() as u64;
                                         }
                                         let frame_response =
-                                            finish_ftp_passive_transfer(listener, transfer).await;
+                                            finish_ftp_passive_transfer(listener, permit, transfer)
+                                                .await;
                                         response.extend_from_slice(&frame_response);
                                     }
                                 }
                             } else {
                                 let frame_response = handle_tcp_protocol(
                                     &ctx,
-                                    name,
+                                    dispatch_name,
                                     &frame,
                                     first_bytes,
                                     &peer,
@@ -1504,10 +1570,7 @@ pub async fn handle_tcp_connection(
                     return Ok(());
                 }
             }
-            Err(e) => {
-                tracing::debug!("TCP read error from {}: {}", peer, e);
-                return Ok(());
-            }
+            None => return Ok(()),
         }
     }
 }
@@ -2129,9 +2192,14 @@ async fn handle_ftp_command(
     .await
     {
         FtpCommandAction::Response(response) => response,
-        FtpCommandAction::Transfer { listener, transfer } => {
+        FtpCommandAction::Transfer {
+            listener,
+            permit,
+            transfer,
+        } => {
             let mut response = transfer.start_response.to_bytes();
-            response.extend_from_slice(&finish_ftp_passive_transfer(listener, transfer).await);
+            response
+                .extend_from_slice(&finish_ftp_passive_transfer(listener, permit, transfer).await);
             response
         }
     }
@@ -2166,9 +2234,18 @@ async fn prepare_ftp_command(
                 nettrap_proto_ftp::FtpResponse::new(425, "Use PASV or EPSV first").to_bytes(),
             );
         };
+        let Some(permit) = ftp_passive_state.permit.take() else {
+            return FtpCommandAction::Response(
+                nettrap_proto_ftp::FtpResponse::new(425, "Use PASV or EPSV first").to_bytes(),
+            );
+        };
 
         return match ftp_handler.prepare_data_transfer(command) {
-            Ok(transfer) => FtpCommandAction::Transfer { listener, transfer },
+            Ok(transfer) => FtpCommandAction::Transfer {
+                listener,
+                permit,
+                transfer,
+            },
             Err(response) => FtpCommandAction::Response(response.to_bytes()),
         };
     }
@@ -2242,9 +2319,16 @@ async fn open_ftp_passive_data_socket(
     control_local_addr: Option<SocketAddr>,
     extended: bool,
 ) -> Vec<u8> {
+    ftp_passive_state.clear();
+
+    let Ok(permit) = ftp_passive_transfer_semaphore().try_acquire_owned() else {
+        return nettrap_proto_ftp::FtpResponse::new(425, "Too many passive transfers").to_bytes();
+    };
+
     match bind_ftp_passive_listener(ftp_handler, peer, control_local_addr).await {
         Ok((listener, port)) => {
             ftp_passive_state.listener = Some(listener);
+            ftp_passive_state.permit = Some(permit);
             if extended {
                 nettrap_proto_ftp::FtpResponse::new(
                     229,
@@ -2368,12 +2452,9 @@ fn ftp_passive_transfer_semaphore() -> Arc<Semaphore> {
 
 async fn finish_ftp_passive_transfer(
     listener: tokio::net::TcpListener,
+    _permit: OwnedSemaphorePermit,
     transfer: nettrap_proto_ftp::FtpDataTransfer,
 ) -> Vec<u8> {
-    let Ok(_permit) = ftp_passive_transfer_semaphore().try_acquire_owned() else {
-        return nettrap_proto_ftp::FtpResponse::new(425, "Too many passive transfers").to_bytes();
-    };
-
     let accept_result = tokio::time::timeout(FTP_PASSIVE_ACCEPT_TIMEOUT, listener.accept()).await;
     let (mut data_stream, data_peer) = match accept_result {
         Ok(Ok(accepted)) => accepted,
@@ -2813,9 +2894,17 @@ pub async fn handle_wrapped_connection(
     let mut buf = vec![0u8; 4096];
 
     loop {
-        match stream.read(&mut buf).await {
-            Ok(0) => return Ok(()),
-            Ok(len) => {
+        match tokio::time::timeout(
+            Duration::from_millis(ctx.timeout_ms()),
+            stream.read(&mut buf),
+        )
+        .await
+        {
+            Ok(Ok(0)) => {
+                tracing::debug!("TLS connection closed by {}", peer);
+                return Ok(());
+            }
+            Ok(Ok(len)) => {
                 let data = &buf[..len];
 
                 if ctx.config.log_hexdump {
@@ -2829,17 +2918,21 @@ pub async fn handle_wrapped_connection(
                 let mut immediate_sent_bytes = 0u64;
                 let mut close_after_response = false;
                 loop {
-                    match next_tcp_frame(
+                    let (frame_mode, frame_result) = next_tcp_frame_with_mode(
                         &mut connection_buf,
                         name,
                         destination.port,
                         ctx.runtime.router.as_ref(),
                         smtp_data_mode,
                         ssh_first_packet,
-                    ) {
+                    );
+                    match frame_result {
                         TcpFrameResult::Complete(frame) => {
                             let first_bytes = &frame[..frame.len().min(20)];
-                            if should_handle_ftp_ordered(&ctx, name, &frame, &destination) {
+                            let dispatch_name = tcp_dispatch_name_for_frame(name, frame_mode);
+                            if frame_mode != TcpFrameMode::Tls
+                                && should_handle_ftp_ordered(&ctx, name, &frame, &destination)
+                            {
                                 match prepare_ordered_ftp_action(
                                     &ctx,
                                     output_path,
@@ -2857,7 +2950,11 @@ pub async fn handle_wrapped_connection(
                                     FtpCommandAction::Response(frame_response) => {
                                         response.extend_from_slice(&frame_response);
                                     }
-                                    FtpCommandAction::Transfer { listener, transfer } => {
+                                    FtpCommandAction::Transfer {
+                                        listener,
+                                        permit,
+                                        transfer,
+                                    } => {
                                         let start_response = transfer.start_response.to_bytes();
                                         if !start_response.is_empty() {
                                             ctx.write_pcap_response_for_destination(
@@ -2871,14 +2968,15 @@ pub async fn handle_wrapped_connection(
                                             immediate_sent_bytes += start_response.len() as u64;
                                         }
                                         let frame_response =
-                                            finish_ftp_passive_transfer(listener, transfer).await;
+                                            finish_ftp_passive_transfer(listener, permit, transfer)
+                                                .await;
                                         response.extend_from_slice(&frame_response);
                                     }
                                 }
                             } else {
                                 let frame_response = handle_tcp_protocol(
                                     &ctx,
-                                    name,
+                                    dispatch_name,
                                     &frame,
                                     first_bytes,
                                     &peer,
@@ -2962,8 +3060,17 @@ pub async fn handle_wrapped_connection(
                     return Ok(());
                 }
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 tracing::debug!("TLS read error from {}: {}", peer, e);
+                return Ok(());
+            }
+            Err(_) => {
+                tracing::debug!(
+                    "TLS '{}' read timed out after {} ms from {}",
+                    ctx.name(),
+                    ctx.timeout_ms(),
+                    peer
+                );
                 return Ok(());
             }
         }
@@ -3305,26 +3412,16 @@ mod tests {
         let router = nettrap_proxy::ProtocolRouter::new();
         let mut buffer = b"USER anonymous\r\nPASS se".to_vec();
 
-        let first = expect_complete(next_tcp_frame(
-            &mut buffer,
-            "ftp",
-            21,
-            &router,
-            false,
-            false,
-        ));
+        let (_, first_frame) =
+            next_tcp_frame_with_mode(&mut buffer, "ftp", 21, &router, false, false);
+        let first = expect_complete(first_frame);
         assert_eq!(first, b"USER anonymous\r\n");
         assert_eq!(buffer, b"PASS se");
 
         buffer.extend_from_slice(b"cret\r\n");
-        let second = expect_complete(next_tcp_frame(
-            &mut buffer,
-            "ftp",
-            21,
-            &router,
-            false,
-            false,
-        ));
+        let (_, second_frame) =
+            next_tcp_frame_with_mode(&mut buffer, "ftp", 21, &router, false, false);
+        let second = expect_complete(second_frame);
         assert_eq!(second, b"PASS secret\r\n");
         assert!(buffer.is_empty());
     }
@@ -3514,6 +3611,30 @@ mod tests {
             tcp_frame_mode("mqtt", &tls_client_hello, 8883, &router, false, false),
             TcpFrameMode::Tls
         );
+    }
+
+    #[test]
+    fn tls_frame_dispatches_as_tls_even_for_cleartext_listener_name() {
+        assert_eq!(
+            tcp_dispatch_name_for_frame("mqtt", TcpFrameMode::Tls),
+            "tls"
+        );
+        assert_eq!(
+            tcp_dispatch_name_for_frame("smtp", TcpFrameMode::Tls),
+            "tls"
+        );
+        assert_eq!(
+            tcp_dispatch_name_for_frame("http", TcpFrameMode::Http),
+            "http"
+        );
+    }
+
+    #[test]
+    fn implicit_tls_ports_suppress_cleartext_banners() {
+        assert!(is_implicit_tls_port(465));
+        assert!(is_implicit_tls_port(8883));
+        assert!(!is_implicit_tls_port(25));
+        assert!(!is_implicit_tls_port(1883));
     }
 
     #[test]
@@ -3872,6 +3993,7 @@ mod tests {
             FtpCommandAction::Transfer { .. } => panic!("prefixed PASV must not open data socket"),
         }
         assert!(state.listener.is_none());
+        assert!(state.permit.is_none());
     }
 
     #[tokio::test]
@@ -3899,6 +4021,7 @@ mod tests {
             .local_addr()
             .expect("local addr")
             .port();
+        assert!(state.permit.is_some());
 
         let data_reader = tokio::spawn(async move {
             let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
@@ -3922,10 +4045,14 @@ mod tests {
         )
         .await
         {
-            FtpCommandAction::Transfer { listener, transfer } => {
+            FtpCommandAction::Transfer {
+                listener,
+                permit,
+                transfer,
+            } => {
                 let start_response = transfer.start_response.to_bytes();
                 assert!(String::from_utf8_lossy(&start_response).starts_with("150 "));
-                (listener, transfer)
+                (listener, permit, transfer)
             }
             FtpCommandAction::Response(response) => {
                 panic!(
@@ -3934,12 +4061,14 @@ mod tests {
                 );
             }
         };
-        let control_response = finish_ftp_passive_transfer(transfer.0, transfer.1).await;
+        let control_response =
+            finish_ftp_passive_transfer(transfer.0, transfer.1, transfer.2).await;
         let data = data_reader.await.expect("data task");
 
         assert!(String::from_utf8_lossy(&data).contains("index.html"));
         let control_text = String::from_utf8_lossy(&control_response);
         assert!(control_text.contains("226 Directory send OK."));
         assert!(state.listener.is_none());
+        assert!(state.permit.is_none());
     }
 }

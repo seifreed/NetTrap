@@ -11,7 +11,7 @@ pub fn get_protocol_banner(name: &str, banner: Option<&str>) -> Option<Vec<u8>> 
 
 fn fallback_get_protocol_banner(name: &str, banner: Option<&str>) -> Option<Vec<u8>> {
     match name {
-        _ if name.starts_with("smtp") => {
+        _ if fallback_name_matches_protocol(name, "smtp") => {
             let handler = if let Some(b) = banner {
                 nettrap_proto_smtp::SmtpHandler::new().with_domain(resolve_service_name(b))
             } else {
@@ -19,7 +19,7 @@ fn fallback_get_protocol_banner(name: &str, banner: Option<&str>) -> Option<Vec<
             };
             Some(handler.get_welcome_banner().into_bytes())
         }
-        _ if name.starts_with("ftp") => {
+        _ if fallback_name_matches_protocol(name, "ftp") => {
             let handler = if let Some(b) = banner {
                 nettrap_proto_ftp::FtpHandler::new()
                     .with_banner(nettrap_proto_ftp::resolve_banner(b))
@@ -28,7 +28,7 @@ fn fallback_get_protocol_banner(name: &str, banner: Option<&str>) -> Option<Vec<
             };
             Some(handler.get_banner().to_vec())
         }
-        _ if name.starts_with("pop3") => {
+        _ if fallback_name_matches_protocol(name, "pop3") => {
             let handler = if let Some(b) = banner {
                 nettrap_proto_pop3::Pop3Handler::new().with_domain(resolve_service_name(b))
             } else {
@@ -36,7 +36,7 @@ fn fallback_get_protocol_banner(name: &str, banner: Option<&str>) -> Option<Vec<
             };
             Some(handler.get_welcome_banner().into_bytes())
         }
-        _ if name.starts_with("irc") => {
+        _ if fallback_name_matches_protocol(name, "irc") => {
             let handler = if let Some(b) = banner {
                 nettrap_proto_irc::IrcHandler::new().with_server_name(resolve_service_name(b))
             } else {
@@ -46,6 +46,15 @@ fn fallback_get_protocol_banner(name: &str, banner: Option<&str>) -> Option<Vec<
         }
         _ => None,
     }
+}
+
+fn fallback_name_matches_protocol(name: &str, protocol: &str) -> bool {
+    let listener = name.trim().to_ascii_lowercase();
+    listener == protocol
+        || listener
+            .strip_prefix(protocol)
+            .and_then(|suffix| suffix.as_bytes().first().copied())
+            .is_some_and(|byte| matches!(byte, b'-' | b'_'))
 }
 
 pub fn has_simple_handler(name: &str) -> bool {
@@ -434,5 +443,9 @@ mod tests {
         assert!(get_protocol_banner("smtp-25", None).is_some());
         assert!(get_protocol_banner("ftp-21", Some("banner")).is_some());
         assert!(get_protocol_banner("pop3-110", None).is_some());
+
+        assert!(get_protocol_banner("smtpbackup", None).is_none());
+        assert!(get_protocol_banner("ftpbackup", Some("banner")).is_none());
+        assert!(get_protocol_banner("pop3backup", None).is_none());
     }
 }

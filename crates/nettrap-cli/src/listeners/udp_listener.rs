@@ -41,12 +41,16 @@ enum TftpTransferState {
     Read {
         filename: String,
         last_block_sent: u16,
+        last_response: nettrap_proto_tftp::TftpPacket,
+        complete: bool,
         last_activity: Instant,
     },
     Write {
         filename: String,
         next_block_expected: u16,
         bytes_received: u64,
+        last_ack: nettrap_proto_tftp::TftpPacket,
+        complete: bool,
         last_activity: Instant,
     },
 }
@@ -666,18 +670,29 @@ async fn apply_udp_process_filter(
         nettrap_core::prelude::Protocol::Udp,
     );
 
-    match tokio::task::spawn_blocking({
-        let attr_engine = Arc::clone(attr_engine);
-        move || attr_engine.attribute_flow(&five_tuple)
-    })
+    match tokio::time::timeout(
+        Duration::from_millis(ctx.timeout_ms()),
+        tokio::task::spawn_blocking({
+            let attr_engine = Arc::clone(attr_engine);
+            move || attr_engine.attribute_flow(&five_tuple)
+        }),
+    )
     .await
     {
-        Ok(attr) if attr.confidence != nettrap_core::prelude::AttributionConfidence::None => {
+        Ok(Ok(attr)) if attr.confidence != nettrap_core::prelude::AttributionConfidence::None => {
             apply_attributed_process_filter(ctx, src, destination, &attr)
         }
-        Ok(_) => true,
-        Err(e) => {
+        Ok(Ok(_)) => true,
+        Ok(Err(e)) => {
             tracing::warn!("UDP attribution timeout/error for {}: {}", src, e);
+            true
+        }
+        Err(_) => {
+            tracing::warn!(
+                "UDP attribution timed out after {} ms for {}",
+                ctx.timeout_ms(),
+                src
+            );
             true
         }
     }
@@ -736,8 +751,10 @@ async fn handle_tftp(
                     let key = TftpTransferKey::new(*packet.src, packet.destination);
                     let mut active = transfers.lock().await;
                     prune_tftp_transfers(&mut active);
-                    if active.contains_key(&key) {
-                        Ok(vec![tftp_error(4, "Transfer already active")])
+                    if let Some(response) =
+                        duplicate_tftp_read_request_response(&mut active, &key, filename)
+                    {
+                        Ok(vec![response])
                     } else if tftp_transfer_limit_reached(&active, &key) {
                         Ok(vec![tftp_error(4, "Too many active transfers")])
                     } else {
@@ -756,8 +773,10 @@ async fn handle_tftp(
                     let key = TftpTransferKey::new(*packet.src, packet.destination);
                     let mut active = transfers.lock().await;
                     prune_tftp_transfers(&mut active);
-                    if active.contains_key(&key) {
-                        Ok(vec![tftp_error(4, "Transfer already active")])
+                    if let Some(response) =
+                        duplicate_tftp_write_request_response(&mut active, &key, filename)
+                    {
+                        Ok(vec![response])
                     } else if tftp_transfer_limit_reached(&active, &key) {
                         Ok(vec![tftp_error(4, "Too many active transfers")])
                     } else {
@@ -768,6 +787,8 @@ async fn handle_tftp(
                                 filename: filename.clone(),
                                 next_block_expected: 1,
                                 bytes_received: 0,
+                                last_ack: response.clone(),
+                                complete: false,
                                 last_activity: Instant::now(),
                             },
                         );
@@ -776,25 +797,30 @@ async fn handle_tftp(
                 }
                 nettrap_proto_tftp::TftpPacket::Ack { block } => {
                     let key = TftpTransferKey::new(*packet.src, packet.destination);
-                    let next = {
+                    let action = {
                         let mut active = transfers.lock().await;
                         prune_tftp_transfers(&mut active);
-                        next_tftp_read_block(&active, &key, *block)
+                        next_tftp_read_action(&mut active, &key, *block)
                     };
-                    if let Some((filename, next_block)) = next {
-                        let response =
-                            tftp_handler.handle_read_request_block(&filename, next_block);
-                        let mut active = transfers.lock().await;
-                        remember_tftp_read_response(
-                            &mut active,
-                            key,
+                    match action {
+                        Some(TftpReadAckAction::SendNext {
                             filename,
                             next_block,
-                            &response,
-                        );
-                        Ok(vec![response])
-                    } else {
-                        Ok(Vec::new())
+                        }) => {
+                            let response =
+                                tftp_handler.handle_read_request_block(&filename, next_block);
+                            let mut active = transfers.lock().await;
+                            remember_tftp_read_response(
+                                &mut active,
+                                key,
+                                filename,
+                                next_block,
+                                &response,
+                            );
+                            Ok(vec![response])
+                        }
+                        Some(TftpReadAckAction::Retransmit(response)) => Ok(vec![response]),
+                        Some(TftpReadAckAction::Complete) | None => Ok(Vec::new()),
                     }
                 }
                 nettrap_proto_tftp::TftpPacket::Data { block, data } => {
@@ -871,39 +897,113 @@ fn remember_tftp_read_response(
     block: u16,
     response: &nettrap_proto_tftp::TftpPacket,
 ) {
-    if tftp_response_keeps_transfer(response) {
-        transfers.insert(
-            key,
-            TftpTransferState::Read {
-                filename,
-                last_block_sent: block,
-                last_activity: Instant::now(),
-            },
-        );
-    } else {
-        transfers.remove(&key);
+    match response {
+        nettrap_proto_tftp::TftpPacket::Data { data, .. } => {
+            transfers.insert(
+                key,
+                TftpTransferState::Read {
+                    filename,
+                    last_block_sent: block,
+                    last_response: response.clone(),
+                    complete: data.len() < nettrap_proto_tftp::TFTP_BLOCK_SIZE,
+                    last_activity: Instant::now(),
+                },
+            );
+        }
+        _ => {
+            transfers.remove(&key);
+        }
     }
 }
 
-fn next_tftp_read_block(
-    transfers: &HashMap<TftpTransferKey, TftpTransferState>,
+#[derive(Debug, Clone)]
+enum TftpReadAckAction {
+    SendNext { filename: String, next_block: u16 },
+    Retransmit(nettrap_proto_tftp::TftpPacket),
+    Complete,
+}
+
+fn duplicate_tftp_read_request_response(
+    transfers: &mut HashMap<TftpTransferKey, TftpTransferState>,
+    key: &TftpTransferKey,
+    requested_filename: &str,
+) -> Option<nettrap_proto_tftp::TftpPacket> {
+    let state = transfers.get_mut(key)?;
+    match state {
+        TftpTransferState::Read {
+            filename,
+            last_response,
+            last_activity,
+            ..
+        } if filename == requested_filename => {
+            *last_activity = Instant::now();
+            Some(last_response.clone())
+        }
+        _ => Some(tftp_error(4, "Transfer already active")),
+    }
+}
+
+fn duplicate_tftp_write_request_response(
+    transfers: &mut HashMap<TftpTransferKey, TftpTransferState>,
+    key: &TftpTransferKey,
+    requested_filename: &str,
+) -> Option<nettrap_proto_tftp::TftpPacket> {
+    let state = transfers.get_mut(key)?;
+    match state {
+        TftpTransferState::Write {
+            filename,
+            last_ack,
+            last_activity,
+            ..
+        } if filename == requested_filename => {
+            *last_activity = Instant::now();
+            Some(last_ack.clone())
+        }
+        _ => Some(tftp_error(4, "Transfer already active")),
+    }
+}
+
+fn next_tftp_read_action(
+    transfers: &mut HashMap<TftpTransferKey, TftpTransferState>,
     key: &TftpTransferKey,
     ack_block: u16,
-) -> Option<(String, u16)> {
-    let Some(TftpTransferState::Read {
-        filename,
-        last_block_sent,
-        ..
-    }) = transfers.get(key)
-    else {
-        return None;
+) -> Option<TftpReadAckAction> {
+    let mut remove_after = false;
+    let action = {
+        let Some(TftpTransferState::Read {
+            filename,
+            last_block_sent,
+            last_response,
+            complete,
+            last_activity,
+        }) = transfers.get_mut(key)
+        else {
+            return None;
+        };
+
+        if ack_block == *last_block_sent {
+            if *complete {
+                remove_after = true;
+                Some(TftpReadAckAction::Complete)
+            } else {
+                *last_activity = Instant::now();
+                Some(TftpReadAckAction::SendNext {
+                    filename: filename.clone(),
+                    next_block: ack_block.wrapping_add(1),
+                })
+            }
+        } else if ack_block.wrapping_add(1) == *last_block_sent {
+            *last_activity = Instant::now();
+            Some(TftpReadAckAction::Retransmit(last_response.clone()))
+        } else {
+            None
+        }
     };
 
-    if ack_block == *last_block_sent {
-        Some((filename.clone(), ack_block.wrapping_add(1)))
-    } else {
-        None
+    if remove_after {
+        transfers.remove(key);
     }
+    action
 }
 
 fn handle_tftp_write_data(
@@ -922,13 +1022,27 @@ fn handle_tftp_write_data(
             filename,
             next_block_expected,
             bytes_received,
+            last_ack,
+            complete,
             last_activity,
         } = state
         else {
             return vec![tftp_error(4, "Unexpected DATA for read transfer")];
         };
 
+        if *complete {
+            if block.wrapping_add(1) == *next_block_expected {
+                *last_activity = Instant::now();
+                return vec![last_ack.clone()];
+            }
+            return vec![tftp_error(4, "Unexpected DATA block")];
+        }
+
         if block != *next_block_expected {
+            if block.wrapping_add(1) == *next_block_expected {
+                *last_activity = Instant::now();
+                return vec![last_ack.clone()];
+            }
             tracing::warn!(
                 "TFTP DATA block {} for {} does not match expected block {}",
                 block,
@@ -946,10 +1060,10 @@ fn handle_tftp_write_data(
                     *bytes_received = new_total;
                     *next_block_expected = block.wrapping_add(1);
                     *last_activity = Instant::now();
-                    (
-                        tftp_handler.handle_data_block(block, data),
-                        data.len() < nettrap_proto_tftp::TFTP_BLOCK_SIZE,
-                    )
+                    let response = tftp_handler.handle_data_block(block, data);
+                    *last_ack = response.clone();
+                    *complete = data.len() < nettrap_proto_tftp::TFTP_BLOCK_SIZE;
+                    (response, false)
                 }
                 _ => (tftp_error(3, "Upload too large"), true),
             }
@@ -961,14 +1075,6 @@ fn handle_tftp_write_data(
     }
 
     vec![response]
-}
-
-fn tftp_response_keeps_transfer(response: &nettrap_proto_tftp::TftpPacket) -> bool {
-    matches!(
-        response,
-        nettrap_proto_tftp::TftpPacket::Data { data, .. }
-            if data.len() == nettrap_proto_tftp::TFTP_BLOCK_SIZE
-    )
 }
 
 fn tftp_error(code: u16, message: impl Into<String>) -> nettrap_proto_tftp::TftpPacket {
@@ -1727,7 +1833,7 @@ mod tests {
     }
 
     #[test]
-    fn tftp_write_state_accepts_expected_final_block_and_finishes() {
+    fn tftp_write_state_accepts_expected_final_block_and_keeps_ack_for_retransmit() {
         let mut transfers = HashMap::new();
         let destination = SessionDestination::new("127.0.0.1", 69);
         let src: SocketAddr = "127.0.0.1:53000".parse().unwrap();
@@ -1738,6 +1844,8 @@ mod tests {
                 filename: "upload.bin".to_string(),
                 next_block_expected: 1,
                 bytes_received: 0,
+                last_ack: nettrap_proto_tftp::TftpPacket::Ack { block: 0 },
+                complete: false,
                 last_activity: Instant::now(),
             },
         );
@@ -1754,7 +1862,19 @@ mod tests {
             responses.as_slice(),
             [nettrap_proto_tftp::TftpPacket::Ack { block: 1 }]
         ));
-        assert!(!transfers.contains_key(&key));
+        assert!(transfers.contains_key(&key));
+
+        let duplicate = handle_tftp_write_data(
+            &mut transfers,
+            &key,
+            &nettrap_proto_tftp::TftpHandler::new(),
+            1,
+            b"final",
+        );
+        assert!(matches!(
+            duplicate.as_slice(),
+            [nettrap_proto_tftp::TftpPacket::Ack { block: 1 }]
+        ));
     }
 
     #[test]
@@ -1768,16 +1888,62 @@ mod tests {
             TftpTransferState::Read {
                 filename: "first.bin".to_string(),
                 last_block_sent: 1,
+                last_response: nettrap_proto_tftp::TftpPacket::Data {
+                    block: 1,
+                    data: vec![b'x'; nettrap_proto_tftp::TFTP_BLOCK_SIZE],
+                },
+                complete: false,
                 last_activity: Instant::now(),
             },
         );
 
         assert!(transfers.contains_key(&key));
-        assert_eq!(
-            next_tftp_read_block(&transfers, &key, 1),
-            Some(("first.bin".to_string(), 2))
+        match next_tftp_read_action(&mut transfers, &key, 1) {
+            Some(TftpReadAckAction::SendNext {
+                filename,
+                next_block,
+            }) => {
+                assert_eq!(filename, "first.bin");
+                assert_eq!(next_block, 2);
+            }
+            other => panic!("expected next read block, got {other:?}"),
+        }
+        assert!(matches!(
+            next_tftp_read_action(&mut transfers, &key, 0),
+            Some(TftpReadAckAction::Retransmit(
+                nettrap_proto_tftp::TftpPacket::Data { block: 1, .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn tftp_duplicate_requests_retransmit_matching_state() {
+        let mut transfers = HashMap::new();
+        let destination = SessionDestination::new("127.0.0.1", 69);
+        let src: SocketAddr = "127.0.0.1:53000".parse().unwrap();
+        let key = TftpTransferKey::new(src, &destination);
+        transfers.insert(
+            key.clone(),
+            TftpTransferState::Read {
+                filename: "first.bin".to_string(),
+                last_block_sent: 1,
+                last_response: nettrap_proto_tftp::TftpPacket::Data {
+                    block: 1,
+                    data: b"hello".to_vec(),
+                },
+                complete: true,
+                last_activity: Instant::now(),
+            },
         );
-        assert_eq!(next_tftp_read_block(&transfers, &key, 0), None);
+
+        assert!(matches!(
+            duplicate_tftp_read_request_response(&mut transfers, &key, "first.bin"),
+            Some(nettrap_proto_tftp::TftpPacket::Data { block: 1, .. })
+        ));
+        assert!(matches!(
+            duplicate_tftp_read_request_response(&mut transfers, &key, "other.bin"),
+            Some(nettrap_proto_tftp::TftpPacket::Error { code: 4, .. })
+        ));
     }
 
     #[test]
@@ -1792,6 +1958,11 @@ mod tests {
                 TftpTransferState::Read {
                     filename: format!("file-{i}.bin"),
                     last_block_sent: 1,
+                    last_response: nettrap_proto_tftp::TftpPacket::Data {
+                        block: 1,
+                        data: vec![b'x'; nettrap_proto_tftp::TFTP_BLOCK_SIZE],
+                    },
+                    complete: false,
                     last_activity: Instant::now(),
                 },
             );
@@ -1825,6 +1996,8 @@ mod tests {
                 filename: "upload.bin".to_string(),
                 next_block_expected: 1,
                 bytes_received: 0,
+                last_ack: nettrap_proto_tftp::TftpPacket::Ack { block: 0 },
+                complete: false,
                 last_activity: expired,
             },
         );
