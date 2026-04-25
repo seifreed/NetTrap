@@ -28,6 +28,7 @@ const MAX_REDIS_FRAME_SIZE: usize = 1024 * 1024;
 const MAX_REDIS_ARRAY_COUNT: usize = 1024;
 const MAX_MEMCACHED_LINE_SIZE: usize = 64 * 1024;
 const MAX_MEMCACHED_FRAME_SIZE: usize = 1024 * 1024;
+const MAX_NKN_FRAME_SIZE: usize = 1024 * 1024;
 const MAX_TLS_RECORD_SIZE: usize = 64 * 1024;
 const MAX_LDAP_BER_PAYLOAD_SIZE: usize = 16 * 1024 * 1024;
 const MAX_LDAP_FRAME_SIZE: usize = MAX_LDAP_BER_PAYLOAD_SIZE + 6;
@@ -52,6 +53,7 @@ enum TcpFrameMode {
     Tls,
     Redis,
     Memcached,
+    Nkn,
     Immediate,
 }
 
@@ -177,6 +179,7 @@ fn next_tcp_frame_for_mode(buffer: &mut Vec<u8>, mode: TcpFrameMode) -> TcpFrame
         TcpFrameMode::Tls => extract_tls_frame(buffer),
         TcpFrameMode::Redis => extract_redis_frame(buffer),
         TcpFrameMode::Memcached => extract_memcached_frame(buffer),
+        TcpFrameMode::Nkn => extract_nkn_frame(buffer),
         TcpFrameMode::Immediate => optional_frame(extract_immediate_frame(buffer)),
     }
 }
@@ -366,6 +369,9 @@ fn protocol_frame_mode(protocol: &str, ssh_first_packet: bool) -> Option<TcpFram
     }
     if listener_name_matches_protocol(protocol, "mqtt") {
         return Some(TcpFrameMode::Mqtt);
+    }
+    if listener_name_matches_protocol(protocol, "nkn") {
+        return Some(TcpFrameMode::Nkn);
     }
 
     None
@@ -1249,6 +1255,43 @@ fn extract_immediate_frame(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
         None
     } else {
         Some(std::mem::take(buffer))
+    }
+}
+
+fn extract_nkn_frame(buffer: &mut Vec<u8>) -> TcpFrameResult {
+    if buffer.is_empty() {
+        return TcpFrameResult::Incomplete;
+    }
+    if buffer.len() > MAX_NKN_FRAME_SIZE {
+        buffer.clear();
+        return TcpFrameResult::TooLarge { response: None };
+    }
+
+    let json_start = buffer
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(buffer.len());
+    if json_start == buffer.len() {
+        return TcpFrameResult::Incomplete;
+    }
+
+    if !matches!(buffer[json_start], b'{' | b'[') {
+        return TcpFrameResult::Complete(std::mem::take(buffer));
+    }
+
+    let mut stream = serde_json::Deserializer::from_slice(&buffer[json_start..])
+        .into_iter::<serde_json::Value>();
+    match stream.next() {
+        Some(Ok(_)) => {
+            let frame_len = json_start + stream.byte_offset();
+            TcpFrameResult::Complete(buffer.drain(..frame_len).collect())
+        }
+        Some(Err(err)) if err.is_eof() => TcpFrameResult::Incomplete,
+        Some(Err(_)) => {
+            buffer.clear();
+            TcpFrameResult::Invalid { response: None }
+        }
+        None => TcpFrameResult::Incomplete,
     }
 }
 
@@ -3894,6 +3937,51 @@ mod tests {
             tcp_frame_mode("chargen", b"", 19, &router, false, false),
             TcpFrameMode::Immediate
         );
+    }
+
+    #[test]
+    fn nkn_uses_json_frame_mode_for_explicit_and_detected_protocol() {
+        assert_eq!(protocol_frame_mode("nkn", false), Some(TcpFrameMode::Nkn));
+        assert_eq!(
+            protocol_frame_mode("nkn-custom", false),
+            Some(TcpFrameMode::Nkn)
+        );
+
+        let router = crate::router_setup::RouterSetup::build(None, None);
+        let request = br#"{"jsonrpc":"2.0","method":"getnodestate","id":1}"#;
+        assert_eq!(
+            tcp_frame_mode("tcp", request, 30001, &router, false, false),
+            TcpFrameMode::Nkn
+        );
+    }
+
+    #[test]
+    fn nkn_json_frame_waits_for_complete_json_rpc() {
+        let mut buffer = br#"{"jsonrpc":"2.0","method":"getnodestate""#.to_vec();
+
+        assert_eq!(
+            next_tcp_frame_for_mode(&mut buffer, TcpFrameMode::Nkn),
+            TcpFrameResult::Incomplete
+        );
+        buffer.extend_from_slice(br#","id":1}"#);
+
+        let frame = expect_complete(next_tcp_frame_for_mode(&mut buffer, TcpFrameMode::Nkn));
+        assert_eq!(
+            frame,
+            br#"{"jsonrpc":"2.0","method":"getnodestate","id":1}"#
+        );
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn nkn_json_frame_rejects_oversized_incomplete_payload() {
+        let mut buffer = vec![b'{'; MAX_NKN_FRAME_SIZE + 1];
+
+        assert_eq!(
+            next_tcp_frame_for_mode(&mut buffer, TcpFrameMode::Nkn),
+            TcpFrameResult::TooLarge { response: None }
+        );
+        assert!(buffer.is_empty());
     }
 
     #[test]

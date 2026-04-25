@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-/// Process filter supporting pre-compiled regex and substring patterns.
+/// Process filter supporting literal substring patterns and explicit regex patterns.
 ///
 /// Used to determine if a process should be allowed to interact with a listener.
 /// Supports both global filters (shared across all listeners) and per-listener
@@ -16,8 +16,8 @@ use std::sync::Arc;
 ///
 /// # Security Note
 ///
-/// Patterns are pre-compiled at creation time to prevent ReDoS attacks from
-/// user-supplied patterns.
+/// Patterns are literal, case-insensitive substrings by default. Prefix a pattern
+/// with `re:` or `regex:` to opt into regex matching.
 #[derive(Clone)]
 pub struct ProcessFilter {
     global_whitelist: Arc<Vec<PatternMatcher>>,
@@ -26,41 +26,60 @@ pub struct ProcessFilter {
     per_listener_blacklist: Vec<PatternMatcher>,
 }
 
-/// Compiled pattern supporting regex or substring matching.
-///
-/// If the pattern is a valid regex, it will be compiled and used for matching.
-/// If the pattern is not a valid regex, it falls back to case-insensitive
-/// substring matching.
+/// Compiled process-name pattern.
 #[derive(Clone)]
 pub struct PatternMatcher {
     original: String,
-    compiled: Option<regex::Regex>,
+    strategy: PatternStrategy,
+}
+
+#[derive(Clone)]
+enum PatternStrategy {
+    Literal { needle: String },
+    Regex(regex::Regex),
+    NeverMatch,
 }
 
 impl PatternMatcher {
     /// Creates a new pattern matcher from a string pattern.
     ///
-    /// If the pattern is a valid regex, it will be compiled. Otherwise,
-    /// it will use case-insensitive substring matching.
+    /// Patterns are literal, case-insensitive substrings unless they use the
+    /// `re:` or `regex:` prefix. Invalid explicit regex patterns never match.
     pub fn new(pattern: &str) -> Self {
-        let compiled = regex::Regex::new(pattern).ok();
+        let strategy = if let Some(regex_pattern) = pattern
+            .strip_prefix("re:")
+            .or_else(|| pattern.strip_prefix("regex:"))
+        {
+            match regex::Regex::new(regex_pattern) {
+                Ok(regex) => PatternStrategy::Regex(regex),
+                Err(err) => {
+                    tracing::warn!("Invalid process filter regex '{}': {}", pattern, err);
+                    PatternStrategy::NeverMatch
+                }
+            }
+        } else {
+            PatternStrategy::Literal {
+                needle: pattern.to_ascii_lowercase(),
+            }
+        };
+
         Self {
             original: pattern.to_string(),
-            compiled,
+            strategy,
         }
     }
 
     /// Checks if a process name matches this pattern.
     ///
-    /// Uses regex matching if pattern compiled successfully, otherwise
-    /// falls back to case-insensitive substring matching.
+    /// Uses case-insensitive literal substring matching by default, or regex
+    /// matching when the pattern uses the explicit regex prefix.
     pub fn matches(&self, process_name: &str) -> bool {
-        if let Some(ref re) = self.compiled {
-            re.is_match(process_name)
-        } else {
-            process_name
-                .to_lowercase()
-                .contains(&self.original.to_lowercase())
+        match &self.strategy {
+            PatternStrategy::Literal { needle } => {
+                process_name.to_ascii_lowercase().contains(needle)
+            }
+            PatternStrategy::Regex(regex) => regex.is_match(process_name),
+            PatternStrategy::NeverMatch => false,
         }
     }
 
@@ -83,8 +102,8 @@ impl ProcessFilter {
 
     /// Builds a process filter with pre-compiled patterns.
     ///
-    /// All patterns are compiled at creation time to prevent ReDoS attacks.
-    /// Invalid regex patterns fall back to substring matching.
+    /// Literal patterns are matched case-insensitively. Regex matching requires
+    /// the `re:` or `regex:` prefix and invalid regex patterns never match.
     ///
     /// # Arguments
     ///
@@ -225,24 +244,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_pattern_matcher_regex() {
-        let pm = PatternMatcher::new("^chrome.*");
+    fn test_pattern_matcher_explicit_regex() {
+        let pm = PatternMatcher::new("re:^chrome.*");
         assert!(pm.matches("chrome.exe"));
         assert!(pm.matches("chrome_helper"));
         assert!(!pm.matches("firefox.exe"));
     }
 
     #[test]
-    fn test_pattern_matcher_substring() {
-        // Invalid regex falls back to substring matching
-        let pm = PatternMatcher::new("[invalid");
-        assert!(pm.matches("foo[invalidbar"));
+    fn test_pattern_matcher_literal_substring() {
+        let pm = PatternMatcher::new("Chrome");
+        assert!(pm.matches("chrome.exe"));
+        assert!(pm.matches("GoogleChromeHelper"));
+        assert!(!pm.matches("firefox.exe"));
+    }
+
+    #[test]
+    fn test_literal_pattern_does_not_treat_dot_as_regex_wildcard() {
+        let pm = PatternMatcher::new("svchost.exe");
+        assert!(pm.matches("svchost.exe"));
+        assert!(!pm.matches("svchostXexe"));
+    }
+
+    #[test]
+    fn test_invalid_explicit_regex_never_matches() {
+        let pm = PatternMatcher::new("re:[invalid");
+        assert!(!pm.matches("foo[invalidbar"));
         assert!(!pm.matches("foobar"));
     }
 
     #[test]
     fn test_process_filter_whitelist() {
-        let filter = ProcessFilter::build(vec!["chrome.*".to_string()], vec![], vec![], vec![]);
+        let filter = ProcessFilter::build(vec!["re:chrome.*".to_string()], vec![], vec![], vec![]);
 
         assert!(filter.is_process_allowed("chrome.exe"));
         assert!(filter.is_process_allowed("chrome_helper"));
@@ -251,7 +284,7 @@ mod tests {
 
     #[test]
     fn test_process_filter_blacklist() {
-        let filter = ProcessFilter::build(vec![], vec!["malware.*".to_string()], vec![], vec![]);
+        let filter = ProcessFilter::build(vec![], vec!["re:malware.*".to_string()], vec![], vec![]);
 
         assert!(!filter.is_process_allowed("malware.exe"));
         assert!(!filter.is_process_allowed("malware_agent"));
@@ -261,9 +294,9 @@ mod tests {
     #[test]
     fn test_process_filter_combined() {
         let filter = ProcessFilter::build(
-            vec!["^[a-z]+\\.exe$".to_string()], // whitelist: simple names
-            vec!["bad.*".to_string()],          // global blacklist
-            vec!["chrome.*".to_string()],       // listener whitelist
+            vec!["re:^[a-z]+\\.exe$".to_string()], // whitelist: simple names
+            vec!["re:bad.*".to_string()],          // global blacklist
+            vec!["re:chrome.*".to_string()],       // listener whitelist
             vec![],
         );
 

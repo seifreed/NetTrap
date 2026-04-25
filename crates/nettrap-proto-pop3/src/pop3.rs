@@ -37,6 +37,7 @@ impl Pop3Response {
 
 fn is_complete_pop3_response(message: &str) -> bool {
     message == "+\r\n"
+        || message.starts_with("+ ")
         || message.starts_with("+OK ")
         || message.starts_with("+OK\r\n")
         || message.starts_with("-ERR ")

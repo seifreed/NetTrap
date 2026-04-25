@@ -14,6 +14,7 @@ use crate::session::{PortForwardTable, SessionTracker};
 /// Contains references to services that are shared across all listeners:
 /// - Protocol router for taste detection
 /// - Attribution engine
+/// - Attribution operation timeout
 /// - PCAP writer
 /// - NBI collector
 /// - Session tracker
@@ -22,6 +23,7 @@ use crate::session::{PortForwardTable, SessionTracker};
 pub struct ListenerRuntime {
     pub router: Arc<nettrap_proxy::ProtocolRouter>,
     pub attribution: Option<Arc<nettrap_attribution::AttributionEngine>>,
+    pub attribution_timeout: Duration,
     pub pcap_writer: Option<Arc<nettrap_pcap::PcapWriter>>,
     pub nbi_collector: Arc<NbiCollector>,
     pub session_tracker: Arc<SessionTracker>,
@@ -34,6 +36,7 @@ pub struct ListenerRuntimeResources {
     pub ca: Option<Arc<nettrap_tls_mitm::CertificateAuthority>>,
     pub router: Arc<nettrap_proxy::ProtocolRouter>,
     pub attribution: Option<Arc<nettrap_attribution::AttributionEngine>>,
+    pub attribution_timeout: Duration,
     pub pcap_writer: Option<Arc<nettrap_pcap::PcapWriter>>,
     pub nbi_collector: Arc<NbiCollector>,
     pub session_tracker: Arc<SessionTracker>,
@@ -47,6 +50,7 @@ impl ListenerRuntime {
             ca: resources.ca,
             router: resources.router,
             attribution: resources.attribution,
+            attribution_timeout: resources.attribution_timeout,
             pcap_writer: resources.pcap_writer,
             nbi_collector: resources.nbi_collector,
             session_tracker: resources.session_tracker,

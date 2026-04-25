@@ -51,7 +51,7 @@ impl PortRedirect {
             source_port: Some(source_port),
             target_port,
             is_tcp,
-            exclude_uid: None,
+            exclude_uid: Some(nix::unistd::Uid::current().as_raw()),
         }
     }
 
@@ -431,12 +431,12 @@ mod tests {
     }
 
     #[test]
-    fn single_host_explicit_redirect_keeps_owner_match_out() {
+    fn single_host_explicit_redirect_excludes_current_uid() {
         let redirect = PortRedirect::new(80, true, 8080);
         let (_chain, args) =
             build_redirect_rule_args(NetworkMode::SingleHost, None, &redirect, "tcp");
 
-        assert!(!contains_args(&args, &["-m", "owner", "!", "--uid-owner"]));
+        assert!(contains_args(&args, &["-m", "owner", "!", "--uid-owner"]));
     }
 
     #[test]

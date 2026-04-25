@@ -12,6 +12,7 @@ pub struct StartupContext {
     pub ca: Option<Arc<nettrap_tls_mitm::CertificateAuthority>>,
     pub router: Arc<nettrap_proxy::ProtocolRouter>,
     pub attribution: Option<Arc<nettrap_attribution::AttributionEngine>>,
+    pub attribution_timeout: std::time::Duration,
     pub pcap_writer: Option<Arc<nettrap_pcap::PcapWriter>>,
     pub flow_manager: Arc<nettrap_flow::FlowManager>,
     pub runtime_health: Arc<nettrap_api::RuntimeHealth>,
@@ -69,6 +70,7 @@ pub fn create_startup_context(
     };
     let router = init_protocol_router(&redirect_defaults);
     let attribution = init_attribution(config);
+    let attribution_timeout = std::time::Duration::from_millis(config.attribution_timeout_ms);
     let pcap_writer = if listener_driven_outputs_enabled {
         init_pcap_writer(config)?
     } else {
@@ -135,6 +137,7 @@ pub fn create_startup_context(
         ca,
         router,
         attribution,
+        attribution_timeout,
         pcap_writer,
         flow_manager,
         runtime_health,
@@ -400,9 +403,9 @@ fn init_protocol_router(
 fn init_attribution(config: &EngineConfig) -> Option<Arc<nettrap_attribution::AttributionEngine>> {
     if config.attribution_enabled {
         Some(Arc::new(
-            nettrap_attribution::AttributionEngine::with_timeout(std::time::Duration::from_millis(
-                config.attribution_timeout_ms,
-            )),
+            nettrap_attribution::AttributionEngine::with_cache_timeout(
+                std::time::Duration::from_millis(config.attribution_timeout_ms),
+            ),
         ))
     } else {
         None
@@ -461,6 +464,7 @@ pub fn build_listener_context(
         ca: startup.ca.clone(),
         router: Arc::clone(&startup.router),
         attribution: startup.attribution.clone(),
+        attribution_timeout: startup.attribution_timeout,
         pcap_writer: startup.pcap_writer.clone(),
         nbi_collector: Arc::clone(&startup.nbi_collector),
         session_tracker: Arc::clone(&startup.session_tracker),
@@ -804,6 +808,22 @@ mod tests {
         let ctx = build_listener_context(listener, &startup, None).expect("build listener context");
 
         assert!(ctx.config.log_hexdump);
+    }
+
+    #[test]
+    fn build_listener_context_propagates_attribution_timeout() {
+        let mut config = EngineConfig::default();
+        config.attribution_timeout_ms = 1234;
+        config.listeners = vec![crate::config::ListenerConfig::new("raw", 9000)];
+        let startup = create_startup_context(&config, None, StartupMode::Standard).unwrap();
+        let listener = config.listeners.first().unwrap();
+
+        let ctx = build_listener_context(listener, &startup, None).expect("build listener context");
+
+        assert_eq!(
+            ctx.runtime.attribution_timeout,
+            std::time::Duration::from_millis(1234)
+        );
     }
 
     #[test]

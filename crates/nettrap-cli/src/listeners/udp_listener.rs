@@ -122,14 +122,59 @@ fn configure_udp_destination_capture(
         return Err(io::Error::last_os_error());
     }
 
+    #[cfg(target_os = "linux")]
+    {
+        const IP_RECVORIGDSTADDR: libc::c_int = 20;
+        const IPV6_RECVORIGDSTADDR: libc::c_int = 74;
+
+        let result = unsafe {
+            match bind_addr {
+                IpAddr::V4(_) => libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_IP,
+                    IP_RECVORIGDSTADDR,
+                    enabled_ptr,
+                    enabled_len,
+                ),
+                IpAddr::V6(_) => libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_IPV6,
+                    IPV6_RECVORIGDSTADDR,
+                    enabled_ptr,
+                    enabled_len,
+                ),
+            }
+        };
+        if result == -1 {
+            tracing::debug!(
+                "UDP original destination capture is unavailable on {}: {}",
+                bind_addr,
+                io::Error::last_os_error()
+            );
+        }
+    }
+
     Ok(UdpDestinationCapture)
 }
 
 #[cfg(unix)]
 fn max_cmsg_space() -> usize {
-    let ipv4 = unsafe { libc::CMSG_SPACE(std::mem::size_of::<libc::in_pktinfo>() as _) } as usize;
-    let ipv6 = unsafe { libc::CMSG_SPACE(std::mem::size_of::<libc::in6_pktinfo>() as _) } as usize;
-    ipv4.max(ipv6)
+    let ipv4_pktinfo =
+        unsafe { libc::CMSG_SPACE(std::mem::size_of::<libc::in_pktinfo>() as _) } as usize;
+    let ipv6_pktinfo =
+        unsafe { libc::CMSG_SPACE(std::mem::size_of::<libc::in6_pktinfo>() as _) } as usize;
+    #[cfg(target_os = "linux")]
+    {
+        let ipv4_original =
+            unsafe { libc::CMSG_SPACE(std::mem::size_of::<libc::sockaddr_in>() as _) } as usize;
+        let ipv6_original =
+            unsafe { libc::CMSG_SPACE(std::mem::size_of::<libc::sockaddr_in6>() as _) } as usize;
+        (ipv4_pktinfo + ipv4_original).max(ipv6_pktinfo + ipv6_original)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        ipv4_pktinfo.max(ipv6_pktinfo)
+    }
 }
 
 #[cfg(unix)]
@@ -198,6 +243,54 @@ fn destination_ip_from_control_message(message: &libc::msghdr) -> Option<IpAddr>
     None
 }
 
+#[cfg(target_os = "linux")]
+fn original_destination_from_control_message(message: &libc::msghdr) -> Option<SessionDestination> {
+    const IP_ORIGDSTADDR: libc::c_int = 20;
+    const IPV6_ORIGDSTADDR: libc::c_int = 74;
+
+    unsafe {
+        let mut cmsg = libc::CMSG_FIRSTHDR(message);
+        while !cmsg.is_null() {
+            let header = &*cmsg;
+            if header.cmsg_level == libc::IPPROTO_IP && header.cmsg_type == IP_ORIGDSTADDR {
+                let addr = *(libc::CMSG_DATA(cmsg) as *const libc::sockaddr_in);
+                return Some(session_destination_from_sockaddr_in(addr));
+            }
+
+            if header.cmsg_level == libc::IPPROTO_IPV6 && header.cmsg_type == IPV6_ORIGDSTADDR {
+                let addr = *(libc::CMSG_DATA(cmsg) as *const libc::sockaddr_in6);
+                return Some(session_destination_from_sockaddr_in6(addr));
+            }
+
+            cmsg = libc::CMSG_NXTHDR(message, cmsg);
+        }
+    }
+
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+#[cfg(unix)]
+fn original_destination_from_control_message(
+    _message: &libc::msghdr,
+) -> Option<SessionDestination> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn session_destination_from_sockaddr_in(addr: libc::sockaddr_in) -> SessionDestination {
+    let ip = std::net::Ipv4Addr::from(u32::from_be(addr.sin_addr.s_addr));
+    let port = u16::from_be(addr.sin_port);
+    SessionDestination::new(ip.to_string(), port)
+}
+
+#[cfg(target_os = "linux")]
+fn session_destination_from_sockaddr_in6(addr: libc::sockaddr_in6) -> SessionDestination {
+    let ip = std::net::Ipv6Addr::from(addr.sin6_addr.s6_addr);
+    let port = u16::from_be(addr.sin6_port);
+    SessionDestination::new(ip.to_string(), port)
+}
+
 #[cfg(unix)]
 fn recv_from_with_destination_now(
     socket: &UdpSocket,
@@ -228,8 +321,10 @@ fn recv_from_with_destination_now(
     }
 
     let src = unsafe { socket_addr_from_storage(&source_addr.assume_init())? };
-    let destination = destination_ip_from_control_message(&message)
-        .map(|ip| SessionDestination::new(ip.to_string(), listener_port));
+    let destination = original_destination_from_control_message(&message).or_else(|| {
+        destination_ip_from_control_message(&message)
+            .map(|ip| SessionDestination::new(ip.to_string(), listener_port))
+    });
 
     Ok((received as usize, src, destination))
 }
@@ -575,19 +670,7 @@ pub async fn run_udp_listener(
                     Some(packet_destination.unwrap_or_else(|| direct_destination.clone())),
                 );
 
-                if !apply_udp_process_filter(&ctx, &src, &destination).await {
-                    tracing::debug!("UDP process blocked by filter on {}", ctx.name());
-                    continue;
-                }
-
-                tracing::debug!("UDP '{}' received {} bytes from {}", ctx.name(), len, src);
-
-                if ctx.config.log_hexdump {
-                    tracing::debug!("Hexdump:\n{}", crate::hexdump::hexdump(&buf[..len], 256));
-                }
-
                 let query_data = buf[..len].to_vec();
-                ctx.write_pcap_event_udp_for_destination(&query_data, &src, &destination);
 
                 let ctx_clone = Arc::clone(&ctx);
                 let dns_handler_clone = Arc::clone(&dns_handler);
@@ -607,6 +690,24 @@ pub async fn run_udp_listener(
 
                 tokio::spawn(async move {
                     let _permit = permit; // held until task completes
+                    if !apply_udp_process_filter(&ctx_clone, &src, &destination).await {
+                        tracing::debug!("UDP process blocked by filter on {}", ctx_clone.name());
+                        return;
+                    }
+
+                    tracing::debug!(
+                        "UDP '{}' received {} bytes from {}",
+                        ctx_clone.name(),
+                        len,
+                        src
+                    );
+
+                    if ctx_clone.config.log_hexdump {
+                        tracing::debug!("Hexdump:\n{}", crate::hexdump::hexdump(&query_data, 256));
+                    }
+
+                    ctx_clone.write_pcap_event_udp_for_destination(&query_data, &src, &destination);
+
                     let packet = UdpPacket {
                         output_path: out_clone.as_deref(),
                         query_data: &query_data,
@@ -671,7 +772,7 @@ async fn apply_udp_process_filter(
     );
 
     match tokio::time::timeout(
-        Duration::from_millis(ctx.timeout_ms()),
+        ctx.runtime.attribution_timeout,
         tokio::task::spawn_blocking({
             let attr_engine = Arc::clone(attr_engine);
             move || attr_engine.attribute_flow(&five_tuple)
@@ -690,7 +791,7 @@ async fn apply_udp_process_filter(
         Err(_) => {
             tracing::warn!(
                 "UDP attribution timed out after {} ms for {}",
-                ctx.timeout_ms(),
+                ctx.runtime.attribution_timeout.as_millis(),
                 src
             );
             true
@@ -1704,6 +1805,43 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_udp_sockaddr_in_original_destination_preserves_ip_and_port() {
+        let addr = libc::sockaddr_in {
+            sin_family: libc::AF_INET as libc::sa_family_t,
+            sin_port: 5353u16.to_be(),
+            sin_addr: libc::in_addr {
+                s_addr: u32::from_be_bytes([198, 51, 100, 7]).to_be(),
+            },
+            sin_zero: [0; 8],
+        };
+
+        assert_eq!(
+            session_destination_from_sockaddr_in(addr),
+            SessionDestination::new("198.51.100.7", 5353)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_udp_sockaddr_in6_original_destination_preserves_ip_and_port() {
+        let addr = libc::sockaddr_in6 {
+            sin6_family: libc::AF_INET6 as libc::sa_family_t,
+            sin6_port: 5353u16.to_be(),
+            sin6_flowinfo: 0,
+            sin6_addr: libc::in6_addr {
+                s6_addr: [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7],
+            },
+            sin6_scope_id: 0,
+        };
+
+        assert_eq!(
+            session_destination_from_sockaddr_in6(addr),
+            SessionDestination::new("2001:db8::7", 5353)
+        );
+    }
+
     #[test]
     fn attributed_udp_process_is_recorded_and_filtered() {
         let tracker = Arc::new(SessionTracker::new());
@@ -1723,6 +1861,7 @@ mod tests {
                 ca: None,
                 router: Arc::new(nettrap_proxy::ProtocolRouter::new()),
                 attribution: None,
+                attribution_timeout: std::time::Duration::from_millis(5000),
                 pcap_writer: None,
                 nbi_collector: Arc::new(crate::nbi::NbiCollector::new(None)),
                 session_tracker: Arc::clone(&tracker),
@@ -1771,6 +1910,7 @@ mod tests {
                 ca: None,
                 router: Arc::new(nettrap_proxy::ProtocolRouter::new()),
                 attribution: None,
+                attribution_timeout: std::time::Duration::from_millis(5000),
                 pcap_writer: None,
                 nbi_collector: Arc::new(crate::nbi::NbiCollector::new(None)),
                 session_tracker: Arc::clone(&tracker),
@@ -2032,6 +2172,7 @@ mod tests {
                     ca: None,
                     router,
                     attribution: None,
+                    attribution_timeout: std::time::Duration::from_millis(5000),
                     pcap_writer: None,
                     nbi_collector: Arc::new(crate::nbi::NbiCollector::new(None)),
                     session_tracker: Arc::new(SessionTracker::new()),
@@ -2243,6 +2384,7 @@ mod tests {
                     ca: None,
                     router: Arc::new(nettrap_proxy::ProtocolRouter::new()),
                     attribution: None,
+                    attribution_timeout: std::time::Duration::from_millis(5000),
                     pcap_writer: None,
                     nbi_collector: Arc::new(crate::nbi::NbiCollector::new(None)),
                     session_tracker: Arc::clone(&tracker),

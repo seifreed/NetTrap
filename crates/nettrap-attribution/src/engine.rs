@@ -29,12 +29,16 @@ impl AttributionEngine {
         }
     }
 
-    pub fn with_timeout(timeout: Duration) -> Self {
+    pub fn with_cache_timeout(timeout: Duration) -> Self {
         Self {
             cache: DashMap::new(),
             cache_timeout: timeout,
             stats: RwLock::new(AttributionStats::default()),
         }
+    }
+
+    pub fn with_timeout(timeout: Duration) -> Self {
+        Self::with_cache_timeout(timeout)
     }
 
     pub fn attribute_flow(&self, five_tuple: &FiveTuple) -> Attribution {

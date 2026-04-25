@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 
 use crate::listener_context::ListenerContext;
 use crate::listeners::tcp_handler::handle_tcp_connection;
@@ -53,79 +53,23 @@ pub async fn run_tcp_listener(
 
                 // Register the session before attribution so any resolved
                 // process metadata can be attached to the live session state.
-                let local_destination = stream.local_addr().ok().map(|addr| {
-                    crate::session::SessionDestination::new(addr.ip().to_string(), addr.port())
+                let local_destination = original_tcp_destination(&stream).or_else(|| {
+                    stream.local_addr().ok().map(|addr| {
+                        crate::session::SessionDestination::new(addr.ip().to_string(), addr.port())
+                    })
                 });
                 let destination = ctx.register_session(&peer, "TCP", local_destination);
-
-                // Attribution + process filtering
-                let process_allowed = if let Some(ref attr_engine) = ctx.runtime.attribution {
-                    let dst_ip = destination
-                        .ip
-                        .parse()
-                        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
-                    let five_tuple = nettrap_core::prelude::FiveTuple::new(
-                        peer.ip(),
-                        dst_ip,
-                        peer.port(),
-                        destination.port,
-                        nettrap_core::prelude::Protocol::Tcp,
-                    );
-                    match tokio::time::timeout(
-                        std::time::Duration::from_millis(ctx.timeout_ms()),
-                        tokio::task::spawn_blocking({
-                            let attr_engine = Arc::clone(attr_engine);
-                            move || attr_engine.attribute_flow(&five_tuple)
-                        }),
-                    )
-                    .await
-                    {
-                        Ok(Ok(attr))
-                            if attr.confidence
-                                != nettrap_core::prelude::AttributionConfidence::None =>
-                        {
-                            let proc_name = &attr.process.name;
-                            tracing::debug!(
-                                "Attribution: {} -> {} (pid={})",
-                                peer,
-                                proc_name,
-                                attr.process.pid
-                            );
-                            apply_attributed_tcp_process_filter(
-                                &ctx,
-                                &peer,
-                                &destination,
-                                proc_name,
-                                attr.process.pid,
-                            )
-                        }
-                        Ok(Ok(_)) => true,
-                        Ok(Err(e)) => {
-                            tracing::warn!("Attribution timeout/error for {}: {}", peer, e);
-                            true
-                        }
-                        Err(_) => {
-                            tracing::warn!(
-                                "Attribution timed out after {} ms for {}",
-                                ctx.timeout_ms(),
-                                peer
-                            );
-                            true
-                        }
-                    }
-                } else {
-                    true
-                };
-
-                if !process_allowed {
-                    tracing::debug!("Process blocked by filter on {}", ctx.name());
-                    conn_counter.fetch_sub(1, Ordering::AcqRel);
-                    continue;
-                }
 
                 let ctx_clone = Arc::clone(&ctx);
                 let out = output_path.map(|p| p.to_path_buf());
                 tokio::spawn(async move {
+                    if !apply_tcp_process_filter(&ctx_clone, &peer, &destination).await {
+                        tracing::debug!("Process blocked by filter on {}", ctx_clone.name());
+                        ctx_clone.remove_session(&peer, "TCP", &destination);
+                        conn_counter.fetch_sub(1, Ordering::AcqRel);
+                        return;
+                    }
+
                     let result = handle_tcp_connection(
                         Arc::clone(&ctx_clone),
                         stream,
@@ -146,6 +90,141 @@ pub async fn run_tcp_listener(
             }
         }
     }
+}
+
+async fn apply_tcp_process_filter(
+    ctx: &ListenerContext,
+    peer: &std::net::SocketAddr,
+    destination: &SessionDestination,
+) -> bool {
+    let Some(attr_engine) = ctx.runtime.attribution.as_ref() else {
+        return true;
+    };
+
+    let dst_ip = destination
+        .ip
+        .parse()
+        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+    let five_tuple = nettrap_core::prelude::FiveTuple::new(
+        peer.ip(),
+        dst_ip,
+        peer.port(),
+        destination.port,
+        nettrap_core::prelude::Protocol::Tcp,
+    );
+
+    match tokio::time::timeout(
+        ctx.runtime.attribution_timeout,
+        tokio::task::spawn_blocking({
+            let attr_engine = Arc::clone(attr_engine);
+            move || attr_engine.attribute_flow(&five_tuple)
+        }),
+    )
+    .await
+    {
+        Ok(Ok(attr)) if attr.confidence != nettrap_core::prelude::AttributionConfidence::None => {
+            let proc_name = &attr.process.name;
+            tracing::debug!(
+                "Attribution: {} -> {} (pid={})",
+                peer,
+                proc_name,
+                attr.process.pid
+            );
+            apply_attributed_tcp_process_filter(ctx, peer, destination, proc_name, attr.process.pid)
+        }
+        Ok(Ok(_)) => true,
+        Ok(Err(e)) => {
+            tracing::warn!("Attribution timeout/error for {}: {}", peer, e);
+            true
+        }
+        Err(_) => {
+            tracing::warn!(
+                "Attribution timed out after {} ms for {}",
+                ctx.runtime.attribution_timeout.as_millis(),
+                peer
+            );
+            true
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn original_tcp_destination(stream: &TcpStream) -> Option<SessionDestination> {
+    match stream.local_addr().ok()? {
+        std::net::SocketAddr::V4(_) => linux_original_ipv4_destination(stream),
+        std::net::SocketAddr::V6(_) => linux_original_ipv6_destination(stream),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn original_tcp_destination(_stream: &TcpStream) -> Option<SessionDestination> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn linux_original_ipv4_destination(stream: &TcpStream) -> Option<SessionDestination> {
+    use std::mem::{size_of, zeroed};
+    use std::os::fd::AsRawFd;
+
+    const SO_ORIGINAL_DST: libc::c_int = 80;
+
+    let mut addr: libc::sockaddr_in = unsafe { zeroed() };
+    let mut len = size_of::<libc::sockaddr_in>() as libc::socklen_t;
+    let result = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_IP,
+            SO_ORIGINAL_DST,
+            (&mut addr as *mut libc::sockaddr_in).cast::<libc::c_void>(),
+            &mut len,
+        )
+    };
+
+    if result == 0 && len as usize >= size_of::<libc::sockaddr_in>() {
+        Some(session_destination_from_sockaddr_in(addr))
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_original_ipv6_destination(stream: &TcpStream) -> Option<SessionDestination> {
+    use std::mem::{size_of, zeroed};
+    use std::os::fd::AsRawFd;
+
+    const IP6T_SO_ORIGINAL_DST: libc::c_int = 80;
+
+    let mut addr: libc::sockaddr_in6 = unsafe { zeroed() };
+    let mut len = size_of::<libc::sockaddr_in6>() as libc::socklen_t;
+    let result = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::IPPROTO_IPV6,
+            IP6T_SO_ORIGINAL_DST,
+            (&mut addr as *mut libc::sockaddr_in6).cast::<libc::c_void>(),
+            &mut len,
+        )
+    };
+
+    if result == 0 && len as usize >= size_of::<libc::sockaddr_in6>() {
+        Some(session_destination_from_sockaddr_in6(addr))
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn session_destination_from_sockaddr_in(addr: libc::sockaddr_in) -> SessionDestination {
+    let ip = std::net::Ipv4Addr::from(u32::from_be(addr.sin_addr.s_addr));
+    let port = u16::from_be(addr.sin_port);
+    SessionDestination::new(ip.to_string(), port)
+}
+
+#[cfg(target_os = "linux")]
+fn session_destination_from_sockaddr_in6(addr: libc::sockaddr_in6) -> SessionDestination {
+    let ip = std::net::Ipv6Addr::from(addr.sin6_addr.s6_addr);
+    let port = u16::from_be(addr.sin6_port);
+    SessionDestination::new(ip.to_string(), port)
 }
 
 fn apply_attributed_tcp_process_filter(
@@ -219,6 +298,7 @@ mod tests {
                 ca: None,
                 router: Arc::new(nettrap_proxy::ProtocolRouter::new()),
                 attribution: None,
+                attribution_timeout: std::time::Duration::from_millis(5000),
                 pcap_writer: None,
                 nbi_collector: Arc::new(crate::nbi::NbiCollector::new(None)),
                 session_tracker: Arc::clone(&tracker),
@@ -241,6 +321,43 @@ mod tests {
         assert_eq!(
             tracker.get_process(&peer, "TCP", &destination),
             Some((Some("blocked.exe".to_string()), Some(4244)))
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_sockaddr_in_original_destination_preserves_ip_and_port() {
+        let addr = libc::sockaddr_in {
+            sin_family: libc::AF_INET as libc::sa_family_t,
+            sin_port: 8443u16.to_be(),
+            sin_addr: libc::in_addr {
+                s_addr: u32::from_be_bytes([203, 0, 113, 10]).to_be(),
+            },
+            sin_zero: [0; 8],
+        };
+
+        assert_eq!(
+            session_destination_from_sockaddr_in(addr),
+            SessionDestination::new("203.0.113.10", 8443)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_sockaddr_in6_original_destination_preserves_ip_and_port() {
+        let addr = libc::sockaddr_in6 {
+            sin6_family: libc::AF_INET6 as libc::sa_family_t,
+            sin6_port: 9443u16.to_be(),
+            sin6_flowinfo: 0,
+            sin6_addr: libc::in6_addr {
+                s6_addr: [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            },
+            sin6_scope_id: 0,
+        };
+
+        assert_eq!(
+            session_destination_from_sockaddr_in6(addr),
+            SessionDestination::new("2001:db8::1", 9443)
         );
     }
 }

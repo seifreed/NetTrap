@@ -10,7 +10,7 @@ nettrap config --defaults > config.toml
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `attribution_enabled` | bool | `true` | Enable process-to-connection tracking |
-| `attribution_timeout_ms` | u64 | `5000` | Attribution cache timeout |
+| `attribution_timeout_ms` | u64 | `5000` | Attribution operation timeout and cache TTL |
 | `default_decision` | string | `"intercept"` | Default packet action |
 | `pcap_enabled` | bool | `false` | Enable PCAP recording |
 | `pcap_path` | string | - | PCAP output file path |
@@ -37,8 +37,8 @@ nettrap config --defaults > config.toml
 | `ftproot` | string | - | FTP file serving directory |
 | `response_delay_ms` | u64 | `0` | Response delay |
 | `execute_cmd` | string | - | Command on connect |
-| `process_whitelist` | [string] | `[]` | Process name whitelist |
-| `process_blacklist` | [string] | `[]` | Process name blacklist |
+| `process_whitelist` | [string] | `[]` | Process name whitelist; literal substring by default, `re:`/`regex:` prefix for regex |
+| `process_blacklist` | [string] | `[]` | Process name blacklist; literal substring by default, `re:`/`regex:` prefix for regex |
 | `host_whitelist` | [string] | `[]` | IP whitelist |
 | `host_blacklist` | [string] | `[]` | IP blacklist |
 

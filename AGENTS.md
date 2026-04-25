@@ -47,6 +47,13 @@ This project follows Clean Architecture principles:
 - **Outer layers** (CLI) depend on inner layers
 - **Dependencies point inward** through traits/interfaces
 
+### Clean Code & Architecture Discipline
+
+- Preserve Clean Architecture boundaries when adding or changing behavior. Keep policy and orchestration in the appropriate use-case layer, keep adapters and protocol/infrastructure details at the edges, and introduce traits/interfaces when crossing layer boundaries.
+- Follow Clean Code practices: small cohesive functions, clear names, explicit error handling, minimal shared mutable state, and no unrelated refactors in feature or bug-fix changes.
+- Prefer existing local abstractions and patterns over new framework-style abstractions. Add new abstractions only when they reduce real duplication or clarify a stable boundary.
+- Do not hide design problems with broad `allow` attributes, dead-code workarounds, or bypasses around quality gates. Fix the underlying issue or document a narrow, justified exception.
+
 ### Testing Strategy
 
 Components can be tested with mock implementations:
@@ -242,6 +249,13 @@ crates/nettrap-proto-dns/
 └── tests/
     └── cross_platform_tests.rs
 ```
+
+### Regression Contracts
+
+- New features must include regression contracts that lock the expected behavior at the protocol, API, CLI, or integration boundary they change. A contract can be a focused unit test, integration test, fixture/corpus case, property-style negative case, or documented quality-gate check.
+- Regression contracts must cover success behavior and the most important failure or malformed-input paths, especially for protocol parsers, network framing, file-serving paths, redirection/routing, authentication flows, and async backpressure/timeouts.
+- When fixing a bug, add or update a regression contract that would have failed before the fix. Do this before or alongside the implementation so future changes cannot reintroduce the bug silently.
+- If a behavior cannot be tested directly, add the nearest executable contract and document the remaining manual or platform-specific verification in the change notes.
 
 ## Security & Platform Notes
 

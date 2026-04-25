@@ -397,10 +397,6 @@ fn track_original_destination(
             return;
         };
 
-        if listener_port == original_dst.port() {
-            return;
-        }
-
         port_forward_table.record_original_dest(
             &packet.src(),
             protocol,
@@ -609,6 +605,21 @@ mod tests {
         assert_eq!(
             snapshot.interceptor.state,
             nettrap_api::ComponentState::Stopped
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_tracking_preserves_original_ip_even_when_port_matches_listener() {
+        let table = crate::session::PortForwardTable::new();
+        table.add_tcp_forward(80, 80);
+        let packet = sample_packet();
+
+        track_original_destination(&packet, &table);
+
+        assert_eq!(
+            table.take_original_dest(&packet.src(), "TCP", 80),
+            Some(crate::session::SessionDestination::new("10.0.0.5", 80))
         );
     }
 }
