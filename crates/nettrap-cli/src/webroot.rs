@@ -66,58 +66,13 @@ impl WebrootServer {
             tracing::warn!("Path traversal attempt blocked: {}", path);
             return WebrootServeResult::NotFound;
         }
-        let file_path = self.root.join(clean_path);
-
-        // Try canonicalize root; if it fails (dir doesn't exist yet), use the path directly
-        // but still check for traversal using a simpler approach
-        let canonical_root = match self.root.canonicalize() {
-            Ok(p) => p,
-            Err(_) => {
-                // Root doesn't exist yet - check file existence with symlink validation
-                let candidates = vec![file_path.clone(), file_path.join("index.html")];
-                for candidate in candidates {
-                    if candidate.is_file() {
-                        // Verify the resolved path doesn't escape the root via symlinks
-                        if let Ok(canon) = candidate.canonicalize() {
-                            let abs_root =
-                                std::path::absolute(&self.root).unwrap_or(self.root.clone());
-                            if !canon.starts_with(&abs_root) {
-                                tracing::warn!(
-                                    "Symlink escape blocked: {:?} -> {:?}",
-                                    candidate,
-                                    canon
-                                );
-                                return WebrootServeResult::NotFound;
-                            }
-                        }
-                        match self.read_candidate(&candidate) {
-                            WebrootServeResult::NotFound => {}
-                            result => return result,
-                        }
-                    }
-                }
-                return WebrootServeResult::NotFound;
-            }
-        };
-        // Try exact path, then with index.html
-        // Each candidate is canonicalized individually in the loop below
-        let candidates = vec![file_path.clone(), file_path.join("index.html")];
+        let relative_path = PathBuf::from(clean_path);
+        let candidates = vec![relative_path.clone(), relative_path.join("index.html")];
 
         for candidate in candidates {
-            if candidate.is_file() {
-                // Canonicalize each candidate individually to prevent symlink escapes
-                let canonical_candidate = match candidate.canonicalize() {
-                    Ok(p) => p,
-                    Err(_) => continue,
-                };
-                if !canonical_candidate.starts_with(&canonical_root) {
-                    tracing::warn!("Path traversal attempt blocked: {:?}", candidate);
-                    continue;
-                }
-                match self.read_candidate(&candidate) {
-                    WebrootServeResult::NotFound => {}
-                    result => return result,
-                }
+            match self.read_candidate(&candidate) {
+                WebrootServeResult::NotFound => {}
+                result => return result,
             }
         }
 
@@ -125,7 +80,7 @@ impl WebrootServer {
     }
 
     fn read_candidate(&self, candidate: &Path) -> WebrootServeResult {
-        match read_limited_file(candidate, MAX_FILE_RESPONSE_BYTES) {
+        match read_limited_file_beneath_root(&self.root, candidate, MAX_FILE_RESPONSE_BYTES) {
             Ok(LimitedFileRead::Content(content)) => WebrootServeResult::Found {
                 mime: self.mime_for_path(candidate),
                 content,
@@ -242,8 +197,12 @@ fn simple_http_response(code: u16, reason: &str, body: &str) -> Vec<u8> {
     .into_bytes()
 }
 
-fn read_limited_file(path: &Path, max_bytes: u64) -> std::io::Result<LimitedFileRead> {
-    let file = match open_regular_file_no_final_symlink(path) {
+fn read_limited_file_beneath_root(
+    root: &Path,
+    relative_path: &Path,
+    max_bytes: u64,
+) -> std::io::Result<LimitedFileRead> {
+    let file = match open_regular_file_beneath_root(root, relative_path) {
         Ok(file) => file,
         Err(err) if err.kind() == io::ErrorKind::InvalidInput => {
             return Ok(LimitedFileRead::NotFile);
@@ -266,14 +225,80 @@ fn read_limited_file(path: &Path, max_bytes: u64) -> std::io::Result<LimitedFile
 }
 
 #[cfg(unix)]
-fn open_regular_file_no_final_symlink(path: &Path) -> io::Result<File> {
+fn open_regular_file_beneath_root(root: &Path, relative_path: &Path) -> io::Result<File> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+    use std::path::Component;
 
-    let file = OpenOptions::new()
+    let mut dir = OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)?;
-    ensure_regular_file(file)
+        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
+        .open(root)?;
+    let mut components = relative_path.components().peekable();
+
+    while let Some(component) = components.next() {
+        let Component::Normal(name) = component else {
+            if matches!(component, Component::CurDir) {
+                continue;
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid path component",
+            ));
+        };
+
+        let name = CString::new(name.as_bytes()).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "nul byte in path component")
+        })?;
+        let is_last = components.peek().is_none();
+        let flags = if is_last {
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW
+        } else {
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW
+        };
+        let fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        let file = unsafe { File::from_raw_fd(fd) };
+        if is_last {
+            return ensure_regular_file(file);
+        }
+        dir = file;
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "missing file path",
+    ))
+}
+
+#[cfg(not(unix))]
+fn open_regular_file_beneath_root(root: &Path, relative_path: &Path) -> io::Result<File> {
+    use std::path::Component;
+
+    for component in relative_path.components() {
+        if !matches!(component, Component::Normal(_) | Component::CurDir) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid path component",
+            ));
+        }
+    }
+
+    let canonical_root = root.canonicalize()?;
+    let candidate = root.join(relative_path);
+    let canonical_candidate = candidate.canonicalize()?;
+    if !canonical_candidate.starts_with(&canonical_root) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "path escapes root",
+        ));
+    }
+    open_regular_file_no_final_symlink(&candidate)
 }
 
 #[cfg(windows)]
@@ -634,6 +659,28 @@ mod tests {
 
         assert!(!String::from_utf8_lossy(&response).contains("secret"));
         std::fs::remove_dir_all(root).expect("cleanup temp root");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_http_response_rejects_intermediate_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_temp_dir("nettrap-webroot-intermediate-symlink");
+        let outside = unique_temp_dir("nettrap-webroot-intermediate-outside");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&root).expect("create temp root");
+        std::fs::create_dir_all(&outside).expect("create outside dir");
+        std::fs::write(outside.join("secret.html"), b"<html>secret</html>")
+            .expect("write outside fixture");
+        symlink(&outside, root.join("dir")).expect("create intermediate symlink");
+
+        let response = WebrootServer::new(&root).build_http_response("/dir/secret.html");
+
+        assert!(!String::from_utf8_lossy(&response).contains("secret"));
+        std::fs::remove_dir_all(root).expect("cleanup temp root");
+        std::fs::remove_dir_all(outside).expect("cleanup outside dir");
     }
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {

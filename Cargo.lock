@@ -2409,6 +2409,7 @@ dependencies = [
  "base64",
  "bytes",
  "chrono",
+ "libc",
  "nettrap-core",
  "serde",
  "thiserror 2.0.18",

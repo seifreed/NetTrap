@@ -137,12 +137,12 @@ fn tcp_frame_mode(
         return TcpFrameMode::SmtpData;
     }
 
-    if let Some(mode) = listener_frame_mode(listener_name, ssh_first_packet) {
-        return mode;
-    }
-
     if has_tls_record_prefix(buffer) || is_tls_client_hello(buffer) {
         return TcpFrameMode::Tls;
+    }
+
+    if let Some(mode) = listener_frame_mode(listener_name, ssh_first_packet) {
+        return mode;
     }
 
     if let Some(mode) = port_frame_mode(destination_port, buffer, ssh_first_packet) {
@@ -167,53 +167,116 @@ fn listener_frame_mode(listener_name: &str, ssh_first_packet: bool) -> Option<Tc
     protocol_frame_mode(&listener, ssh_first_packet)
 }
 
+fn listener_name_matches_protocol(listener_name: &str, protocol: &str) -> bool {
+    let listener = listener_name.trim().to_ascii_lowercase();
+    listener == protocol
+        || listener
+            .strip_prefix(protocol)
+            .and_then(|suffix| suffix.as_bytes().first().copied())
+            .is_some_and(|byte| matches!(byte, b'-' | b'_'))
+}
+
+fn explicit_tcp_one_shot_protocol(listener_name: &str) -> Option<&'static str> {
+    ["daytime", "time", "chargen", "quotd"]
+        .into_iter()
+        .find(|protocol| listener_name_matches_protocol(listener_name, protocol))
+}
+
+fn build_tcp_one_shot_response(protocol: &str) -> Vec<u8> {
+    match protocol {
+        "daytime" => nettrap_proto_daytime::DaytimeHandler::new()
+            .handle()
+            .into_bytes(),
+        "time" => nettrap_proto_time::TimeHandler::new().handle(),
+        "chargen" => {
+            let mut handler = nettrap_proto_chargen::ChargenHandler::new();
+            handler.handle(6)
+        }
+        "quotd" => nettrap_proto_quotd::QuotdHandler::new()
+            .handle()
+            .into_bytes(),
+        _ => Vec::new(),
+    }
+}
+
+async fn handle_tcp_one_shot_connection(
+    ctx: &Arc<ListenerContext>,
+    stream: &mut tokio::net::TcpStream,
+    peer: &SocketAddr,
+    destination: &SessionDestination,
+    output_path: Option<&std::path::Path>,
+) -> crate::Result<bool> {
+    let Some(protocol) = explicit_tcp_one_shot_protocol(ctx.name()) else {
+        return Ok(false);
+    };
+
+    let response = build_tcp_one_shot_response(protocol);
+    crate::protocol_handlers::log_tcp_event(
+        ctx,
+        output_path,
+        peer,
+        destination,
+        &format!("{}_request", protocol),
+        "connect",
+        protocol,
+    )
+    .await;
+
+    if !response.is_empty() {
+        ctx.write_pcap_response_for_destination(&response, peer, destination);
+        ctx.apply_response_delay().await;
+        stream.write_all(&response).await?;
+        stream.flush().await?;
+    }
+    ctx.update_session_bytes(peer, "TCP", destination, 0, response.len() as u64);
+    Ok(true)
+}
+
 fn protocol_frame_mode(protocol: &str, ssh_first_packet: bool) -> Option<TcpFrameMode> {
-    if protocol == "dns" || protocol.starts_with("dns") {
+    if listener_name_matches_protocol(protocol, "dns") {
         return Some(TcpFrameMode::DnsTcp);
     }
 
-    if protocol == "tls" || protocol.starts_with("tls") {
+    if listener_name_matches_protocol(protocol, "tls") {
         return Some(TcpFrameMode::Tls);
     }
 
-    if protocol == "http" || protocol.starts_with("http") || protocol == "https" {
+    if listener_name_matches_protocol(protocol, "http")
+        || listener_name_matches_protocol(protocol, "https")
+    {
         return Some(TcpFrameMode::Http);
     }
 
-    if protocol == "upnp" || protocol.starts_with("upnp") {
+    if listener_name_matches_protocol(protocol, "upnp") {
         return Some(TcpFrameMode::Http);
     }
 
-    if matches!(
-        protocol,
-        "smtp" | "ftp" | "pop3" | "irc" | "telnet" | "finger" | "ident" | "syslogrecv"
-    ) || protocol.starts_with("smtp")
-        || protocol.starts_with("ftp")
-        || protocol.starts_with("pop3")
-        || protocol.starts_with("irc")
-        || protocol.starts_with("telnet")
-        || protocol.starts_with("finger")
-        || protocol.starts_with("ident")
-        || protocol.starts_with("syslogrecv")
+    if [
+        "smtp",
+        "ftp",
+        "pop3",
+        "irc",
+        "telnet",
+        "finger",
+        "ident",
+        "syslogrecv",
+    ]
+    .into_iter()
+    .any(|candidate| listener_name_matches_protocol(protocol, candidate))
     {
         return Some(TcpFrameMode::Line);
     }
 
-    if matches!(
-        protocol,
-        "daytime" | "time" | "chargen" | "quotd" | "dummy" | "raw" | "echo"
-    ) || protocol.starts_with("daytime")
-        || protocol.starts_with("time")
-        || protocol.starts_with("chargen")
-        || protocol.starts_with("quotd")
-        || protocol.starts_with("dummy")
-        || protocol.starts_with("raw")
-        || protocol.starts_with("echo")
+    if [
+        "daytime", "time", "chargen", "quotd", "dummy", "raw", "echo",
+    ]
+    .into_iter()
+    .any(|candidate| listener_name_matches_protocol(protocol, candidate))
     {
         return Some(TcpFrameMode::Immediate);
     }
 
-    if protocol == "ssh" || protocol.starts_with("ssh") {
+    if listener_name_matches_protocol(protocol, "ssh") {
         return Some(if ssh_first_packet {
             TcpFrameMode::SshBanner
         } else {
@@ -221,31 +284,31 @@ fn protocol_frame_mode(protocol: &str, ssh_first_packet: bool) -> Option<TcpFram
         });
     }
 
-    if protocol == "mysql" || protocol.starts_with("mysql") {
+    if listener_name_matches_protocol(protocol, "mysql") {
         return Some(TcpFrameMode::Mysql);
     }
-    if protocol == "postgres" || protocol.starts_with("postgres") {
+    if listener_name_matches_protocol(protocol, "postgres") {
         return Some(TcpFrameMode::Postgres);
     }
-    if protocol == "socks" || protocol.starts_with("socks") {
+    if listener_name_matches_protocol(protocol, "socks") {
         return Some(TcpFrameMode::Socks);
     }
-    if protocol == "smb" || protocol.starts_with("smb") {
+    if listener_name_matches_protocol(protocol, "smb") {
         return Some(TcpFrameMode::Smb);
     }
-    if protocol == "rdp" || protocol.starts_with("rdp") {
+    if listener_name_matches_protocol(protocol, "rdp") {
         return Some(TcpFrameMode::Rdp);
     }
-    if protocol == "ldap" || protocol.starts_with("ldap") {
+    if listener_name_matches_protocol(protocol, "ldap") {
         return Some(TcpFrameMode::Ldap);
     }
-    if protocol == "redis" || protocol.starts_with("redis") {
+    if listener_name_matches_protocol(protocol, "redis") {
         return Some(TcpFrameMode::Redis);
     }
-    if protocol == "memcached" || protocol.starts_with("memcached") {
+    if listener_name_matches_protocol(protocol, "memcached") {
         return Some(TcpFrameMode::Memcached);
     }
-    if protocol == "mqtt" || protocol.starts_with("mqtt") {
+    if listener_name_matches_protocol(protocol, "mqtt") {
         return Some(TcpFrameMode::Mqtt);
     }
 
@@ -1179,12 +1242,21 @@ pub async fn handle_tcp_connection(
     let mut ssh_first_packet = true;
     let mut ssh_banner_sent = false;
     let mut ftp_passive_state = FtpPassiveState::default();
+    let mut telnet_state = nettrap_proto_telnet::TelnetState::WaitingUsername;
+    let mut telnet_username = String::new();
     let mut connection_buf: Vec<u8> = Vec::new();
 
     // Apply banner delay BEFORE sending banner to frustrate scanners
     let name = ctx.name();
     if ctx.banner_delay_ms() > 0 {
         tokio::time::sleep(std::time::Duration::from_millis(ctx.banner_delay_ms())).await;
+    }
+
+    if !ctx.use_ssl()
+        && handle_tcp_one_shot_connection(&ctx, &mut stream, &peer, &destination, output_path)
+            .await?
+    {
+        return Ok(());
     }
 
     // Protocol-specific banners (only for non-TLS connections)
@@ -1195,8 +1267,8 @@ pub async fn handle_tcp_connection(
         {
             stream.write_all(&banner_bytes).await?;
             stream.flush().await?;
-            ssh_banner_sent = name == "ssh" || name.starts_with("ssh");
-        } else if name == "ftp" || name.starts_with("ftp") {
+            ssh_banner_sent = listener_name_matches_protocol(name, "ssh");
+        } else if listener_name_matches_protocol(name, "ftp") {
             stream.write_all(&ftp_handler.get_banner()).await?;
             stream.flush().await?;
         }
@@ -1376,6 +1448,8 @@ pub async fn handle_tcp_connection(
                                     &mut redis_authenticated,
                                     &mut ssh_first_packet,
                                     &mut ftp_passive_state,
+                                    &mut telnet_state,
+                                    &mut telnet_username,
                                     ssh_banner_sent,
                                     control_local_addr,
                                 )
@@ -1469,6 +1543,8 @@ async fn handle_tcp_protocol(
     redis_authenticated: &mut bool,
     ssh_first_packet: &mut bool,
     ftp_passive_state: &mut FtpPassiveState,
+    telnet_state: &mut nettrap_proto_telnet::TelnetState,
+    telnet_username: &mut String,
     ssh_banner_sent: bool,
     control_local_addr: Option<SocketAddr>,
 ) -> Vec<u8> {
@@ -1501,6 +1577,8 @@ async fn handle_tcp_protocol(
         redis_authenticated,
         ssh_first_packet,
         ftp_passive_state,
+        telnet_state,
+        telnet_username,
         ssh_banner_sent,
         control_local_addr,
     )
@@ -1538,6 +1616,8 @@ async fn handle_tcp_protocol(
             redis_authenticated,
             ssh_first_packet,
             ftp_passive_state,
+            telnet_state,
+            telnet_username,
             ssh_banner_sent,
             control_local_addr,
         )
@@ -1575,18 +1655,22 @@ async fn dispatch_named_tcp_protocol(
     redis_authenticated: &mut bool,
     ssh_first_packet: &mut bool,
     ftp_passive_state: &mut FtpPassiveState,
+    telnet_state: &mut nettrap_proto_telnet::TelnetState,
+    telnet_username: &mut String,
     ssh_banner_sent: bool,
     control_local_addr: Option<SocketAddr>,
 ) -> Option<Vec<u8>> {
-    if name == "dns" || name.starts_with("dns") {
+    if listener_name_matches_protocol(name, "dns") {
         Some(handle_dns_tcp(ctx, data, peer, destination, output_path).await)
-    } else if name == "http" || name.starts_with("http") {
+    } else if listener_name_matches_protocol(name, "http")
+        || listener_name_matches_protocol(name, "https")
+    {
         Some(if http_over_tls {
             handle_https(ctx, data, peer, destination, output_path, webroot_server).await
         } else {
             handle_http_plain(ctx, data, peer, destination, output_path, webroot_server).await
         })
-    } else if name == "smtp" || name.starts_with("smtp") {
+    } else if listener_name_matches_protocol(name, "smtp") {
         let cmd_str = std::str::from_utf8(data).unwrap_or("").trim();
         crate::protocol_handlers::log_smtp_event(ctx, output_path, peer, destination, cmd_str)
             .await;
@@ -1604,7 +1688,7 @@ async fn dispatch_named_tcp_protocol(
             )
             .await,
         )
-    } else if name == "ftp" || name.starts_with("ftp") {
+    } else if listener_name_matches_protocol(name, "ftp") {
         let command = std::str::from_utf8(data).unwrap_or("").trim();
         tracing::debug!("FTP command from {}: {}", peer, command);
         crate::protocol_handlers::log_ftp_event(ctx, output_path, peer, destination, command).await;
@@ -1619,7 +1703,7 @@ async fn dispatch_named_tcp_protocol(
             )
             .await,
         )
-    } else if name == "pop3" || name.starts_with("pop3") {
+    } else if listener_name_matches_protocol(name, "pop3") {
         let command = std::str::from_utf8(data).unwrap_or("").trim();
         tracing::debug!("POP3 command from {}: {}", peer, command);
         crate::protocol_handlers::log_pop3_event(ctx, output_path, peer, destination, command)
@@ -1628,7 +1712,7 @@ async fn dispatch_named_tcp_protocol(
             Ok(resp) => resp.to_bytes(),
             Err(_) => b"-ERR Server error\r\n".to_vec(),
         })
-    } else if name == "irc" || name.starts_with("irc") {
+    } else if listener_name_matches_protocol(name, "irc") {
         Some(
             handle_irc(
                 ctx,
@@ -1641,23 +1725,21 @@ async fn dispatch_named_tcp_protocol(
             )
             .await,
         )
-    } else if name == "telnet" || name.starts_with("telnet") {
-        crate::protocol_handlers::log_tcp_event(
-            ctx,
-            output_path,
-            peer,
-            destination,
-            "telnet_command",
-            std::str::from_utf8(data).unwrap_or(""),
-            "telnet",
-        )
-        .await;
+    } else if listener_name_matches_protocol(name, "telnet") {
         Some(
-            telnet_handler
-                .handle_command(std::str::from_utf8(data).unwrap_or(""))
-                .to_vec(),
+            handle_telnet(
+                ctx,
+                data,
+                peer,
+                destination,
+                output_path,
+                telnet_handler,
+                telnet_state,
+                telnet_username,
+            )
+            .await,
         )
-    } else if name == "finger" || name.starts_with("finger") {
+    } else if listener_name_matches_protocol(name, "finger") {
         let query = String::from_utf8_lossy(data);
         crate::protocol_handlers::log_tcp_event(
             ctx,
@@ -1674,7 +1756,7 @@ async fn dispatch_named_tcp_protocol(
                 .handle(&query)
                 .into_bytes(),
         )
-    } else if name == "ident" || name.starts_with("ident") {
+    } else if listener_name_matches_protocol(name, "ident") {
         let query = String::from_utf8_lossy(data);
         crate::protocol_handlers::log_tcp_event(
             ctx,
@@ -1691,7 +1773,7 @@ async fn dispatch_named_tcp_protocol(
                 .handle(&query)
                 .into_bytes(),
         )
-    } else if name == "daytime" || name.starts_with("daytime") {
+    } else if listener_name_matches_protocol(name, "daytime") {
         crate::protocol_handlers::log_tcp_event(
             ctx,
             output_path,
@@ -1707,7 +1789,7 @@ async fn dispatch_named_tcp_protocol(
                 .handle()
                 .into_bytes(),
         )
-    } else if name == "time" || name.starts_with("time") {
+    } else if listener_name_matches_protocol(name, "time") {
         crate::protocol_handlers::log_tcp_event(
             ctx,
             output_path,
@@ -1719,7 +1801,7 @@ async fn dispatch_named_tcp_protocol(
         )
         .await;
         Some(nettrap_proto_time::TimeHandler::new().handle())
-    } else if name == "chargen" || name.starts_with("chargen") {
+    } else if listener_name_matches_protocol(name, "chargen") {
         crate::protocol_handlers::log_tcp_event(
             ctx,
             output_path,
@@ -1732,7 +1814,7 @@ async fn dispatch_named_tcp_protocol(
         .await;
         let mut handler = nettrap_proto_chargen::ChargenHandler::new();
         Some(handler.handle(6))
-    } else if name == "quotd" || name.starts_with("quotd") {
+    } else if listener_name_matches_protocol(name, "quotd") {
         crate::protocol_handlers::log_tcp_event(
             ctx,
             output_path,
@@ -1748,7 +1830,7 @@ async fn dispatch_named_tcp_protocol(
                 .handle()
                 .into_bytes(),
         )
-    } else if name == "syslogrecv" || name.starts_with("syslogrecv") {
+    } else if listener_name_matches_protocol(name, "syslogrecv") {
         let parsed = nettrap_proto_syslogrecv::SyslogRecvHandler::new().handle(data);
         let detail = parsed.as_ref().map_or_else(
             || format!("{} bytes, invalid", data.len()),
@@ -1772,7 +1854,7 @@ async fn dispatch_named_tcp_protocol(
         );
         ctx.runtime.nbi_collector.record(&nbi).await;
         Some(Vec::new())
-    } else if name == "dummy" || name.starts_with("dummy") {
+    } else if listener_name_matches_protocol(name, "dummy") {
         crate::protocol_handlers::log_tcp_event(
             ctx,
             output_path,
@@ -1784,7 +1866,7 @@ async fn dispatch_named_tcp_protocol(
         )
         .await;
         Some(nettrap_proto_dummy::DummyHandler::new().handle(data))
-    } else if name == "ssh" || name.starts_with("ssh") {
+    } else if listener_name_matches_protocol(name, "ssh") {
         Some(
             handle_ssh(
                 ctx,
@@ -1797,7 +1879,7 @@ async fn dispatch_named_tcp_protocol(
             )
             .await,
         )
-    } else if name == "smb" || name.starts_with("smb") {
+    } else if listener_name_matches_protocol(name, "smb") {
         let nbi = crate::nbi::raw_nbi(
             ctx.name(),
             &peer.ip().to_string(),
@@ -1808,7 +1890,7 @@ async fn dispatch_named_tcp_protocol(
         );
         ctx.runtime.nbi_collector.record(&nbi).await;
         Some(smb_handler.handle(data))
-    } else if name == "rdp" || name.starts_with("rdp") {
+    } else if listener_name_matches_protocol(name, "rdp") {
         crate::protocol_handlers::log_tcp_event(
             ctx,
             output_path,
@@ -1820,7 +1902,7 @@ async fn dispatch_named_tcp_protocol(
         )
         .await;
         Some(rdp_handler.handle(data))
-    } else if name == "redis" || name.starts_with("redis") {
+    } else if listener_name_matches_protocol(name, "redis") {
         crate::protocol_handlers::log_tcp_event(
             ctx,
             output_path,
@@ -1832,7 +1914,7 @@ async fn dispatch_named_tcp_protocol(
         )
         .await;
         Some(redis_handler.handle_command_with_auth_state(data, redis_authenticated))
-    } else if name == "mysql" || name.starts_with("mysql") {
+    } else if listener_name_matches_protocol(name, "mysql") {
         crate::protocol_handlers::log_tcp_event(
             ctx,
             output_path,
@@ -1844,7 +1926,7 @@ async fn dispatch_named_tcp_protocol(
         )
         .await;
         Some(mysql_handler.handle(data))
-    } else if name == "ldap" || name.starts_with("ldap") {
+    } else if listener_name_matches_protocol(name, "ldap") {
         crate::protocol_handlers::log_tcp_event(
             ctx,
             output_path,
@@ -1856,7 +1938,7 @@ async fn dispatch_named_tcp_protocol(
         )
         .await;
         Some(ldap_handler.handle(data))
-    } else if name == "socks" || name.starts_with("socks") {
+    } else if listener_name_matches_protocol(name, "socks") {
         crate::protocol_handlers::log_tcp_event(
             ctx,
             output_path,
@@ -1868,7 +1950,7 @@ async fn dispatch_named_tcp_protocol(
         )
         .await;
         Some(socks_handler.handle(data))
-    } else if name == "memcached" || name.starts_with("memcached") {
+    } else if listener_name_matches_protocol(name, "memcached") {
         crate::protocol_handlers::log_tcp_event(
             ctx,
             output_path,
@@ -1880,7 +1962,7 @@ async fn dispatch_named_tcp_protocol(
         )
         .await;
         Some(memcached_handler.handle(data))
-    } else if name == "mqtt" || name.starts_with("mqtt") {
+    } else if listener_name_matches_protocol(name, "mqtt") {
         crate::protocol_handlers::log_tcp_event(
             ctx,
             output_path,
@@ -1901,11 +1983,11 @@ async fn dispatch_named_tcp_protocol(
         );
         ctx.runtime.nbi_collector.record(&nbi).await;
         Some(nettrap_proto_mqtt::MqttHandler::new().handle_packet(data))
-    } else if name == "tls" || name.starts_with("tls") {
+    } else if listener_name_matches_protocol(name, "tls") {
         Some(handle_tls_plain(ctx, data, peer, destination, output_path).await)
-    } else if name == "upnp" || name.starts_with("upnp") {
+    } else if listener_name_matches_protocol(name, "upnp") {
         Some(handle_upnp_tcp(ctx, data, peer, destination, output_path).await)
-    } else if name == "nkn" || name.starts_with("nkn") {
+    } else if listener_name_matches_protocol(name, "nkn") {
         let handler = nettrap_proto_nkn::NknHandler::new();
         crate::protocol_handlers::log_tcp_event(
             ctx,
@@ -1918,7 +2000,7 @@ async fn dispatch_named_tcp_protocol(
         )
         .await;
         Some(handler.handle(data))
-    } else if name == "postgres" || name.starts_with("postgres") {
+    } else if listener_name_matches_protocol(name, "postgres") {
         crate::protocol_handlers::log_tcp_event(
             ctx,
             output_path,
@@ -1930,7 +2012,8 @@ async fn dispatch_named_tcp_protocol(
         )
         .await;
         Some(postgres_handler.handle(data))
-    } else if name == "raw" || name.starts_with("raw") || name == "echo" || name.starts_with("echo")
+    } else if listener_name_matches_protocol(name, "raw")
+        || listener_name_matches_protocol(name, "echo")
     {
         let raw_handler = if let Some(custom) = ctx.custom_response() {
             nettrap_proto_raw::RawHandler::from_custom_response(custom)
@@ -1958,6 +2041,72 @@ async fn dispatch_named_tcp_protocol(
         Some(raw_resp.to_bytes())
     } else {
         None
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_telnet(
+    ctx: &Arc<ListenerContext>,
+    data: &[u8],
+    peer: &std::net::SocketAddr,
+    destination: &SessionDestination,
+    output_path: Option<&std::path::Path>,
+    telnet_handler: &nettrap_proto_telnet::TelnetHandler,
+    telnet_state: &mut nettrap_proto_telnet::TelnetState,
+    telnet_username: &mut String,
+) -> Vec<u8> {
+    let cleaned = nettrap_proto_telnet::strip_telnet_commands(data);
+    let line = String::from_utf8_lossy(&cleaned);
+    let value = line.trim_matches(['\r', '\n']);
+
+    match telnet_state.clone() {
+        nettrap_proto_telnet::TelnetState::WaitingUsername => {
+            *telnet_username = value.to_string();
+            crate::protocol_handlers::log_tcp_event(
+                ctx,
+                output_path,
+                peer,
+                destination,
+                "telnet_username",
+                value,
+                "telnet",
+            )
+            .await;
+            *telnet_state = nettrap_proto_telnet::TelnetState::WaitingPassword;
+            telnet_handler.get_password_prompt()
+        }
+        nettrap_proto_telnet::TelnetState::WaitingPassword => {
+            crate::protocol_handlers::log_tcp_event(
+                ctx,
+                output_path,
+                peer,
+                destination,
+                "telnet_credentials",
+                &format!("username={} password={}", telnet_username, value),
+                "telnet",
+            )
+            .await;
+            *telnet_state = nettrap_proto_telnet::TelnetState::Shell;
+            telnet_handler.get_login_success()
+        }
+        nettrap_proto_telnet::TelnetState::Shell => {
+            crate::protocol_handlers::log_tcp_event(
+                ctx,
+                output_path,
+                peer,
+                destination,
+                "telnet_command",
+                value,
+                "telnet",
+            )
+            .await;
+            let response = telnet_handler.handle_command(value);
+            if matches!(value, "exit" | "quit" | "logout") {
+                *telnet_state = nettrap_proto_telnet::TelnetState::Disconnected;
+            }
+            response
+        }
+        nettrap_proto_telnet::TelnetState::Disconnected => Vec::new(),
     }
 }
 
@@ -2042,15 +2191,14 @@ fn should_handle_ftp_ordered(
     data: &[u8],
     destination: &SessionDestination,
 ) -> bool {
-    let listener = name.to_ascii_lowercase();
-    if listener == "ftp" || listener.starts_with("ftp") {
+    if listener_name_matches_protocol(name, "ftp") {
         return true;
     }
 
     let Some((detected_name, score)) = ctx.runtime.router.route_tcp(data, destination.port) else {
         return false;
     };
-    if !(detected_name == "ftp" || detected_name.starts_with("ftp")) {
+    if !listener_name_matches_protocol(&detected_name, "ftp") {
         return false;
     }
 
@@ -2522,6 +2670,8 @@ async fn handle_detected_protocol(
     redis_authenticated: &mut bool,
     ssh_first_packet: &mut bool,
     ftp_passive_state: &mut FtpPassiveState,
+    telnet_state: &mut nettrap_proto_telnet::TelnetState,
+    telnet_username: &mut String,
     ssh_banner_sent: bool,
     control_local_addr: Option<SocketAddr>,
 ) -> Vec<u8> {
@@ -2568,6 +2718,8 @@ async fn handle_detected_protocol(
                 redis_authenticated,
                 ssh_first_packet,
                 ftp_passive_state,
+                telnet_state,
+                telnet_username,
                 ssh_banner_sent,
                 control_local_addr,
             )
@@ -2633,6 +2785,8 @@ pub async fn handle_wrapped_connection(
     let mut redis_authenticated = false;
     let mut ssh_first_packet = true;
     let mut ftp_passive_state = FtpPassiveState::default();
+    let mut telnet_state = nettrap_proto_telnet::TelnetState::WaitingUsername;
+    let mut telnet_username = String::new();
     let mut connection_buf: Vec<u8> = Vec::new();
 
     // Apply banner delay before sending TLS banner
@@ -2641,15 +2795,15 @@ pub async fn handle_wrapped_connection(
     }
 
     // Send TLS banner
-    if name == "smtp" || name.starts_with("smtp") {
+    if listener_name_matches_protocol(name, "smtp") {
         stream
             .write_all(smtp_handler.get_welcome_banner().as_bytes())
             .await?;
         stream.flush().await?;
-    } else if name == "ftp" || name.starts_with("ftp") {
+    } else if listener_name_matches_protocol(name, "ftp") {
         stream.write_all(&ftp_handler.get_banner()).await?;
         stream.flush().await?;
-    } else if name == "pop3" || name.starts_with("pop3") {
+    } else if listener_name_matches_protocol(name, "pop3") {
         stream
             .write_all(pop3_handler.get_welcome_banner().as_bytes())
             .await?;
@@ -2752,6 +2906,8 @@ pub async fn handle_wrapped_connection(
                                     &mut redis_authenticated,
                                     &mut ssh_first_packet,
                                     &mut ftp_passive_state,
+                                    &mut telnet_state,
+                                    &mut telnet_username,
                                     false,
                                     control_local_addr,
                                 )
@@ -3354,6 +3510,10 @@ mod tests {
             tcp_frame_mode("tcp", &tls_client_hello, 8883, &router, false, false),
             TcpFrameMode::Tls
         );
+        assert_eq!(
+            tcp_frame_mode("mqtt", &tls_client_hello, 8883, &router, false, false),
+            TcpFrameMode::Tls
+        );
     }
 
     #[test]
@@ -3613,6 +3773,31 @@ mod tests {
             tcp_frame_mode("chargen", b"", 19, &router, false, false),
             TcpFrameMode::Immediate
         );
+    }
+
+    #[test]
+    fn tcp_one_shot_protocol_names_require_exact_or_separator_match() {
+        assert_eq!(
+            explicit_tcp_one_shot_protocol("daytime-custom"),
+            Some("daytime")
+        );
+        assert_eq!(explicit_tcp_one_shot_protocol("time_37"), Some("time"));
+        assert_eq!(explicit_tcp_one_shot_protocol("timeout"), None);
+        assert!(!build_tcp_one_shot_response("quotd").is_empty());
+    }
+
+    #[test]
+    fn protocol_name_matching_rejects_bare_prefixes() {
+        assert!(listener_name_matches_protocol("smtp_backup", "smtp"));
+        assert!(listener_name_matches_protocol("raw-custom", "raw"));
+
+        assert!(!listener_name_matches_protocol("smtpbackup", "smtp"));
+        assert!(!listener_name_matches_protocol("rawhide", "raw"));
+        assert!(!listener_name_matches_protocol("timeout", "time"));
+
+        assert_eq!(protocol_frame_mode("smtpbackup", false), None);
+        assert_eq!(protocol_frame_mode("rawhide", false), None);
+        assert_eq!(protocol_frame_mode("timeout", false), None);
     }
 
     #[test]

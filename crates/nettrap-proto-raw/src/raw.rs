@@ -1,4 +1,5 @@
-use std::io::Read;
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read};
 
 /// Raw protocol handler supporting multiple response modes
 pub struct RawHandler {
@@ -186,11 +187,14 @@ impl Default for RawHandler {
 }
 
 fn read_limited_file(path: &std::path::Path, max_bytes: u64) -> std::io::Result<LimitedFileRead> {
-    let file = std::fs::File::open(path)?;
+    let file = match open_regular_file_no_final_symlink(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::InvalidInput => {
+            return Ok(LimitedFileRead::NotFile);
+        }
+        Err(err) => return Err(err),
+    };
     let metadata = file.metadata()?;
-    if !metadata.is_file() {
-        return Ok(LimitedFileRead::NotFile);
-    }
     if metadata.len() > max_bytes {
         return Ok(LimitedFileRead::TooLarge);
     }
@@ -203,6 +207,45 @@ fn read_limited_file(path: &std::path::Path, max_bytes: u64) -> std::io::Result<
     }
 
     Ok(LimitedFileRead::Content(content))
+}
+
+#[cfg(unix)]
+fn open_regular_file_no_final_symlink(path: &std::path::Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    ensure_regular_file(file)
+}
+
+#[cfg(windows)]
+fn open_regular_file_no_final_symlink(path: &std::path::Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    ensure_regular_file(file)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_regular_file_no_final_symlink(path: &std::path::Path) -> io::Result<File> {
+    ensure_regular_file(File::open(path)?)
+}
+
+fn ensure_regular_file(file: File) -> io::Result<File> {
+    if file.metadata()?.is_file() {
+        Ok(file)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -237,6 +280,22 @@ mod tests {
         let response = RawHandler::new().with_raw_file(&path).handle(b"ignored");
 
         assert_eq!(response.to_bytes().len() as u64, MAX_RAW_FILE_SIZE);
+        std::fs::remove_dir_all(root).expect("cleanup temp root");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn raw_file_response_rejects_final_symlink() {
+        let root = unique_temp_dir("nettrap-raw-symlink");
+        std::fs::create_dir_all(&root).expect("create temp root");
+        let target = root.join("target.bin");
+        let link = root.join("linked.bin");
+        std::fs::write(&target, b"secret").expect("write target");
+        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+
+        let response = RawHandler::new().with_raw_file(&link).handle(b"ignored");
+
+        assert_eq!(response.to_bytes(), b"ERROR\n");
         std::fs::remove_dir_all(root).expect("cleanup temp root");
     }
 

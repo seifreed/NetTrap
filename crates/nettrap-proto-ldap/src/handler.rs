@@ -30,7 +30,8 @@ impl LdapHandler {
             return Vec::new();
         }
 
-        let op_tag = data[op_offset] & 0x1F; // Application tag number
+        let op_byte = data[op_offset];
+        let op_tag = op_byte & 0x1F; // Application tag number
         let op_class = (data[op_offset] >> 6) & 0x03; // Class (should be Application = 1)
 
         tracing::info!(
@@ -40,8 +41,8 @@ impl LdapHandler {
             op_class
         );
 
-        match op_tag {
-            0 => {
+        match op_byte {
+            0x60 => {
                 // BindRequest (tag 0, Application class)
                 tracing::warn!("LDAP BIND request");
                 // Extract bind DN if possible
@@ -50,18 +51,18 @@ impl LdapHandler {
                 }
                 self.build_bind_response(msg_id)
             }
-            3 => {
+            0x63 => {
                 // SearchRequest
                 tracing::warn!("LDAP SEARCH request - potential recon/Log4Shell");
                 // Log the search base and filter
                 self.build_search_result_done(msg_id)
             }
-            2 => {
+            0x42 => {
                 // UnbindRequest
                 Vec::new() // No response needed
             }
             _ => {
-                tracing::info!("LDAP operation tag={}", op_tag);
+                tracing::info!("LDAP unsupported operation byte=0x{:02x}", op_byte);
                 Vec::new()
             }
         }
@@ -258,5 +259,38 @@ impl LdapHandler {
 impl Default for LdapHandler {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bind_request_application_tag_gets_response() {
+        let request = [0x30, 0x05, 0x02, 0x01, 0x01, 0x60, 0x00];
+
+        let response = LdapHandler::new().handle(&request);
+
+        assert!(!response.is_empty());
+        assert_eq!(response[0], 0x30);
+    }
+
+    #[test]
+    fn universal_tag_with_bind_low_bits_is_rejected() {
+        let request = [0x30, 0x05, 0x02, 0x01, 0x01, 0x20, 0x00];
+
+        let response = LdapHandler::new().handle(&request);
+
+        assert!(response.is_empty());
+    }
+
+    #[test]
+    fn context_tag_with_search_low_bits_is_rejected() {
+        let request = [0x30, 0x05, 0x02, 0x01, 0x01, 0xa3, 0x00];
+
+        let response = LdapHandler::new().handle(&request);
+
+        assert!(response.is_empty());
     }
 }

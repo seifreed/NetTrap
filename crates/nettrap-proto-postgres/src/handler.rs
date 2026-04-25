@@ -36,7 +36,15 @@ impl PostgresHandler {
                     return Vec::new();
                 }
                 let msg_len = u32::from_be_bytes([data[1], data[2], data[3], data[4]]) as usize;
-                let query_end = (1 + msg_len).min(data.len());
+                if msg_len < 4 || data.len() < 1 + msg_len {
+                    tracing::debug!(
+                        "POSTGRES malformed Query length: declared={}, available={}",
+                        msg_len,
+                        data.len().saturating_sub(1)
+                    );
+                    return Vec::new();
+                }
+                let query_end = 1 + msg_len;
                 let raw_query = String::from_utf8_lossy(&data[5..query_end]);
                 let query = raw_query.trim_end_matches('\0');
                 tracing::warn!("POSTGRES QUERY (v{}): {}", self.version, query);
@@ -115,5 +123,19 @@ mod tests {
         request.extend_from_slice(&POSTGRES_GSSENC_REQUEST.to_be_bytes());
 
         assert_eq!(PostgresHandler::new().handle(&request), b"N");
+    }
+
+    #[test]
+    fn malformed_query_length_does_not_panic() {
+        let response = PostgresHandler::new().handle(&[b'Q', 0, 0, 0, 1]);
+
+        assert!(response.is_empty());
+    }
+
+    #[test]
+    fn truncated_query_length_is_rejected() {
+        let response = PostgresHandler::new().handle(&[b'Q', 0, 0, 0, 8, b'S', b'E']);
+
+        assert!(response.is_empty());
     }
 }

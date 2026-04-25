@@ -603,39 +603,25 @@ pub async fn run_udp_listener(
 
                 tokio::spawn(async move {
                     let _permit = permit; // held until task completes
-                    if ctx_clone.name() == "tftp" || ctx_clone.name().starts_with("tftp") {
-                        let packet = UdpPacket {
-                            output_path: out_clone.as_deref(),
-                            query_data: &query_data,
-                            src: &src,
-                            destination: &destination,
-                            len,
-                        };
-                        handle_tftp(
+                    let packet = UdpPacket {
+                        output_path: out_clone.as_deref(),
+                        query_data: &query_data,
+                        src: &src,
+                        destination: &destination,
+                        len,
+                    };
+                    if let Some(protocol) = explicit_udp_protocol_name(ctx_clone.name()) {
+                        handle_explicit_udp_protocol(
                             &ctx_clone,
                             &socket_clone,
+                            &dns_handler_clone,
                             &tftp_handler_clone,
                             &tftp_transfers_clone,
                             packet,
+                            protocol,
                         )
                         .await;
-                    } else if ctx_clone.name() == "dns" || ctx_clone.name().starts_with("dns") {
-                        let packet = UdpPacket {
-                            output_path: out_clone.as_deref(),
-                            query_data: &query_data,
-                            src: &src,
-                            destination: &destination,
-                            len,
-                        };
-                        handle_dns(&ctx_clone, &socket_clone, &dns_handler_clone, packet).await;
                     } else {
-                        let packet = UdpPacket {
-                            output_path: out_clone.as_deref(),
-                            query_data: &query_data,
-                            src: &src,
-                            destination: &destination,
-                            len,
-                        };
                         handle_detected_udp(
                             &ctx_clone,
                             &socket_clone,
@@ -1045,6 +1031,232 @@ struct UdpPacket<'a> {
     src: &'a std::net::SocketAddr,
     destination: &'a SessionDestination,
     len: usize,
+}
+
+fn udp_listener_name_matches_protocol(listener_name: &str, protocol: &str) -> bool {
+    let listener = listener_name.trim().to_ascii_lowercase();
+    listener == protocol
+        || listener
+            .strip_prefix(protocol)
+            .and_then(|suffix| suffix.as_bytes().first().copied())
+            .is_some_and(|byte| matches!(byte, b'-' | b'_'))
+}
+
+fn explicit_udp_protocol_name(listener_name: &str) -> Option<&'static str> {
+    [
+        "dns",
+        "tftp",
+        "snmp",
+        "sip",
+        "upnp",
+        "ntp",
+        "coap",
+        "quic",
+        "daytime",
+        "time",
+        "chargen",
+        "quotd",
+        "syslogrecv",
+        "raw",
+    ]
+    .into_iter()
+    .find(|protocol| udp_listener_name_matches_protocol(listener_name, protocol))
+}
+
+async fn handle_explicit_udp_protocol(
+    ctx: &ListenerContext,
+    socket: &UdpSocket,
+    dns_handler: &nettrap_proto_dns::handler::DnsHandler,
+    tftp_handler: &nettrap_proto_tftp::TftpHandler,
+    tftp_transfers: &TftpTransfers,
+    packet: UdpPacket<'_>,
+    protocol: &str,
+) {
+    match protocol {
+        "dns" => handle_dns(ctx, socket, dns_handler, packet).await,
+        "tftp" => handle_tftp(ctx, socket, tftp_handler, tftp_transfers, packet).await,
+        "snmp" => {
+            let response = nettrap_proto_snmp::SnmpHandler::new().handle(packet.query_data);
+            crate::protocol_handlers::handle_udp_generic(
+                ctx,
+                socket,
+                crate::protocol_handlers::UdpGenericResponse {
+                    response: &response,
+                    src: *packet.src,
+                    destination: packet.destination,
+                    len: packet.len,
+                    output_path: packet.output_path,
+                    protocol_name: "snmp",
+                },
+            )
+            .await;
+        }
+        "sip" => {
+            let response = nettrap_proto_sip::SipHandler::new().handle(packet.query_data);
+            crate::protocol_handlers::handle_udp_generic(
+                ctx,
+                socket,
+                crate::protocol_handlers::UdpGenericResponse {
+                    response: &response,
+                    src: *packet.src,
+                    destination: packet.destination,
+                    len: packet.len,
+                    output_path: packet.output_path,
+                    protocol_name: "sip",
+                },
+            )
+            .await;
+        }
+        "upnp" => {
+            let response = nettrap_proto_upnp::UpnpHandler::new()
+                .with_listen_ip(packet.destination.ip.clone())
+                .handle_ssdp(packet.query_data);
+            crate::protocol_handlers::handle_udp_generic(
+                ctx,
+                socket,
+                crate::protocol_handlers::UdpGenericResponse {
+                    response: &response,
+                    src: *packet.src,
+                    destination: packet.destination,
+                    len: packet.len,
+                    output_path: packet.output_path,
+                    protocol_name: "upnp",
+                },
+            )
+            .await;
+        }
+        "ntp" => {
+            let response = nettrap_proto_ntp::NtpHandler::new().handle(packet.query_data);
+            crate::protocol_handlers::handle_udp_generic(
+                ctx,
+                socket,
+                crate::protocol_handlers::UdpGenericResponse {
+                    response: &response,
+                    src: *packet.src,
+                    destination: packet.destination,
+                    len: packet.len,
+                    output_path: packet.output_path,
+                    protocol_name: "ntp",
+                },
+            )
+            .await;
+        }
+        "coap" => {
+            let response = nettrap_proto_coap::CoapHandler::new().handle(packet.query_data);
+            crate::protocol_handlers::handle_udp_generic(
+                ctx,
+                socket,
+                crate::protocol_handlers::UdpGenericResponse {
+                    response: &response,
+                    src: *packet.src,
+                    destination: packet.destination,
+                    len: packet.len,
+                    output_path: packet.output_path,
+                    protocol_name: "coap",
+                },
+            )
+            .await;
+        }
+        "quic" => handle_quic_udp(ctx, packet).await,
+        "daytime" => {
+            let response = nettrap_proto_daytime::DaytimeHandler::new().handle();
+            crate::protocol_handlers::handle_udp_generic(
+                ctx,
+                socket,
+                crate::protocol_handlers::UdpGenericResponse {
+                    response: response.as_bytes(),
+                    src: *packet.src,
+                    destination: packet.destination,
+                    len: packet.len,
+                    output_path: packet.output_path,
+                    protocol_name: "daytime",
+                },
+            )
+            .await;
+        }
+        "time" => {
+            let response = nettrap_proto_time::TimeHandler::new().handle();
+            crate::protocol_handlers::handle_udp_generic(
+                ctx,
+                socket,
+                crate::protocol_handlers::UdpGenericResponse {
+                    response: &response,
+                    src: *packet.src,
+                    destination: packet.destination,
+                    len: packet.len,
+                    output_path: packet.output_path,
+                    protocol_name: "time",
+                },
+            )
+            .await;
+        }
+        "chargen" => {
+            let mut handler = nettrap_proto_chargen::ChargenHandler::new();
+            let response = handler.handle_udp();
+            crate::protocol_handlers::handle_udp_generic(
+                ctx,
+                socket,
+                crate::protocol_handlers::UdpGenericResponse {
+                    response: &response,
+                    src: *packet.src,
+                    destination: packet.destination,
+                    len: packet.len,
+                    output_path: packet.output_path,
+                    protocol_name: "chargen",
+                },
+            )
+            .await;
+        }
+        "quotd" => {
+            let response = nettrap_proto_quotd::QuotdHandler::new().handle();
+            crate::protocol_handlers::handle_udp_generic(
+                ctx,
+                socket,
+                crate::protocol_handlers::UdpGenericResponse {
+                    response: response.as_bytes(),
+                    src: *packet.src,
+                    destination: packet.destination,
+                    len: packet.len,
+                    output_path: packet.output_path,
+                    protocol_name: "quotd",
+                },
+            )
+            .await;
+        }
+        "syslogrecv" => handle_syslogrecv_udp(ctx, packet).await,
+        "raw" => {
+            let raw_handler = if let Some(custom) = ctx.custom_response() {
+                nettrap_proto_raw::RawHandler::from_custom_response(custom)
+            } else {
+                nettrap_proto_raw::RawHandler::new()
+            };
+            let response = raw_handler.handle(packet.query_data).to_bytes();
+            crate::protocol_handlers::handle_udp_generic(
+                ctx,
+                socket,
+                crate::protocol_handlers::UdpGenericResponse {
+                    response: &response,
+                    src: *packet.src,
+                    destination: packet.destination,
+                    len: packet.len,
+                    output_path: packet.output_path,
+                    protocol_name: "raw",
+                },
+            )
+            .await;
+        }
+        _ => {
+            handle_detected_udp(
+                ctx,
+                socket,
+                dns_handler,
+                tftp_handler,
+                tftp_transfers,
+                packet,
+            )
+            .await
+        }
+    }
 }
 
 async fn handle_detected_udp(
@@ -1627,8 +1839,17 @@ mod tests {
         router: Arc<nettrap_proxy::ProtocolRouter>,
         custom_response: Option<String>,
     ) -> ListenerContext {
+        udp_test_context_named("raw", listener_port, router, custom_response)
+    }
+
+    fn udp_test_context_named(
+        name: &str,
+        listener_port: u16,
+        router: Arc<nettrap_proxy::ProtocolRouter>,
+        custom_response: Option<String>,
+    ) -> ListenerContext {
         ListenerContext::builder()
-            .name("raw")
+            .name(name)
             .port(listener_port)
             .custom_response(custom_response)
             .build(
@@ -1645,6 +1866,14 @@ mod tests {
                     flow_manager: Arc::new(nettrap_flow::FlowManager::default()),
                 }),
             )
+    }
+
+    #[test]
+    fn explicit_udp_protocol_names_require_exact_or_separator_match() {
+        assert_eq!(explicit_udp_protocol_name("daytime-alt"), Some("daytime"));
+        assert_eq!(explicit_udp_protocol_name("time_37"), Some("time"));
+        assert_eq!(explicit_udp_protocol_name("timeout"), None);
+        assert_eq!(explicit_udp_protocol_name("raw"), Some("raw"));
     }
 
     #[tokio::test]
@@ -1732,6 +1961,52 @@ mod tests {
         )
         .await;
         assert!(result.is_err(), "silent raw response should not send data");
+    }
+
+    #[tokio::test]
+    async fn explicit_udp_daytime_responds_on_custom_port_without_router_taste() {
+        let bind_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let socket = UdpSocket::bind(SocketAddr::new(bind_ip, 0))
+            .await
+            .expect("bind UDP listener socket");
+        let listener_port = socket.local_addr().expect("listener addr").port();
+        let receiver = UdpSocket::bind(SocketAddr::new(bind_ip, 0))
+            .await
+            .expect("bind UDP receiver");
+        let src = receiver.local_addr().expect("receiver addr");
+        let router = Arc::new(nettrap_proxy::ProtocolRouter::new());
+        let ctx = udp_test_context_named("daytime-custom", listener_port, router, None);
+        let destination = SessionDestination::new(bind_ip.to_string(), listener_port);
+        let transfers = Arc::new(Mutex::new(HashMap::new()));
+        let protocol = explicit_udp_protocol_name(ctx.name()).expect("explicit UDP protocol");
+
+        handle_explicit_udp_protocol(
+            &ctx,
+            &socket,
+            &nettrap_proto_dns::handler::DnsHandler::new(),
+            &nettrap_proto_tftp::TftpHandler::new(),
+            &transfers,
+            UdpPacket {
+                output_path: None,
+                query_data: b"",
+                src: &src,
+                destination: &destination,
+                len: 0,
+            },
+            protocol,
+        )
+        .await;
+
+        let mut buf = [0u8; 128];
+        let (len, peer) = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            receiver.recv_from(&mut buf),
+        )
+        .await
+        .expect("daytime response timed out")
+        .expect("receive daytime response");
+        assert!(len > 0);
+        assert_eq!(peer, socket.local_addr().expect("listener addr"));
     }
 
     #[cfg(unix)]

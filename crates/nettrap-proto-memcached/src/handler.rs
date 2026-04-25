@@ -8,29 +8,34 @@ impl MemcachedHandler {
     pub fn handle(&self, data: &[u8]) -> Vec<u8> {
         let text = String::from_utf8_lossy(data);
         let cmd = text.trim();
+        let verb = cmd
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let has_args = cmd.split_whitespace().nth(1).is_some();
 
-        if cmd.starts_with("stats") {
+        if verb == "stats" {
             tracing::info!("MEMCACHED stats request");
             let stats = "STAT pid 1\r\nSTAT uptime 86400\r\nSTAT time 1704067200\r\nSTAT version 1.6.22\r\nSTAT curr_items 0\r\nSTAT total_items 0\r\nSTAT bytes 0\r\nSTAT curr_connections 1\r\nSTAT total_connections 1\r\nEND\r\n";
             stats.as_bytes().to_vec()
-        } else if cmd.starts_with("get ") {
+        } else if verb == "get" && has_args {
             tracing::info!("MEMCACHED get: {}", cmd);
             b"END\r\n".to_vec()
-        } else if cmd.starts_with("set ") || cmd.starts_with("add ") || cmd.starts_with("replace ")
-        {
+        } else if matches!(verb.as_str(), "set" | "add" | "replace") && has_args {
             tracing::warn!(
                 "MEMCACHED write attempt: {}",
                 cmd.lines().next().unwrap_or(cmd)
             );
             b"STORED\r\n".to_vec()
-        } else if cmd.starts_with("delete ") {
+        } else if verb == "delete" && has_args {
             b"DELETED\r\n".to_vec()
-        } else if cmd.starts_with("flush_all") {
+        } else if verb == "flush_all" {
             tracing::warn!("MEMCACHED flush_all attempt");
             b"OK\r\n".to_vec()
-        } else if cmd.starts_with("version") {
+        } else if verb == "version" {
             b"VERSION 1.6.22\r\n".to_vec()
-        } else if cmd.starts_with("quit") {
+        } else if verb == "quit" {
             Vec::new()
         } else {
             // Check for binary protocol (0x80 = request magic)
@@ -80,5 +85,32 @@ impl MemcachedHandler {
 impl Default for MemcachedHandler {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prefixed_text_verbs_are_not_accepted() {
+        let handler = MemcachedHandler::new();
+
+        assert_eq!(handler.handle(b"statsfoo\r\n"), b"ERROR\r\n");
+        assert_eq!(handler.handle(b"versionx\r\n"), b"ERROR\r\n");
+        assert_eq!(handler.handle(b"flush_all_now\r\n"), b"ERROR\r\n");
+        assert_eq!(handler.handle(b"quitnow\r\n"), b"ERROR\r\n");
+        assert_eq!(handler.handle(b"get\r\n"), b"ERROR\r\n");
+        assert_eq!(handler.handle(b"set\r\n"), b"ERROR\r\n");
+    }
+
+    #[test]
+    fn exact_text_verbs_still_work() {
+        let handler = MemcachedHandler::new();
+
+        assert!(handler.handle(b"stats\r\n").starts_with(b"STAT pid "));
+        assert_eq!(handler.handle(b"version\r\n"), b"VERSION 1.6.22\r\n");
+        assert_eq!(handler.handle(b"flush_all\r\n"), b"OK\r\n");
+        assert!(handler.handle(b"quit\r\n").is_empty());
     }
 }

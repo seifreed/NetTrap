@@ -1,6 +1,7 @@
 //! Custom response configuration for HTTP listeners.
 //! Supports matching by host and/or URI, with multiple response types.
-use std::io::Read;
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read};
 use std::path::Path;
 
 const MAX_CUSTOM_RESPONSE_FILE_BYTES: u64 = 10 * 1024 * 1024;
@@ -211,11 +212,14 @@ fn payload_too_large_response(date: &str) -> Vec<u8> {
 }
 
 fn read_limited_file(path: &Path, max_bytes: u64) -> std::io::Result<LimitedFileRead> {
-    let file = std::fs::File::open(path)?;
+    let file = match open_regular_file_no_final_symlink(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::InvalidInput => {
+            return Ok(LimitedFileRead::NotFile);
+        }
+        Err(err) => return Err(err),
+    };
     let metadata = file.metadata()?;
-    if !metadata.is_file() {
-        return Ok(LimitedFileRead::NotFile);
-    }
     if metadata.len() > max_bytes {
         return Ok(LimitedFileRead::TooLarge);
     }
@@ -228,6 +232,45 @@ fn read_limited_file(path: &Path, max_bytes: u64) -> std::io::Result<LimitedFile
     }
 
     Ok(LimitedFileRead::Content(content))
+}
+
+#[cfg(unix)]
+fn open_regular_file_no_final_symlink(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    ensure_regular_file(file)
+}
+
+#[cfg(windows)]
+fn open_regular_file_no_final_symlink(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    ensure_regular_file(file)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_regular_file_no_final_symlink(path: &Path) -> io::Result<File> {
+    ensure_regular_file(File::open(path)?)
+}
+
+fn ensure_regular_file(file: File) -> io::Result<File> {
+    if file.metadata()?.is_file() {
+        Ok(file)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ))
+    }
 }
 
 pub(crate) fn host_matches_pattern(host: &str, pattern: &str) -> bool {
@@ -351,6 +394,28 @@ mod tests {
             .expect("matching file rule should respond");
 
         assert_eq!(response, content);
+        std::fs::remove_dir_all(root).expect("cleanup temp root");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn custom_response_file_rejects_final_symlink() {
+        let root = std::env::temp_dir().join(format!(
+            "nettrap-custom-response-symlink-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).expect("create temp root");
+        let target = root.join("target.http");
+        let link = root.join("linked.http");
+        std::fs::write(&target, b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+            .expect("write target response");
+        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+        let config =
+            CustomResponseConfig::parse(&format!("host=*;uri=*;type=file;path={}", link.display()));
+
+        let response = config.build_response_for_request("example.com", "/", "/");
+
+        assert!(response.is_none());
         std::fs::remove_dir_all(root).expect("cleanup temp root");
     }
 }

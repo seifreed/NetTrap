@@ -59,21 +59,24 @@ pub trait Pop3HandlerTrait: Send + Sync {
 #[async_trait]
 impl Pop3HandlerTrait for Pop3Handler {
     async fn handle(&self, command: &str) -> Result<Pop3Response> {
-        let upper = command.to_uppercase();
         let parts: Vec<&str> = command.split_whitespace().collect();
+        let verb = parts
+            .first()
+            .map(|part| part.to_ascii_uppercase())
+            .unwrap_or_default();
 
-        if upper.starts_with("USER") {
+        if verb == "USER" {
             Ok(Pop3Response::ok("User accepted"))
-        } else if upper.starts_with("PASS") {
+        } else if verb == "PASS" {
             Ok(Pop3Response::ok("Mailbox locked and ready"))
-        } else if upper.starts_with("STAT") {
+        } else if verb == "STAT" {
             let total_size: usize = self.emails.iter().map(|e| e.size).sum();
             Ok(Pop3Response::ok(format!(
                 "{} {}",
                 self.emails.len(),
                 total_size
             )))
-        } else if upper.starts_with("LIST") {
+        } else if verb == "LIST" {
             if parts.len() > 1 {
                 if let Ok(idx) = parts[1].parse::<usize>() {
                     if idx > 0 && idx <= self.emails.len() {
@@ -94,12 +97,9 @@ impl Pop3HandlerTrait for Pop3Handler {
                     response.push_str(&format!("{} {}\r\n", i + 1, email.size));
                 }
                 response.push_str(".\r\n");
-                Ok(Pop3Response {
-                    positive: true,
-                    message: response,
-                })
+                Ok(Pop3Response::raw(response))
             }
-        } else if upper.starts_with("RETR") {
+        } else if verb == "RETR" {
             // Note: accepting RETR without prior USER/PASS is intentional for honeypot
             // to maximize data capture, but log it for detection
             tracing::info!("POP3 RETR command received (stateless handler)");
@@ -110,10 +110,7 @@ impl Pop3HandlerTrait for Pop3Handler {
                         let mut response = format!("+OK {} octets\r\n", email.size);
                         response.push_str(&email.body);
                         response.push_str(".\r\n");
-                        Ok(Pop3Response {
-                            positive: true,
-                            message: response,
-                        })
+                        Ok(Pop3Response::raw(response))
                     } else {
                         Ok(Pop3Response::err("No such message"))
                     }
@@ -123,13 +120,13 @@ impl Pop3HandlerTrait for Pop3Handler {
             } else {
                 Ok(Pop3Response::err("Missing argument"))
             }
-        } else if upper.starts_with("DELE") {
+        } else if verb == "DELE" {
             Ok(Pop3Response::ok("Message deleted"))
-        } else if upper.starts_with("NOOP") {
+        } else if verb == "NOOP" {
             Ok(Pop3Response::ok(""))
-        } else if upper.starts_with("RSET") {
+        } else if verb == "RSET" {
             Ok(Pop3Response::ok("Maildrop has been reset"))
-        } else if upper.starts_with("TOP") {
+        } else if verb == "TOP" {
             if parts.len() > 1 {
                 if let Ok(idx) = parts[1].parse::<usize>() {
                     if idx > 0 && idx <= self.emails.len() {
@@ -142,10 +139,7 @@ impl Pop3HandlerTrait for Pop3Handler {
                             response.push_str("\r\n");
                         }
                         response.push_str(".\r\n");
-                        Ok(Pop3Response {
-                            positive: true,
-                            message: response,
-                        })
+                        Ok(Pop3Response::raw(response))
                     } else {
                         Ok(Pop3Response::err("No such message"))
                     }
@@ -155,7 +149,7 @@ impl Pop3HandlerTrait for Pop3Handler {
             } else {
                 Ok(Pop3Response::err("Missing argument"))
             }
-        } else if upper.starts_with("UIDL") {
+        } else if verb == "UIDL" {
             if parts.len() > 1 {
                 if let Ok(idx) = parts[1].parse::<usize>() {
                     if idx > 0 && idx <= self.emails.len() {
@@ -172,12 +166,9 @@ impl Pop3HandlerTrait for Pop3Handler {
                     response.push_str(&format!("{} nettrap-msg-{}\r\n", i + 1, i + 1));
                 }
                 response.push_str(".\r\n");
-                Ok(Pop3Response {
-                    positive: true,
-                    message: response,
-                })
+                Ok(Pop3Response::raw(response))
             }
-        } else if upper.starts_with("AUTH") {
+        } else if verb == "AUTH" {
             // AUTH command — capture credentials
             const MAX_AUTH_DATA_LEN: usize = 8192; // 8KB limit for base64 input
 
@@ -230,10 +221,7 @@ impl Pop3HandlerTrait for Pop3Handler {
                             Ok(Pop3Response::ok("Authentication successful"))
                         } else {
                             // Send continuation prompt
-                            Ok(Pop3Response {
-                                positive: true,
-                                message: "+\r\n".to_string(),
-                            })
+                            Ok(Pop3Response::raw("+\r\n"))
                         }
                     }
                     _ => {
@@ -244,28 +232,22 @@ impl Pop3HandlerTrait for Pop3Handler {
             } else {
                 // AUTH with no args — list mechanisms
                 let response = "+OK\r\nPLAIN\r\nLOGIN\r\n.\r\n".to_string();
-                Ok(Pop3Response {
-                    positive: true,
-                    message: response,
-                })
+                Ok(Pop3Response::raw(response))
             }
-        } else if upper.starts_with("APOP") {
+        } else if verb == "APOP" {
             // APOP <user> <digest>
             let user = parts.get(1).unwrap_or(&"unknown");
             let digest = parts.get(2).unwrap_or(&"");
             tracing::info!("POP3 APOP — user: {} digest: {}", user, digest);
             Ok(Pop3Response::ok("Authentication successful"))
-        } else if upper.starts_with("CAPA") {
+        } else if verb == "CAPA" {
             let response =
                 "+OK Capability list follows\r\nUSER\r\nTOP\r\nUIDL\r\nSASL PLAIN LOGIN\r\n.\r\n"
                     .to_string();
-            Ok(Pop3Response {
-                positive: true,
-                message: response,
-            })
-        } else if upper.starts_with("STLS") {
+            Ok(Pop3Response::raw(response))
+        } else if verb == "STLS" {
             Ok(Pop3Response::err("TLS not available"))
-        } else if upper.starts_with("QUIT") {
+        } else if verb == "QUIT" {
             Ok(Pop3Response::ok("Goodbye"))
         } else {
             Ok(Pop3Response::err("Unknown command"))
@@ -310,6 +292,43 @@ mod tests {
         assert!(response.positive);
         assert!(!response.message.contains("\r\nSTLS\r\n"));
         assert!(response.message.contains("\r\nSASL PLAIN LOGIN\r\n"));
+        assert_eq!(
+            response.to_bytes(),
+            b"+OK Capability list follows\r\nUSER\r\nTOP\r\nUIDL\r\nSASL PLAIN LOGIN\r\n.\r\n"
+        );
+    }
+
+    #[test]
+    fn raw_multiline_responses_do_not_get_duplicate_ok_prefix() {
+        let handler = Pop3Handler::new();
+
+        let list = block_on(handler.handle("LIST")).expect("LIST response");
+        assert!(list.to_bytes().starts_with(b"+OK 1 messages\r\n"));
+        assert!(!list.to_bytes().starts_with(b"+OK +OK"));
+
+        let retr = block_on(handler.handle("RETR 1")).expect("RETR response");
+        assert!(retr.to_bytes().starts_with(b"+OK "));
+        assert!(retr.to_bytes().ends_with(b"\r\n.\r\n"));
+        assert!(!retr.to_bytes().starts_with(b"+OK +OK"));
+    }
+
+    #[test]
+    fn auth_plain_without_inline_data_sends_exact_continuation_prompt() {
+        let response =
+            block_on(Pop3Handler::new().handle("AUTH PLAIN")).expect("AUTH PLAIN response");
+
+        assert_eq!(response.to_bytes(), b"+\r\n");
+    }
+
+    #[test]
+    fn prefixed_verbs_are_rejected() {
+        let handler = Pop3Handler::new();
+
+        let retr = block_on(handler.handle("RETRIEVE 1")).expect("RETRIEVE response");
+        assert_eq!(retr.to_bytes(), b"-ERR Unknown command\r\n");
+
+        let capa = block_on(handler.handle("CAPABILITY")).expect("CAPABILITY response");
+        assert_eq!(capa.to_bytes(), b"-ERR Unknown command\r\n");
     }
 
     #[test]

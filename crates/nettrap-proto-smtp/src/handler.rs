@@ -100,6 +100,49 @@ impl SmtpHandler {
         Some((user, digest))
     }
 
+    fn verb_and_rest(command: &str) -> (&str, &str) {
+        let trimmed = command.trim();
+        match trimmed.find(char::is_whitespace) {
+            Some(separator) => (&trimmed[..separator], trimmed[separator..].trim_start()),
+            None => (trimmed, ""),
+        }
+    }
+
+    fn command_verb(command: &str) -> String {
+        let (verb, _) = Self::verb_and_rest(command);
+        verb.to_ascii_uppercase()
+    }
+
+    fn rest_starts_with_keyword(rest: &str, keyword: &str) -> bool {
+        let first = rest
+            .trim_start()
+            .split(|ch: char| ch == ':' || ch.is_whitespace())
+            .next()
+            .unwrap_or_default();
+        first.eq_ignore_ascii_case(keyword)
+    }
+
+    fn is_known_smtp_command(command: &str) -> bool {
+        matches!(
+            Self::command_verb(command).as_str(),
+            "EHLO"
+                | "HELO"
+                | "MAIL"
+                | "RCPT"
+                | "DATA"
+                | "RSET"
+                | "NOOP"
+                | "VRFY"
+                | "QUIT"
+                | "HELP"
+                | "AUTH"
+                | "STARTTLS"
+                | "X-EXPS"
+                | "X-EXCH50"
+                | "X-LINK2STATE"
+        )
+    }
+
     /// Handle a command with optional AUTH state.
     /// Returns (response, new_auth_state).
     /// The caller is responsible for maintaining auth_state across calls.
@@ -108,12 +151,12 @@ impl SmtpHandler {
         command: &str,
         auth_state: SmtpAuthState,
     ) -> (SmtpResponse, SmtpAuthState) {
-        let upper = command.to_uppercase();
         let trimmed = command.trim();
+        let verb = Self::command_verb(trimmed);
 
         // ── Check if client is aborting AUTH with RSET or QUIT ─────────────────
         // RFC 4954: "*" cancels AUTH, RSET/QUIT also reset state
-        if trimmed == "*" || upper.starts_with("RSET") || upper.starts_with("QUIT") {
+        if trimmed == "*" || verb == "RSET" || verb == "QUIT" {
             if trimmed == "*" {
                 return (
                     SmtpResponse::new(501, "5.5.2 Authentication exchange cancelled"),
@@ -127,21 +170,7 @@ impl SmtpHandler {
 
         // ── Check for pending AUTH state ──────────────────────────────────
         // Only treat input as credential data if it's NOT a known SMTP command
-        let is_smtp_command = upper.starts_with("EHLO")
-            || upper.starts_with("HELO")
-            || upper.starts_with("MAIL")
-            || upper.starts_with("RCPT")
-            || upper.starts_with("DATA")
-            || upper.starts_with("RSET")
-            || upper.starts_with("NOOP")
-            || upper.starts_with("VRFY")
-            || upper.starts_with("QUIT")
-            || upper.starts_with("HELP")
-            || upper.starts_with("AUTH")
-            || upper.starts_with("STARTTLS")
-            || upper.starts_with("X-EXPS")
-            || upper.starts_with("X-EXCH50")
-            || upper.starts_with("X-LINK2STATE");
+        let is_smtp_command = Self::is_known_smtp_command(trimmed);
 
         match auth_state {
             SmtpAuthState::PlainContinuation => {
@@ -251,11 +280,12 @@ impl SmtpHandler {
     }
 
     fn handle_command(&self, command: &str) -> (SmtpResponse, SmtpAuthState) {
-        let upper = command.to_uppercase();
         let trimmed = command.trim();
+        let (verb_raw, rest) = Self::verb_and_rest(trimmed);
+        let verb = verb_raw.to_ascii_uppercase();
 
-        if upper.starts_with("EHLO") || upper.starts_with("HELO") {
-            let resp = if upper.starts_with("EHLO") {
+        if verb == "EHLO" || verb == "HELO" {
+            let resp = if verb == "EHLO" {
                 SmtpResponse::raw(format!(
                     "250-{} Hello\r\n250-AUTH PLAIN LOGIN CRAM-MD5 CRAM-SHA1\r\n250-SIZE 10485760\r\n250-8BITMIME\r\n250 OK",
                     self.domain
@@ -264,30 +294,30 @@ impl SmtpHandler {
                 SmtpResponse::ok()
             };
             (resp, SmtpAuthState::None)
-        } else if upper.starts_with("MAIL FROM")
-            || upper.starts_with("RCPT TO")
-            || upper.starts_with("RSET")
-            || upper.starts_with("NOOP")
-            || upper.starts_with("VRFY")
+        } else if (verb == "MAIL" && Self::rest_starts_with_keyword(rest, "FROM"))
+            || (verb == "RCPT" && Self::rest_starts_with_keyword(rest, "TO"))
+            || verb == "RSET"
+            || verb == "NOOP"
+            || verb == "VRFY"
         {
             (SmtpResponse::ok(), SmtpAuthState::None)
-        } else if upper.starts_with("DATA") {
+        } else if verb == "DATA" {
             (SmtpResponse::start_data(), SmtpAuthState::None)
-        } else if upper.starts_with("QUIT") {
+        } else if verb == "QUIT" {
             (SmtpResponse::bye(), SmtpAuthState::None)
-        } else if upper.starts_with("HELP") {
+        } else if verb == "HELP" {
             (
                 SmtpResponse::raw(
                     "250-This is NetTrap SMTP honeypot\r\n250 Commands: EHLO HELO MAIL RCPT DATA RSET NOOP QUIT AUTH",
                 ),
                 SmtpAuthState::None,
             )
-        } else if upper.starts_with("STARTTLS") {
+        } else if verb == "STARTTLS" {
             (
                 SmtpResponse::new(454, "4.7.0 TLS not available"),
                 SmtpAuthState::None,
             )
-        } else if upper.starts_with("AUTH") {
+        } else if verb == "AUTH" {
             // ── AUTH credential capture ──────────────────────────────────
             let parts: Vec<&str> = trimmed.splitn(3, ' ').collect();
             let mechanism = parts.get(1).map(|s| s.to_uppercase()).unwrap_or_default();
@@ -349,10 +379,7 @@ impl SmtpHandler {
                     )
                 }
             }
-        } else if upper.starts_with("X-EXPS")
-            || upper.starts_with("X-EXCH50")
-            || upper.starts_with("X-LINK2STATE")
-        {
+        } else if matches!(verb.as_str(), "X-EXPS" | "X-EXCH50" | "X-LINK2STATE") {
             (SmtpResponse::ok(), SmtpAuthState::None)
         } else {
             (
@@ -406,5 +433,40 @@ impl SmtpHandlerTrait for SmtpHandler {
 
     fn name(&self) -> &'static str {
         "smtp"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prefixed_smtp_verbs_are_rejected() {
+        let handler = SmtpHandler::new();
+
+        let (response, state) =
+            handler.handle_with_state("EHLOXYZ example.test", SmtpAuthState::None);
+        assert!(matches!(state, SmtpAuthState::None));
+        assert_eq!(response.to_bytes(), b"500 Command not recognized\r\n");
+
+        let (response, state) =
+            handler.handle_with_state("MAILBOX FROM:<a@example.test>", SmtpAuthState::None);
+        assert!(matches!(state, SmtpAuthState::None));
+        assert_eq!(response.to_bytes(), b"500 Command not recognized\r\n");
+    }
+
+    #[test]
+    fn exact_mail_and_ehlo_commands_still_work() {
+        let handler = SmtpHandler::new();
+
+        let (response, state) =
+            handler.handle_with_state("MAIL FROM:<a@example.test>", SmtpAuthState::None);
+        assert!(matches!(state, SmtpAuthState::None));
+        assert_eq!(response.to_bytes(), b"250 OK\r\n");
+
+        let (response, state) = handler.handle_with_state("EHLO example.test", SmtpAuthState::None);
+        assert!(matches!(state, SmtpAuthState::None));
+        let bytes = response.to_bytes();
+        assert!(bytes.starts_with(b"250-nettrap.local Hello\r\n"));
     }
 }

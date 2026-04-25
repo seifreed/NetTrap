@@ -140,24 +140,6 @@ const VIRTUAL_FILES: &[(&str, u64)] = &[
     ("setup.exe", 16),
 ];
 
-#[cfg(unix)]
-fn open_regular_file_no_final_symlink(path: &Path) -> io::Result<File> {
-    use std::os::unix::fs::OpenOptionsExt;
-
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "not a regular file",
-        ));
-    }
-    Ok(file)
-}
-
 #[cfg(windows)]
 fn open_regular_file_no_final_symlink(path: &Path) -> io::Result<File> {
     use std::os::windows::fs::OpenOptionsExt;
@@ -167,31 +149,107 @@ fn open_regular_file_no_final_symlink(path: &Path) -> io::Result<File> {
         .read(true)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "not a regular file",
-        ));
-    }
-    Ok(file)
+    ensure_regular_file(file)
 }
 
 #[cfg(not(any(unix, windows)))]
 fn open_regular_file_no_final_symlink(path: &Path) -> io::Result<File> {
-    let file = File::open(path)?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "not a regular file",
-        ));
-    }
-    Ok(file)
+    ensure_regular_file(File::open(path)?)
 }
 
-fn read_file_limited(path: &std::path::Path) -> std::io::Result<Option<Vec<u8>>> {
-    let file = open_regular_file_no_final_symlink(path)?;
+#[cfg(unix)]
+fn open_regular_file_beneath_root(root: &Path, relative_path: &Path) -> io::Result<File> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+    use std::path::Component;
+
+    let mut dir = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
+        .open(root)?;
+    let mut components = relative_path.components().peekable();
+
+    while let Some(component) = components.next() {
+        let Component::Normal(name) = component else {
+            if matches!(component, Component::CurDir) {
+                continue;
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid path component",
+            ));
+        };
+
+        let name = CString::new(name.as_bytes()).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "nul byte in path component")
+        })?;
+        let is_last = components.peek().is_none();
+        let flags = if is_last {
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW
+        } else {
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW
+        };
+        let fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        let file = unsafe { File::from_raw_fd(fd) };
+        if is_last {
+            return ensure_regular_file(file);
+        }
+        dir = file;
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "missing file path",
+    ))
+}
+
+#[cfg(not(unix))]
+fn open_regular_file_beneath_root(root: &Path, relative_path: &Path) -> io::Result<File> {
+    use std::path::Component;
+
+    for component in relative_path.components() {
+        if !matches!(component, Component::Normal(_) | Component::CurDir) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid path component",
+            ));
+        }
+    }
+
+    let canonical_root = root.canonicalize()?;
+    let candidate = root.join(relative_path);
+    let canonical_candidate = candidate.canonicalize()?;
+    if !canonical_candidate.starts_with(&canonical_root) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "path escapes root",
+        ));
+    }
+    open_regular_file_no_final_symlink(&candidate)
+}
+
+fn ensure_regular_file(file: File) -> io::Result<File> {
+    if file.metadata()?.is_file() {
+        Ok(file)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ))
+    }
+}
+
+fn read_file_limited_beneath_root(
+    root: &Path,
+    relative_path: &Path,
+) -> std::io::Result<Option<Vec<u8>>> {
+    let file = open_regular_file_beneath_root(root, relative_path)?;
 
     let mut content = Vec::new();
     let mut limited = file.take(MAX_FTP_RETR_BYTES + 1);
@@ -352,17 +410,18 @@ impl FtpHandler {
         }
 
         if let Some(ref root) = self.root_dir {
-            let path = root.join(filename);
-            let canonical_root = match root.canonicalize() {
-                Ok(p) => p,
-                Err(_) => {
-                    tracing::warn!("FTP root directory cannot be canonicalized");
-                    return Err(FtpResponse::new(550, "Server configuration error"));
+            let relative_path = Path::new(filename);
+            match read_file_limited_beneath_root(root, relative_path) {
+                Ok(Some(content)) => Ok(Self::retr_transfer(filename, content)),
+                Ok(None) => {
+                    tracing::warn!(
+                        "FTP RETR file {:?} exceeds response size limit ({})",
+                        relative_path,
+                        MAX_FTP_RETR_BYTES
+                    );
+                    Err(FtpResponse::new(552, "File too large"))
                 }
-            };
-            let canonical_path = match path.canonicalize() {
-                Ok(p) => p,
-                Err(_) => {
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {
                     if let Some(content) = default_file_for_extension(
                         std::path::Path::new(filename)
                             .extension()
@@ -371,26 +430,12 @@ impl FtpHandler {
                     ) {
                         return Ok(Self::retr_transfer(filename, content.to_vec()));
                     }
-                    return Err(FtpResponse::new(550, "File not found"));
+                    Err(FtpResponse::new(550, "File not found"))
                 }
-            };
-
-            if !canonical_path.starts_with(&canonical_root) {
-                tracing::warn!("Path traversal attempt blocked: {:?}", canonical_path);
-                return Err(FtpResponse::new(550, "Access denied"));
-            }
-
-            match read_file_limited(&path) {
-                Ok(Some(content)) => Ok(Self::retr_transfer(filename, content)),
-                Ok(None) => {
-                    tracing::warn!(
-                        "FTP RETR file {:?} exceeds response size limit ({})",
-                        canonical_path,
-                        MAX_FTP_RETR_BYTES
-                    );
-                    Err(FtpResponse::new(552, "File too large"))
+                Err(err) => {
+                    tracing::warn!("FTP RETR blocked for {:?}: {}", relative_path, err);
+                    Err(FtpResponse::new(550, "File not found"))
                 }
-                Err(_) => Err(FtpResponse::new(550, "File not found")),
             }
         } else {
             Ok(FtpDataTransfer {
@@ -464,14 +509,10 @@ impl FtpHandler {
                 return FtpResponse::new(550, "Invalid path");
             }
             if let Some(ref root) = self.root_dir {
-                let path = root.join(filename);
-                let canonical_root = match root.canonicalize() {
-                    Ok(p) => p,
-                    Err(_) => return FtpResponse::new(550, "Server configuration error"),
-                };
-                let canonical_path = match path.canonicalize() {
-                    Ok(p) => p,
-                    Err(_) => {
+                let relative_path = Path::new(filename);
+                let file = match open_regular_file_beneath_root(root, relative_path) {
+                    Ok(file) => file,
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => {
                         // File doesn't exist, try extension fallback
                         let ext = std::path::Path::new(filename)
                             .extension()
@@ -482,12 +523,6 @@ impl FtpHandler {
                         }
                         return FtpResponse::new(550, "File not found");
                     }
-                };
-                if !canonical_path.starts_with(&canonical_root) {
-                    return FtpResponse::new(550, "File not found");
-                }
-                let file = match open_regular_file_no_final_symlink(&path) {
-                    Ok(file) => file,
                     Err(_) => return FtpResponse::new(550, "File not found"),
                 };
                 let size = file.metadata().map(|m| m.len()).unwrap_or(0);
@@ -879,6 +914,30 @@ mod tests {
 
         assert_eq!(response.code, 550);
         std::fs::remove_dir_all(root).expect("cleanup temp root");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retr_rejects_intermediate_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_temp_dir("nettrap-ftp-intermediate-symlink");
+        let outside = unique_temp_dir("nettrap-ftp-intermediate-outside");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&root).expect("create temp root");
+        std::fs::create_dir_all(&outside).expect("create outside dir");
+        std::fs::write(outside.join("secret.txt"), b"secret").expect("write outside fixture");
+        symlink(&outside, root.join("dir")).expect("create intermediate symlink");
+
+        let response = FtpHandler::new()
+            .with_root_dir(&root)
+            .prepare_data_transfer("RETR dir/secret.txt")
+            .expect_err("intermediate symlink should be rejected");
+
+        assert_eq!(response.code, 550);
+        std::fs::remove_dir_all(root).expect("cleanup temp root");
+        std::fs::remove_dir_all(outside).expect("cleanup outside dir");
     }
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {

@@ -6,17 +6,6 @@ use std::path::{Path, PathBuf};
 
 const MAX_TFTP_SERVE_BYTES: u64 = 8 * 1024 * 1024;
 
-#[cfg(unix)]
-fn open_regular_file_no_final_symlink(path: &Path) -> io::Result<File> {
-    use std::os::unix::fs::OpenOptionsExt;
-
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)?;
-    ensure_regular_file(file)
-}
-
 #[cfg(windows)]
 fn open_regular_file_no_final_symlink(path: &Path) -> io::Result<File> {
     use std::os::windows::fs::OpenOptionsExt;
@@ -43,6 +32,83 @@ fn ensure_regular_file(file: File) -> io::Result<File> {
             "not a regular file",
         ))
     }
+}
+
+#[cfg(unix)]
+fn open_regular_file_beneath_root(root: &Path, relative_path: &Path) -> io::Result<File> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+    use std::path::Component;
+
+    let mut dir = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
+        .open(root)?;
+    let mut components = relative_path.components().peekable();
+
+    while let Some(component) = components.next() {
+        let Component::Normal(name) = component else {
+            if matches!(component, Component::CurDir) {
+                continue;
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid path component",
+            ));
+        };
+
+        let name = CString::new(name.as_bytes()).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "nul byte in path component")
+        })?;
+        let is_last = components.peek().is_none();
+        let flags = if is_last {
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW
+        } else {
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW
+        };
+        let fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        let file = unsafe { File::from_raw_fd(fd) };
+        if is_last {
+            return ensure_regular_file(file);
+        }
+        dir = file;
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "missing file path",
+    ))
+}
+
+#[cfg(not(unix))]
+fn open_regular_file_beneath_root(root: &Path, relative_path: &Path) -> io::Result<File> {
+    use std::path::Component;
+
+    for component in relative_path.components() {
+        if !matches!(component, Component::Normal(_) | Component::CurDir) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid path component",
+            ));
+        }
+    }
+
+    let canonical_root = root.canonicalize()?;
+    let candidate = root.join(relative_path);
+    let canonical_candidate = candidate.canonicalize()?;
+    if !canonical_candidate.starts_with(&canonical_root) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "path escapes root",
+        ));
+    }
+    open_regular_file_no_final_symlink(&candidate)
 }
 
 pub struct TftpHandler {
@@ -104,37 +170,16 @@ impl TftpHandler {
     }
 
     fn read_file_block(&self, root: &Path, filename: &str, block: u16) -> TftpPacket {
-        let canonical_root = match root.canonicalize() {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!("TFTP root dir canonicalize failed: {}", e);
-                return TftpPacket::Error {
-                    code: 2,
-                    message: "Access violation".to_string(),
-                };
-            }
-        };
-        let path = canonical_root.join(filename);
-        match path.canonicalize() {
-            Ok(p) if p.starts_with(&canonical_root) => {}
-            Ok(_) => {
-                tracing::warn!("TFTP path traversal attempt: {}", filename);
-                return TftpPacket::Error {
-                    code: 2,
-                    message: "Access violation".to_string(),
-                };
-            }
-            Err(_) => {
+        let mut file = match open_regular_file_beneath_root(root, Path::new(filename)) {
+            Ok(file) => file,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
                 return TftpPacket::Data {
                     block,
                     data: self.default_content_block(block),
                 };
             }
-        }
-
-        let mut file = match open_regular_file_no_final_symlink(&path) {
-            Ok(file) => file,
-            Err(_) => {
+            Err(err) => {
+                tracing::warn!("TFTP read blocked for {}: {}", filename, err);
                 return TftpPacket::Error {
                     code: 2,
                     message: "Access violation".to_string(),
@@ -316,6 +361,28 @@ mod tests {
 
         assert!(matches!(packet, TftpPacket::Error { code: 2, .. }));
         std::fs::remove_dir_all(root).expect("cleanup temp root");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_intermediate_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_temp_dir("nettrap-tftp-intermediate-symlink");
+        let outside = unique_temp_dir("nettrap-tftp-intermediate-outside");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&root).expect("create temp root");
+        std::fs::create_dir_all(&outside).expect("create outside dir");
+        std::fs::write(outside.join("secret.bin"), b"secret").expect("write outside fixture");
+        symlink(&outside, root.join("dir")).expect("create intermediate symlink");
+
+        let handler = TftpHandler::new().with_root_dir(&root);
+        let packet = handler.handle_read_request_block("dir/secret.bin", 1);
+
+        assert!(matches!(packet, TftpPacket::Error { code: 2, .. }));
+        std::fs::remove_dir_all(root).expect("cleanup temp root");
+        std::fs::remove_dir_all(outside).expect("cleanup outside dir");
     }
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {

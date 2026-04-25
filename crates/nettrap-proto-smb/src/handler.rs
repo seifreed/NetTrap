@@ -40,9 +40,8 @@ impl SmbHandler {
         } else if magic == b"\xfeSMB" {
             self.handle_smb2(&data[smb_offset..])
         } else {
-            // Try to respond with SMB2 negotiate response anyway
-            tracing::debug!("SMB: unknown magic {:?}, sending negotiate response", magic);
-            self.build_smb2_negotiate_response()
+            tracing::debug!("SMB: unknown magic {:?}, ignoring packet", magic);
+            Vec::new()
         }
     }
 
@@ -270,5 +269,24 @@ impl SmbHandler {
 impl Default for SmbHandler {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ignores_non_smb_payloads() {
+        let response = SmbHandler::new().handle(b"GET / HTTP/1.1\r\n\r\n");
+
+        assert!(response.is_empty());
+    }
+
+    #[test]
+    fn ignores_non_smb_payloads_after_netbios_header() {
+        let response = SmbHandler::new().handle(&[0x00, 0x00, 0x00, 0x04, b'B', b'A', b'D', b'!']);
+
+        assert!(response.is_empty());
     }
 }

@@ -1685,24 +1685,31 @@ mod tests {
     }
 
     async fn spawn_partially_failing_event_sink_server(
-        failing_request: usize,
+        failing_src_port: u16,
     ) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind partial failure event sink server");
         let addr = listener.local_addr().expect("local addr");
         let request_count = Arc::new(AtomicUsize::new(0));
+        let failed_target_once = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let task = tokio::spawn({
             let request_count = Arc::clone(&request_count);
+            let failed_target_once = Arc::clone(&failed_target_once);
             async move {
                 loop {
                     let (mut stream, _) = listener.accept().await.expect("accept request");
                     let request_count = Arc::clone(&request_count);
+                    let failed_target_once = Arc::clone(&failed_target_once);
                     tokio::spawn(async move {
                         let mut buf = [0u8; 4096];
-                        let _ = stream.read(&mut buf).await;
-                        let request_number = request_count.fetch_add(1, Ordering::Relaxed) + 1;
-                        let status = if request_number == failing_request {
+                        let read = stream.read(&mut buf).await.unwrap_or(0);
+                        request_count.fetch_add(1, Ordering::Relaxed);
+                        let request = String::from_utf8_lossy(&buf[..read]);
+                        let target_port = format!("\"src_port\":{}", failing_src_port);
+                        let should_fail = request.contains(&target_port)
+                            && !failed_target_once.swap(true, Ordering::Relaxed);
+                        let status = if should_fail {
                             "500 Internal Server Error"
                         } else {
                             "200 OK"
@@ -1968,7 +1975,7 @@ mod tests {
 
     #[tokio::test]
     async fn http_sink_retries_only_failed_events_after_partial_batch_failure() {
-        let (url, request_count, server) = spawn_partially_failing_event_sink_server(10).await;
+        let (url, request_count, server) = spawn_partially_failing_event_sink_server(12009).await;
         let sink = HttpSink::new(url, None, 10, 1_000, 1_000);
 
         for idx in 0..9 {
