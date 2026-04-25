@@ -152,6 +152,7 @@ impl PcapInterceptor {
         linktype: Linktype,
         interface: &str,
     ) -> Result<Option<Packet>> {
+        let len = len.min(data.len());
         match linktype {
             Linktype::ETHERNET => Self::parse_ethernet(data, len, interface),
             Linktype::RAW | Linktype::IPV4 => {
@@ -244,6 +245,16 @@ impl PcapInterceptor {
         if ihl < 20 || len < ip_offset + ihl {
             return Ok(None);
         }
+        let total_len = u16::from_be_bytes([data[ip_offset + 2], data[ip_offset + 3]]) as usize;
+        if total_len < ihl {
+            return Ok(None);
+        }
+        let Some(packet_end) = ip_offset.checked_add(total_len) else {
+            return Ok(None);
+        };
+        if packet_end > len {
+            return Ok(None);
+        }
 
         let src_ip = IpAddr::V4(Ipv4Addr::new(
             data[ip_offset + 12],
@@ -261,7 +272,7 @@ impl PcapInterceptor {
 
         Self::parse_transport(
             data,
-            len,
+            packet_end,
             ip_offset + ihl,
             protocol_num,
             src_ip,
@@ -277,6 +288,13 @@ impl PcapInterceptor {
         interface: &str,
     ) -> Result<Option<Packet>> {
         if len < ip_offset + 40 {
+            return Ok(None);
+        }
+        let payload_len = u16::from_be_bytes([data[ip_offset + 4], data[ip_offset + 5]]) as usize;
+        let Some(packet_end) = ip_offset.checked_add(40 + payload_len) else {
+            return Ok(None);
+        };
+        if packet_end > len {
             return Ok(None);
         }
 
@@ -320,7 +338,7 @@ impl PcapInterceptor {
 
         Self::parse_transport(
             data,
-            len,
+            packet_end,
             ip_offset + 40,
             protocol_num,
             src_ip,
@@ -358,14 +376,14 @@ impl PcapInterceptor {
 
     fn parse_transport(
         data: &[u8],
-        len: usize,
+        packet_end: usize,
         transport_offset: usize,
         protocol: u8,
         src_ip: IpAddr,
         dst_ip: IpAddr,
         interface: &str,
     ) -> Result<Option<Packet>> {
-        if len < transport_offset {
+        if packet_end < transport_offset {
             return Ok(None);
         }
 
@@ -373,12 +391,12 @@ impl PcapInterceptor {
 
         match protocol {
             6 => {
-                if len < transport_offset + 20 {
+                if packet_end < transport_offset + 20 {
                     return Ok(None);
                 }
 
                 let tcp_header_len = ((data[transport_offset + 12] >> 4) as usize) * 4;
-                if tcp_header_len < 20 || len < transport_offset + tcp_header_len {
+                if tcp_header_len < 20 || packet_end < transport_offset + tcp_header_len {
                     return Ok(None);
                 }
 
@@ -392,15 +410,27 @@ impl PcapInterceptor {
                 let mut packet = Packet::new(
                     FiveTuple::new(src_ip, dst_ip, src_port, dst_port, Protocol::Tcp),
                     direction,
-                    bytes::Bytes::copy_from_slice(&data[payload_start..len]),
+                    bytes::Bytes::copy_from_slice(&data[payload_start..packet_end]),
                 )
                 .with_tcp_flags(flags)
                 .with_interface(interface.to_string());
-                packet.length = len;
+                packet.length = packet_end;
                 Ok(Some(packet))
             }
             17 => {
-                if len < transport_offset + 8 {
+                if packet_end < transport_offset + 8 {
+                    return Ok(None);
+                }
+                let udp_len =
+                    u16::from_be_bytes([data[transport_offset + 4], data[transport_offset + 5]])
+                        as usize;
+                if udp_len < 8 {
+                    return Ok(None);
+                }
+                let Some(udp_end) = transport_offset.checked_add(udp_len) else {
+                    return Ok(None);
+                };
+                if udp_end > packet_end {
                     return Ok(None);
                 }
 
@@ -413,21 +443,21 @@ impl PcapInterceptor {
                 let mut packet = Packet::new(
                     FiveTuple::new(src_ip, dst_ip, src_port, dst_port, Protocol::Udp),
                     direction,
-                    bytes::Bytes::copy_from_slice(&data[payload_start..len]),
+                    bytes::Bytes::copy_from_slice(&data[payload_start..udp_end]),
                 )
                 .with_interface(interface.to_string());
-                packet.length = len;
+                packet.length = udp_end;
                 Ok(Some(packet))
             }
             1 | 58 => {
-                let payload_start = (transport_offset + 8).min(len);
+                let payload_start = (transport_offset + 8).min(packet_end);
                 let mut packet = Packet::new(
                     FiveTuple::new(src_ip, dst_ip, 0, 0, Protocol::Icmp),
                     direction,
-                    bytes::Bytes::copy_from_slice(&data[payload_start..len]),
+                    bytes::Bytes::copy_from_slice(&data[payload_start..packet_end]),
                 )
                 .with_interface(interface.to_string());
-                packet.length = len;
+                packet.length = packet_end;
                 Ok(Some(packet))
             }
             _ => Ok(None),
@@ -554,5 +584,104 @@ impl Interceptor for PcapInterceptor {
 
     fn is_running(&self) -> bool {
         *self.running.read()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ethernet_header(ethertype: u16) -> Vec<u8> {
+        let mut frame = vec![0xaa; 6];
+        frame.extend_from_slice(&[0xbb; 6]);
+        frame.extend_from_slice(&ethertype.to_be_bytes());
+        frame
+    }
+
+    fn ipv4_header(total_len: usize, protocol: u8) -> Vec<u8> {
+        let mut header = vec![0u8; 20];
+        header[0] = 0x45;
+        header[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+        header[8] = 64;
+        header[9] = protocol;
+        header[12..16].copy_from_slice(&[10, 0, 0, 1]);
+        header[16..20].copy_from_slice(&[8, 8, 8, 8]);
+        header
+    }
+
+    fn udp_header(src: u16, dst: u16, len: usize) -> Vec<u8> {
+        let mut header = Vec::new();
+        header.extend_from_slice(&src.to_be_bytes());
+        header.extend_from_slice(&dst.to_be_bytes());
+        header.extend_from_slice(&(len as u16).to_be_bytes());
+        header.extend_from_slice(&0u16.to_be_bytes());
+        header
+    }
+
+    #[test]
+    fn pcap_ipv4_udp_ignores_ethernet_padding() {
+        let udp_payload = b"abc";
+        let udp_len = 8 + udp_payload.len();
+        let ip_total_len = 20 + udp_len;
+        let mut frame = ethernet_header(0x0800);
+        frame.extend_from_slice(&ipv4_header(ip_total_len, 17));
+        frame.extend_from_slice(&udp_header(1234, 53, udp_len));
+        frame.extend_from_slice(udp_payload);
+        frame.extend_from_slice(&[0xee; 32]);
+
+        let packet = PcapInterceptor::parse_packet(&frame, frame.len(), Linktype::ETHERNET, "en0")
+            .expect("parse should not fail")
+            .expect("packet should parse");
+
+        assert_eq!(packet.five_tuple.protocol, Protocol::Udp);
+        assert_eq!(packet.payload.as_ref(), udp_payload);
+        assert_eq!(packet.length, 14 + ip_total_len);
+    }
+
+    #[test]
+    fn pcap_ipv4_udp_respects_declared_udp_length() {
+        let udp_payload = b"abc";
+        let udp_len = 8 + udp_payload.len();
+        let ip_total_len = 20 + udp_len + 2;
+        let mut frame = ethernet_header(0x0800);
+        frame.extend_from_slice(&ipv4_header(ip_total_len, 17));
+        frame.extend_from_slice(&udp_header(1234, 53, udp_len));
+        frame.extend_from_slice(udp_payload);
+        frame.extend_from_slice(b"xx");
+
+        let packet = PcapInterceptor::parse_packet(&frame, frame.len(), Linktype::ETHERNET, "en0")
+            .expect("parse should not fail")
+            .expect("packet should parse");
+
+        assert_eq!(packet.payload.as_ref(), udp_payload);
+        assert_eq!(packet.length, 14 + 20 + udp_len);
+    }
+
+    #[test]
+    fn pcap_ipv6_tcp_ignores_trailing_capture_bytes() {
+        let mut frame = ethernet_header(0x86dd);
+        let mut ipv6 = vec![0u8; 40];
+        ipv6[0] = 0x60;
+        ipv6[4..6].copy_from_slice(&20u16.to_be_bytes());
+        ipv6[6] = 6;
+        ipv6[7] = 64;
+        ipv6[39] = 1;
+        frame.extend_from_slice(&ipv6);
+
+        let mut tcp = vec![0u8; 20];
+        tcp[0..2].copy_from_slice(&1234u16.to_be_bytes());
+        tcp[2..4].copy_from_slice(&80u16.to_be_bytes());
+        tcp[12] = 0x50;
+        tcp[13] = 0x02;
+        frame.extend_from_slice(&tcp);
+        frame.extend_from_slice(&[0xee; 24]);
+
+        let packet = PcapInterceptor::parse_packet(&frame, frame.len(), Linktype::ETHERNET, "en0")
+            .expect("parse should not fail")
+            .expect("packet should parse");
+
+        assert_eq!(packet.five_tuple.protocol, Protocol::Tcp);
+        assert!(packet.payload.is_empty());
+        assert_eq!(packet.length, 14 + 40 + 20);
     }
 }

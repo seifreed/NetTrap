@@ -1197,16 +1197,26 @@ async fn handle_dns(
     {
         Ok(response) => {
             ctx.apply_response_delay().await;
-            ctx.write_pcap_response_udp_for_destination(&response, packet.src, packet.destination);
-            if let Err(e) = socket.send_to(&response, *packet.src).await {
-                tracing::warn!("Failed to send UDP response to {}: {}", packet.src, e);
-            }
+            let sent = match socket.send_to(&response, *packet.src).await {
+                Ok(sent) => {
+                    ctx.write_pcap_response_udp_for_destination(
+                        &response,
+                        packet.src,
+                        packet.destination,
+                    );
+                    sent
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to send UDP response to {}: {}", packet.src, e);
+                    0
+                }
+            };
             ctx.update_session_bytes(
                 packet.src,
                 "UDP",
                 packet.destination,
                 packet.len as u64,
-                response.len() as u64,
+                sent as u64,
             );
             log_event(
                 packet.output_path,
@@ -1228,6 +1238,7 @@ async fn handle_dns(
         }
         Err(e) => {
             tracing::warn!("UDP handler error from {}: {}", packet.src, e);
+            ctx.update_session_bytes(packet.src, "UDP", packet.destination, packet.len as u64, 0);
         }
     }
 }
@@ -2182,6 +2193,48 @@ mod tests {
             )
     }
 
+    fn dns_query_bytes() -> Vec<u8> {
+        let mut query = Vec::new();
+        query.extend_from_slice(&0x1234u16.to_be_bytes());
+        query.extend_from_slice(&0x0100u16.to_be_bytes());
+        query.extend_from_slice(&1u16.to_be_bytes());
+        query.extend_from_slice(&0u16.to_be_bytes());
+        query.extend_from_slice(&0u16.to_be_bytes());
+        query.extend_from_slice(&0u16.to_be_bytes());
+        query.push(7);
+        query.extend_from_slice(b"example");
+        query.push(3);
+        query.extend_from_slice(b"com");
+        query.push(0);
+        query.extend_from_slice(&1u16.to_be_bytes());
+        query.extend_from_slice(&1u16.to_be_bytes());
+        query
+    }
+
+    fn flow_bytes(
+        ctx: &ListenerContext,
+        src: SocketAddr,
+        destination: &SessionDestination,
+    ) -> (u64, u64) {
+        let five_tuple = nettrap_core::prelude::FiveTuple::new(
+            src.ip(),
+            destination
+                .ip
+                .parse()
+                .expect("test destination should be an IP"),
+            src.port(),
+            destination.port,
+            nettrap_core::prelude::Protocol::Udp,
+        );
+        let key = nettrap_core::prelude::FlowKey::from_five_tuple(&five_tuple);
+        let flow = ctx
+            .runtime
+            .flow_manager
+            .get(&key)
+            .expect("flow should exist");
+        (flow.metadata.bytes_received, flow.metadata.bytes_sent)
+    }
+
     #[test]
     fn explicit_udp_protocol_names_require_exact_or_separator_match() {
         assert_eq!(explicit_udp_protocol_name("daytime-alt"), Some("daytime"));
@@ -2275,6 +2328,67 @@ mod tests {
         )
         .await;
         assert!(result.is_err(), "silent raw response should not send data");
+    }
+
+    #[tokio::test]
+    async fn dns_handler_records_received_bytes_on_parse_error() {
+        let bind_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let socket = UdpSocket::bind(SocketAddr::new(bind_ip, 0))
+            .await
+            .expect("bind UDP listener socket");
+        let listener_port = socket.local_addr().expect("listener addr").port();
+        let router = Arc::new(nettrap_proxy::ProtocolRouter::new());
+        let ctx = udp_test_context_named("dns", listener_port, router, None);
+        let src = SocketAddr::new(bind_ip, 53000);
+        let destination = SessionDestination::new(bind_ip.to_string(), listener_port);
+        ctx.register_session(&src, "UDP", Some(destination.clone()));
+
+        handle_dns(
+            &ctx,
+            &socket,
+            &nettrap_proto_dns::handler::DnsHandler::new(),
+            UdpPacket {
+                output_path: None,
+                query_data: b"\x00",
+                src: &src,
+                destination: &destination,
+                len: 1,
+            },
+        )
+        .await;
+
+        assert_eq!(flow_bytes(&ctx, src, &destination), (1, 0));
+    }
+
+    #[tokio::test]
+    async fn dns_handler_records_zero_sent_bytes_when_send_fails() {
+        let bind_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let socket = UdpSocket::bind(SocketAddr::new(bind_ip, 0))
+            .await
+            .expect("bind UDP listener socket");
+        let listener_port = socket.local_addr().expect("listener addr").port();
+        let router = Arc::new(nettrap_proxy::ProtocolRouter::new());
+        let ctx = udp_test_context_named("dns", listener_port, router, None);
+        let src = "[::1]:53000".parse::<SocketAddr>().expect("IPv6 source");
+        let destination = SessionDestination::new(bind_ip.to_string(), listener_port);
+        ctx.register_session(&src, "UDP", Some(destination.clone()));
+        let query = dns_query_bytes();
+
+        handle_dns(
+            &ctx,
+            &socket,
+            &nettrap_proto_dns::handler::DnsHandler::new(),
+            UdpPacket {
+                output_path: None,
+                query_data: &query,
+                src: &src,
+                destination: &destination,
+                len: query.len(),
+            },
+        )
+        .await;
+
+        assert_eq!(flow_bytes(&ctx, src, &destination), (query.len() as u64, 0));
     }
 
     #[tokio::test]

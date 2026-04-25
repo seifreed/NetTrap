@@ -8,7 +8,7 @@ use nettrap_protocols::handlers::*;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::listener_context::ListenerContext;
@@ -33,6 +33,7 @@ const MAX_TLS_RECORD_SIZE: usize = 64 * 1024;
 const MAX_LDAP_BER_PAYLOAD_SIZE: usize = 16 * 1024 * 1024;
 const MAX_LDAP_FRAME_SIZE: usize = MAX_LDAP_BER_PAYLOAD_SIZE + 6;
 const FTP_PASSIVE_ACCEPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+const FTP_PASSIVE_TRANSFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 const MAX_FTP_PASSIVE_TRANSFERS: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -529,6 +530,13 @@ fn extract_http_request(buffer: &mut Vec<u8>) -> TcpFrameResult {
         };
     }
 
+    if !valid_http_request_line(&headers[..header_end]) {
+        buffer.clear();
+        return TcpFrameResult::Invalid {
+            response: Some(http_error_response(400, "Bad Request")),
+        };
+    }
+
     match http_body_framing(headers) {
         Ok(framing) => extract_http_request_with_framing(buffer, headers_end, framing),
         Err(HttpFrameError::Invalid) => {
@@ -544,6 +552,57 @@ fn extract_http_request(buffer: &mut Vec<u8>) -> TcpFrameResult {
             }
         }
     }
+}
+
+fn valid_http_request_line(headers_without_terminator: &[u8]) -> bool {
+    let Some(line_end) = find_subslice(headers_without_terminator, b"\r\n") else {
+        return false;
+    };
+    let request_line = &headers_without_terminator[..line_end];
+    let mut parts = request_line.split(|&byte| byte == b' ');
+    let Some(method) = parts.next() else {
+        return false;
+    };
+    let Some(target) = parts.next() else {
+        return false;
+    };
+    let Some(version) = parts.next() else {
+        return false;
+    };
+
+    if parts.next().is_some() {
+        return false;
+    }
+
+    !method.is_empty()
+        && method.iter().copied().all(is_http_token_byte)
+        && !target.is_empty()
+        && target
+            .iter()
+            .copied()
+            .all(|byte| byte.is_ascii_graphic() && byte != b' ')
+        && matches!(version, b"HTTP/1.0" | b"HTTP/1.1")
+}
+
+fn is_http_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'|'
+                | b'~'
+        )
 }
 
 fn extract_http_request_with_framing(
@@ -2513,12 +2572,8 @@ async fn finish_ftp_passive_transfer(
     };
 
     tracing::debug!("FTP passive data connection accepted from {}", data_peer);
-    let send_result = async {
-        data_stream.write_all(&transfer.data).await?;
-        data_stream.flush().await?;
-        data_stream.shutdown().await
-    }
-    .await;
+    let send_result =
+        send_ftp_passive_data(&mut data_stream, &transfer, FTP_PASSIVE_TRANSFER_TIMEOUT).await;
 
     if let Err(err) = send_result {
         tracing::warn!("FTP passive transfer failed: {}", err);
@@ -2526,6 +2581,23 @@ async fn finish_ftp_passive_transfer(
     } else {
         transfer.complete_response.to_bytes()
     }
+}
+
+async fn send_ftp_passive_data<W>(
+    data_stream: &mut W,
+    transfer: &nettrap_proto_ftp::FtpDataTransfer,
+    transfer_timeout: Duration,
+) -> std::io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    tokio::time::timeout(transfer_timeout, async {
+        data_stream.write_all(&transfer.data).await?;
+        data_stream.flush().await?;
+        data_stream.shutdown().await
+    })
+    .await
+    .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "FTP data transfer timed out"))?
 }
 
 async fn handle_dns_tcp(
@@ -3357,6 +3429,8 @@ fn is_dyn_dns_checkip_request(host: &str, path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
 
     fn expect_complete(result: TcpFrameResult) -> Vec<u8> {
         match result {
@@ -3448,6 +3522,23 @@ mod tests {
             b"HTTP/1.1 400 Bad Request",
         );
         assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn http_frame_rejects_malformed_request_line() {
+        for request in [
+            b"garbage\r\n\r\n".as_slice(),
+            b"GET\r\n\r\n".as_slice(),
+            b"GET  HTTP/1.1\r\n\r\n".as_slice(),
+            b"GET / HTTP/2.0\r\n\r\n".as_slice(),
+        ] {
+            let mut buffer = request.to_vec();
+            expect_terminal_response(
+                extract_http_request(&mut buffer),
+                b"HTTP/1.1 400 Bad Request",
+            );
+            assert!(buffer.is_empty());
+        }
     }
 
     #[test]
@@ -3592,6 +3683,42 @@ mod tests {
             b"POST /chunk HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\n\r\n7\r\n\r\n0\r\n\r\n\r\n0\r\n\r\n"
         );
         assert!(buffer.is_empty());
+    }
+
+    struct PendingWriter;
+
+    impl AsyncWrite for PendingWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Poll::Pending
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn ftp_passive_data_write_times_out() {
+        let mut writer = PendingWriter;
+        let transfer = nettrap_proto_ftp::FtpDataTransfer {
+            start_response: nettrap_proto_ftp::FtpResponse::new(150, "Opening data connection"),
+            data: b"payload".to_vec(),
+            complete_response: nettrap_proto_ftp::FtpResponse::new(226, "Transfer complete"),
+        };
+
+        let err = send_ftp_passive_data(&mut writer, &transfer, Duration::from_millis(1))
+            .await
+            .expect_err("pending writer should time out");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
     }
 
     #[test]

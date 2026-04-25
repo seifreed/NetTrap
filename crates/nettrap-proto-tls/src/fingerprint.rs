@@ -139,6 +139,7 @@ pub fn extract_sni(data: &[u8]) -> Option<String> {
             if 2 + sni_len > ext_data.len() || sni_len < 3 {
                 return None;
             }
+            let sni_list_end = 2 + sni_len;
 
             let hostname_type = ext_data[2];
             if hostname_type != 0 {
@@ -148,7 +149,7 @@ pub fn extract_sni(data: &[u8]) -> Option<String> {
             let hostname_len = u16::from_be_bytes([ext_data[3], ext_data[4]]) as usize;
             let hostname_start = 5;
 
-            if hostname_start + hostname_len <= ext_data.len() {
+            if hostname_start + hostname_len <= sni_list_end {
                 return std::str::from_utf8(
                     &ext_data[hostname_start..hostname_start + hostname_len],
                 )
@@ -186,11 +187,12 @@ pub fn extract_alpn(data: &[u8]) -> Option<String> {
             if 2 + alpn_ext_len > ext_data.len() || alpn_ext_len == 0 {
                 return None;
             }
+            let alpn_list_end = 2 + alpn_ext_len;
 
             let str_len = ext_data[2] as usize;
             let str_start = 3;
 
-            if str_len > 0 && str_start + str_len <= ext_data.len() {
+            if str_len > 0 && str_start + str_len <= alpn_list_end {
                 return std::str::from_utf8(&ext_data[str_start..str_start + str_len])
                     .ok()
                     .map(|s| s.to_string());
@@ -412,6 +414,40 @@ mod tests {
         assert_eq!(extract_alpn(&data).as_deref(), Some("h2"));
         assert_eq!(fingerprint.sni.as_deref(), Some("inside.example"));
         assert_eq!(fingerprint.alpn.as_deref(), Some("h2"));
+    }
+
+    #[test]
+    fn tls_sni_extractor_rejects_hostname_outside_declared_sni_list() {
+        let hostname = b"outside.example";
+        let mut extension = Vec::new();
+        extension.extend_from_slice(&0x0000u16.to_be_bytes());
+        extension.extend_from_slice(&((2 + 3 + hostname.len()) as u16).to_be_bytes());
+        extension.extend_from_slice(&3u16.to_be_bytes());
+        extension.push(0);
+        extension.extend_from_slice(&(hostname.len() as u16).to_be_bytes());
+        extension.extend_from_slice(hostname);
+        let data = build_client_hello(0x0303, &extension);
+
+        let fingerprint = parse_tls_handshake(&data).expect("handshake should parse");
+
+        assert_eq!(extract_sni(&data), None);
+        assert_eq!(fingerprint.sni, None);
+    }
+
+    #[test]
+    fn tls_alpn_extractor_rejects_protocol_outside_declared_alpn_list() {
+        let mut extension = Vec::new();
+        extension.extend_from_slice(&0x0010u16.to_be_bytes());
+        extension.extend_from_slice(&5u16.to_be_bytes());
+        extension.extend_from_slice(&1u16.to_be_bytes());
+        extension.push(2);
+        extension.extend_from_slice(b"h2");
+        let data = build_client_hello(0x0303, &extension);
+
+        let fingerprint = parse_tls_handshake(&data).expect("handshake should parse");
+
+        assert_eq!(extract_alpn(&data), None);
+        assert_eq!(fingerprint.alpn, None);
     }
 
     #[test]

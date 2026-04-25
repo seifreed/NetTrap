@@ -3,6 +3,18 @@ pub struct MysqlHandler {
     server_id: u32,
 }
 
+const CLIENT_LONG_PASSWORD: u32 = 0x0000_0001;
+const CLIENT_LONG_FLAG: u32 = 0x0000_0004;
+const CLIENT_PROTOCOL_41: u32 = 0x0000_0200;
+const CLIENT_SSL: u32 = 0x0000_0800;
+const CLIENT_SECURE_CONNECTION: u32 = 0x0000_8000;
+const CLIENT_PLUGIN_AUTH: u32 = 0x0008_0000;
+const SERVER_CAPABILITIES: u32 = CLIENT_LONG_PASSWORD
+    | CLIENT_LONG_FLAG
+    | CLIENT_PROTOCOL_41
+    | CLIENT_SECURE_CONNECTION
+    | CLIENT_PLUGIN_AUTH;
+
 impl MysqlHandler {
     pub fn new() -> Self {
         Self {
@@ -24,12 +36,10 @@ impl MysqlHandler {
         payload.extend_from_slice(&self.server_id.to_le_bytes()); // Connection ID
         payload.extend_from_slice(b"nettrap!"); // Auth plugin data part 1 (8 bytes)
         payload.push(0); // Filler
-        // Capability flags (lower 2 bytes)
-        payload.extend_from_slice(&0xFFFFu16.to_le_bytes());
+        payload.extend_from_slice(&(SERVER_CAPABILITIES as u16).to_le_bytes());
         payload.push(0x21); // Character set (utf8)
         payload.extend_from_slice(&0x0002u16.to_le_bytes()); // Status flags
-        // Capability flags (upper 2 bytes)
-        payload.extend_from_slice(&0x81FFu16.to_le_bytes());
+        payload.extend_from_slice(&((SERVER_CAPABILITIES >> 16) as u16).to_le_bytes());
         payload.push(20); // Length of auth plugin data (8 + 12 = 20 bytes)
         payload.extend_from_slice(&[0; 10]); // Reserved
         payload.extend_from_slice(b"nettrap!!!!!"); // Auth plugin data part 2 (12 bytes)
@@ -71,8 +81,18 @@ impl MysqlHandler {
             return Self::build_ok_packet(seq + 1);
         }
 
-        let cap_flags = u16::from_le_bytes([data[0], data[1]]);
-        let is_41 = cap_flags & 0x0200 != 0; // CLIENT_PROTOCOL_41
+        let cap_flags = if data.len() >= 4 {
+            u32::from_le_bytes([data[0], data[1], data[2], data[3]])
+        } else {
+            u16::from_le_bytes([data[0], data[1]]) as u32
+        };
+
+        if cap_flags & CLIENT_SSL != 0 {
+            tracing::warn!("MySQL client requested SSL, but MySQL-over-TLS is not implemented");
+            return Self::build_error_packet(seq + 1, 2026, "SSL is not supported");
+        }
+
+        let is_41 = cap_flags & CLIENT_PROTOCOL_41 != 0;
 
         // Calculate username start offset with proper bounds checking
         let username_start = if is_41 {
@@ -155,7 +175,7 @@ impl MysqlHandler {
         Self::wrap_packet(&payload, seq)
     }
 
-    fn _build_error_packet(seq: u8, code: u16, msg: &str) -> Vec<u8> {
+    fn build_error_packet(seq: u8, code: u16, msg: &str) -> Vec<u8> {
         let mut payload = Vec::new();
         payload.push(0xFF); // Error marker
         payload.extend_from_slice(&code.to_le_bytes());
@@ -189,5 +209,59 @@ impl MysqlHandler {
 impl Default for MysqlHandler {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn handshake_capabilities(packet: &[u8]) -> u32 {
+        let payload = &packet[4..];
+        let version_end = payload
+            .iter()
+            .position(|&byte| byte == 0)
+            .expect("server version should be null-terminated");
+        let lower_offset = version_end + 1 + 4 + 8 + 1;
+        let lower = u16::from_le_bytes([payload[lower_offset], payload[lower_offset + 1]]) as u32;
+        let upper_offset = lower_offset + 2 + 1 + 2;
+        let upper = u16::from_le_bytes([payload[upper_offset], payload[upper_offset + 1]]) as u32;
+        lower | (upper << 16)
+    }
+
+    fn wrap_client_packet(payload: &[u8], seq: u8) -> Vec<u8> {
+        let mut packet = Vec::with_capacity(4 + payload.len());
+        packet.push((payload.len() & 0xff) as u8);
+        packet.push(((payload.len() >> 8) & 0xff) as u8);
+        packet.push(((payload.len() >> 16) & 0xff) as u8);
+        packet.push(seq);
+        packet.extend_from_slice(payload);
+        packet
+    }
+
+    #[test]
+    fn handshake_only_advertises_supported_capabilities() {
+        let handshake = MysqlHandler::new().get_handshake();
+        let capabilities = handshake_capabilities(&handshake);
+
+        assert_eq!(capabilities & CLIENT_SSL, 0);
+        assert_eq!(capabilities & 0x0000_0020, 0); // CLIENT_COMPRESS
+        assert_eq!(capabilities & 0x0000_0080, 0); // CLIENT_LOCAL_FILES
+        assert_ne!(capabilities & CLIENT_PROTOCOL_41, 0);
+        assert_ne!(capabilities & CLIENT_SECURE_CONNECTION, 0);
+        assert_ne!(capabilities & CLIENT_PLUGIN_AUTH, 0);
+    }
+
+    #[test]
+    fn ssl_request_is_rejected_instead_of_accepted_as_login() {
+        let handler = MysqlHandler::new();
+        let mut ssl_request = vec![0; 32];
+        let capabilities = CLIENT_PROTOCOL_41 | CLIENT_SSL | CLIENT_SECURE_CONNECTION;
+        ssl_request[..4].copy_from_slice(&capabilities.to_le_bytes());
+        let response = handler.handle(&wrap_client_packet(&ssl_request, 1));
+
+        assert_eq!(response[3], 2);
+        assert_eq!(response[4], 0xff);
+        assert!(String::from_utf8_lossy(&response).contains("SSL is not supported"));
     }
 }

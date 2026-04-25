@@ -8,7 +8,6 @@
 mod tests {
     #[cfg(target_os = "linux")]
     mod linux_tests {
-        use nettrap_interceptor::Interceptor;
         use nettrap_interceptor::InterceptorConfig;
         use nettrap_interceptor::platform::DefaultInterceptor;
 
@@ -61,7 +60,6 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     mod windows_tests {
-        use nettrap_interceptor::Interceptor;
         use nettrap_interceptor::InterceptorConfig;
         use nettrap_interceptor::platform::DefaultInterceptor;
 
@@ -79,7 +77,6 @@ mod tests {
 
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     mod other_tests {
-        use nettrap_interceptor::Interceptor;
         use nettrap_interceptor::InterceptorConfig;
 
         #[test]

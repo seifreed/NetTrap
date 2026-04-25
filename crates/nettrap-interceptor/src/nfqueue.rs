@@ -22,8 +22,10 @@ pub struct NfqueueInterceptor {
     interface: Option<String>,
     redirect_rules: Vec<PortRedirect>,
     flush_on_start: bool,
-    saved_rules: RwLock<Option<String>>,
-    saved_ip_forward: RwLock<Option<String>>,
+    saved_ipv4_rules: RwLock<Option<String>>,
+    saved_ipv6_rules: RwLock<Option<String>>,
+    saved_ipv4_forward: RwLock<Option<String>>,
+    saved_ipv6_forward: RwLock<Option<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -34,6 +36,7 @@ pub enum NetworkMode {
 
 #[derive(Debug, Clone)]
 struct IptablesRule {
+    command: &'static str,
     rule_args: Vec<String>,
 }
 
@@ -65,11 +68,52 @@ impl PortRedirect {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IpFamily {
+    V4,
+    V6,
+}
+
+impl IpFamily {
+    fn command(self) -> &'static str {
+        match self {
+            Self::V4 => "iptables",
+            Self::V6 => "ip6tables",
+        }
+    }
+
+    fn save_command(self) -> &'static str {
+        match self {
+            Self::V4 => "iptables-save",
+            Self::V6 => "ip6tables-save",
+        }
+    }
+
+    fn restore_command(self) -> &'static str {
+        match self {
+            Self::V4 => "iptables-restore",
+            Self::V6 => "ip6tables-restore",
+        }
+    }
+
+    fn loopback_cidr(self) -> &'static str {
+        match self {
+            Self::V4 => "127.0.0.0/8",
+            Self::V6 => "::1/128",
+        }
+    }
+}
+
+const IP_FAMILIES: [IpFamily; 2] = [IpFamily::V4, IpFamily::V6];
+const IPV4_FORWARD_PATH: &str = "/proc/sys/net/ipv4/ip_forward";
+const IPV6_FORWARD_PATH: &str = "/proc/sys/net/ipv6/conf/all/forwarding";
+
 fn build_redirect_rule_args(
     mode: NetworkMode,
     interface: Option<&str>,
     redirect: &PortRedirect,
     proto: &str,
+    family: IpFamily,
 ) -> (&'static str, Vec<String>) {
     let chain = match mode {
         NetworkMode::SingleHost => "OUTPUT",
@@ -88,7 +132,11 @@ fn build_redirect_rule_args(
         args.extend_from_slice(&["--dport".to_string(), source_port.to_string()]);
     }
 
-    args.extend_from_slice(&["!".to_string(), "-d".to_string(), "127.0.0.0/8".to_string()]);
+    args.extend_from_slice(&[
+        "!".to_string(),
+        "-d".to_string(),
+        family.loopback_cidr().to_string(),
+    ]);
 
     if mode == NetworkMode::SingleHost {
         if let Some(uid) = redirect.exclude_uid {
@@ -126,8 +174,10 @@ impl NfqueueInterceptor {
             interface: None,
             redirect_rules: Vec::new(),
             flush_on_start: false,
-            saved_rules: RwLock::new(None),
-            saved_ip_forward: RwLock::new(None),
+            saved_ipv4_rules: RwLock::new(None),
+            saved_ipv6_rules: RwLock::new(None),
+            saved_ipv4_forward: RwLock::new(None),
+            saved_ipv6_forward: RwLock::new(None),
         })
     }
 
@@ -178,39 +228,71 @@ impl NfqueueInterceptor {
 
     /// Save current iptables rules for restoration on shutdown
     fn save_iptables_rules(&self) -> Result<()> {
-        let output = Command::new("iptables-save")
-            .output()
-            .map_err(|e| Error::Interception(format!("iptables-save failed: {}", e)))?;
-
-        if output.status.success() {
-            let rules = String::from_utf8_lossy(&output.stdout).to_string();
-            *self.saved_rules.write() = Some(rules);
-            tracing::debug!("Saved iptables rules ({} bytes)", output.stdout.len());
-        }
+        *self.saved_ipv4_rules.write() = Some(Self::save_rules(IpFamily::V4)?);
+        *self.saved_ipv6_rules.write() = Some(Self::save_rules(IpFamily::V6)?);
         Ok(())
     }
 
     /// Restore saved iptables rules
     fn restore_iptables_rules(&self) -> Result<()> {
-        if let Some(ref rules) = *self.saved_rules.read() {
-            let mut child = Command::new("iptables-restore")
-                .stdin(std::process::Stdio::piped())
-                .spawn()
-                .map_err(|e| Error::Interception(format!("iptables-restore failed: {}", e)))?;
-
-            if let Some(mut stdin) = child.stdin.take() {
-                use std::io::Write;
-                stdin.write_all(rules.as_bytes()).map_err(|e| {
-                    Error::Interception(format!("iptables-restore write failed: {}", e))
-                })?;
-            }
-
-            child
-                .wait()
-                .map_err(|e| Error::Interception(format!("iptables-restore wait failed: {}", e)))?;
-
-            tracing::info!("Restored iptables rules");
+        if let Some(ref rules) = *self.saved_ipv4_rules.read() {
+            Self::restore_rules(IpFamily::V4, rules)?;
         }
+        if let Some(ref rules) = *self.saved_ipv6_rules.read() {
+            Self::restore_rules(IpFamily::V6, rules)?;
+        }
+        Ok(())
+    }
+
+    fn save_rules(family: IpFamily) -> Result<String> {
+        let output = Command::new(family.save_command())
+            .output()
+            .map_err(|e| Error::Interception(format!("{} failed: {}", family.save_command(), e)))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(Error::Interception(format!(
+                "{} failed: {}",
+                family.save_command(),
+                stderr.trim()
+            )));
+        }
+
+        tracing::debug!(
+            "Saved {} rules ({} bytes)",
+            family.command(),
+            output.stdout.len()
+        );
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
+
+    fn restore_rules(family: IpFamily, rules: &str) -> Result<()> {
+        let mut child = Command::new(family.restore_command())
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| {
+                Error::Interception(format!("{} failed: {}", family.restore_command(), e))
+            })?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            use std::io::Write;
+            stdin.write_all(rules.as_bytes()).map_err(|e| {
+                Error::Interception(format!("{} write failed: {}", family.restore_command(), e))
+            })?;
+        }
+
+        let status = child.wait().map_err(|e| {
+            Error::Interception(format!("{} wait failed: {}", family.restore_command(), e))
+        })?;
+        if !status.success() {
+            return Err(Error::Interception(format!(
+                "{} exited with status {}",
+                family.restore_command(),
+                status
+            )));
+        }
+
+        tracing::info!("Restored {} rules", family.command());
         Ok(())
     }
 
@@ -220,45 +302,63 @@ impl NfqueueInterceptor {
 
         for redirect in &self.redirect_rules {
             let proto = if redirect.is_tcp { "tcp" } else { "udp" };
-            let (_chain, args) =
-                build_redirect_rule_args(self.mode, self.interface.as_deref(), redirect, proto);
-
-            self.run_iptables(&args)?;
-            installed.push(IptablesRule { rule_args: args });
-
-            if let Some(source_port) = redirect.source_port {
-                tracing::debug!(
-                    "Installed iptables REDIRECT rule for {} port {} -> {}",
+            for family in IP_FAMILIES {
+                let (_chain, args) = build_redirect_rule_args(
+                    self.mode,
+                    self.interface.as_deref(),
+                    redirect,
                     proto,
-                    source_port,
-                    redirect.target_port
+                    family,
                 );
-            } else {
-                tracing::debug!(
-                    "Installed catch-all iptables REDIRECT rule for {} traffic -> {}",
-                    proto,
-                    redirect.target_port
-                );
+
+                self.run_iptables(family.command(), &args)?;
+                installed.push(IptablesRule {
+                    command: family.command(),
+                    rule_args: args,
+                });
+
+                if let Some(source_port) = redirect.source_port {
+                    tracing::debug!(
+                        "Installed {} REDIRECT rule for {} port {} -> {}",
+                        family.command(),
+                        proto,
+                        source_port,
+                        redirect.target_port
+                    );
+                } else {
+                    tracing::debug!(
+                        "Installed catch-all {} REDIRECT rule for {} traffic -> {}",
+                        family.command(),
+                        proto,
+                        redirect.target_port
+                    );
+                }
             }
         }
 
         // Enable IP forwarding for MultiHost mode, saving original state
         if self.mode == NetworkMode::MultiHost {
-            if let Ok(original) = std::fs::read_to_string("/proc/sys/net/ipv4/ip_forward") {
-                *self.saved_ip_forward.write() = Some(original.trim().to_string());
-            }
-            if let Err(e) = std::fs::write("/proc/sys/net/ipv4/ip_forward", "1") {
-                tracing::warn!(
-                    "Failed to enable IP forwarding for MultiHost mode: {}. Routing may not work.",
-                    e
-                );
-            } else {
-                tracing::info!("Enabled IPv4 forwarding for MultiHost mode");
-            }
+            Self::enable_forwarding(IPV4_FORWARD_PATH, &self.saved_ipv4_forward, "IPv4");
+            Self::enable_forwarding(IPV6_FORWARD_PATH, &self.saved_ipv6_forward, "IPv6");
         }
 
         *self.rules_installed.write() = installed;
         Ok(())
+    }
+
+    fn enable_forwarding(path: &str, saved: &RwLock<Option<String>>, label: &str) {
+        if let Ok(original) = std::fs::read_to_string(path) {
+            *saved.write() = Some(original.trim().to_string());
+        }
+        if let Err(e) = std::fs::write(path, "1") {
+            tracing::warn!(
+                "Failed to enable {} forwarding for MultiHost mode: {}. Routing may not work.",
+                label,
+                e
+            );
+        } else {
+            tracing::info!("Enabled {} forwarding for MultiHost mode", label);
+        }
     }
 
     /// Remove all installed iptables rules
@@ -279,8 +379,8 @@ impl NfqueueInterceptor {
                 })
                 .collect();
 
-            if let Err(e) = self.run_iptables(&delete_args) {
-                tracing::warn!("Failed to remove iptables rule: {}", e);
+            if let Err(e) = self.run_iptables(rule.command, &delete_args) {
+                tracing::warn!("Failed to remove {} rule: {}", rule.command, e);
             }
         }
 
@@ -289,16 +389,17 @@ impl NfqueueInterceptor {
         Ok(())
     }
 
-    fn run_iptables(&self, args: &[String]) -> Result<()> {
-        let output = Command::new("iptables")
+    fn run_iptables(&self, command: &str, args: &[String]) -> Result<()> {
+        let output = Command::new(command)
             .args(args)
             .output()
-            .map_err(|e| Error::Interception(format!("iptables failed: {}", e)))?;
+            .map_err(|e| Error::Interception(format!("{} failed: {}", command, e)))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(Error::Interception(format!(
-                "iptables {} failed: {}",
+                "{} {} failed: {}",
+                command,
                 args.join(" "),
                 stderr.trim()
             )));
@@ -308,8 +409,11 @@ impl NfqueueInterceptor {
 
     /// Flush iptables NAT table (optional, controlled by config)
     pub fn flush_nat_rules(&self) -> Result<()> {
-        self.run_iptables(&["-t".to_string(), "nat".to_string(), "-F".to_string()])?;
-        tracing::info!("Flushed iptables NAT rules");
+        let args = ["-t".to_string(), "nat".to_string(), "-F".to_string()];
+        for family in IP_FAMILIES {
+            self.run_iptables(family.command(), &args)?;
+        }
+        tracing::info!("Flushed iptables/ip6tables NAT rules");
         Ok(())
     }
 }
@@ -380,22 +484,16 @@ impl Interceptor for NfqueueInterceptor {
 
         // Restore original IP forwarding state
         if self.mode == NetworkMode::MultiHost {
-            let original = self
-                .saved_ip_forward
-                .read()
-                .clone()
-                .unwrap_or_else(|| "0".to_string());
-            if let Err(e) = std::fs::write("/proc/sys/net/ipv4/ip_forward", &original) {
-                tracing::error!(
-                    "CRITICAL: Failed to restore IPv4 forwarding to '{}': {}. \
-                     Manual intervention required: echo '{}' > /proc/sys/net/ipv4/ip_forward",
-                    original,
-                    e,
-                    original,
-                );
-            } else {
-                tracing::info!("Restored IPv4 forwarding to '{}'", original);
-            }
+            Self::restore_forwarding(
+                IPV4_FORWARD_PATH,
+                self.saved_ipv4_forward.read().clone(),
+                "IPv4",
+            );
+            Self::restore_forwarding(
+                IPV6_FORWARD_PATH,
+                self.saved_ipv6_forward.read().clone(),
+                "IPv6",
+            );
         }
 
         tracing::info!("NFQUEUE interceptor shut down cleanly");
@@ -411,6 +509,25 @@ impl Interceptor for NfqueueInterceptor {
     }
 }
 
+impl NfqueueInterceptor {
+    fn restore_forwarding(path: &str, original: Option<String>, label: &str) {
+        let original = original.unwrap_or_else(|| "0".to_string());
+        if let Err(e) = std::fs::write(path, &original) {
+            tracing::error!(
+                "CRITICAL: Failed to restore {} forwarding to '{}': {}. \
+                 Manual intervention required: echo '{}' > {}",
+                label,
+                original,
+                e,
+                original,
+                path,
+            );
+        } else {
+            tracing::info!("Restored {} forwarding to '{}'", label, original);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,30 +540,64 @@ mod tests {
     #[test]
     fn single_host_catch_all_excludes_current_uid() {
         let redirect = PortRedirect::catch_all(true, 8080);
-        let (chain, args) =
-            build_redirect_rule_args(NetworkMode::SingleHost, None, &redirect, "tcp");
+        let (chain, args) = build_redirect_rule_args(
+            NetworkMode::SingleHost,
+            None,
+            &redirect,
+            "tcp",
+            IpFamily::V4,
+        );
 
         assert_eq!(chain, "OUTPUT");
         assert!(contains_args(&args, &["-m", "owner", "!", "--uid-owner"]));
+        assert!(contains_args(&args, &["!", "-d", "127.0.0.0/8"]));
     }
 
     #[test]
     fn single_host_explicit_redirect_excludes_current_uid() {
         let redirect = PortRedirect::new(80, true, 8080);
-        let (_chain, args) =
-            build_redirect_rule_args(NetworkMode::SingleHost, None, &redirect, "tcp");
+        let (_chain, args) = build_redirect_rule_args(
+            NetworkMode::SingleHost,
+            None,
+            &redirect,
+            "tcp",
+            IpFamily::V4,
+        );
 
         assert!(contains_args(&args, &["-m", "owner", "!", "--uid-owner"]));
     }
 
     #[test]
+    fn single_host_ipv6_redirect_excludes_loopback_and_current_uid() {
+        let redirect = PortRedirect::new(443, true, 8443);
+        let (chain, args) = build_redirect_rule_args(
+            NetworkMode::SingleHost,
+            None,
+            &redirect,
+            "tcp",
+            IpFamily::V6,
+        );
+
+        assert_eq!(chain, "OUTPUT");
+        assert!(contains_args(&args, &["!", "-d", "::1/128"]));
+        assert!(contains_args(&args, &["-m", "owner", "!", "--uid-owner"]));
+        assert_eq!(IpFamily::V6.command(), "ip6tables");
+    }
+
+    #[test]
     fn multihost_catch_all_does_not_use_owner_match() {
         let redirect = PortRedirect::catch_all(false, 5353);
-        let (chain, args) =
-            build_redirect_rule_args(NetworkMode::MultiHost, Some("eth0"), &redirect, "udp");
+        let (chain, args) = build_redirect_rule_args(
+            NetworkMode::MultiHost,
+            Some("eth0"),
+            &redirect,
+            "udp",
+            IpFamily::V6,
+        );
 
         assert_eq!(chain, "PREROUTING");
         assert!(!contains_args(&args, &["-m", "owner", "!", "--uid-owner"]));
         assert!(contains_args(&args, &["-i", "eth0"]));
+        assert!(contains_args(&args, &["!", "-d", "::1/128"]));
     }
 }
