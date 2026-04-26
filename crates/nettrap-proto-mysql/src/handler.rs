@@ -79,10 +79,11 @@ impl MysqlHandler {
         }
 
         let cap_flags = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        let response_seq = seq.wrapping_add(1);
 
         if cap_flags & CLIENT_SSL != 0 {
             tracing::warn!("MySQL client requested SSL, but MySQL-over-TLS is not implemented");
-            return Self::build_error_packet(seq + 1, 2026, "SSL is not supported");
+            return Self::build_error_packet(response_seq, 2026, "SSL is not supported");
         }
 
         let is_41 = cap_flags & CLIENT_PROTOCOL_41 != 0;
@@ -93,20 +94,28 @@ impl MysqlHandler {
             if data.len() > 32 {
                 32
             } else {
-                return Self::build_error_packet(seq + 1, 1043, "Malformed handshake response");
+                return Self::build_error_packet(
+                    response_seq,
+                    1043,
+                    "Malformed handshake response",
+                );
             }
         } else {
             // Protocol 3.20: 2-byte flags + 3-byte max_packet
             if data.len() > 5 {
                 5
             } else {
-                return Self::build_error_packet(seq + 1, 1043, "Malformed handshake response");
+                return Self::build_error_packet(
+                    response_seq,
+                    1043,
+                    "Malformed handshake response",
+                );
             }
         };
 
         // Additional safety check (should never fail due to above logic)
         if username_start >= data.len() {
-            return Self::build_error_packet(seq + 1, 1043, "Malformed handshake response");
+            return Self::build_error_packet(response_seq, 1043, "Malformed handshake response");
         }
 
         // Extract username (null-terminated string)
@@ -123,7 +132,7 @@ impl MysqlHandler {
         tracing::warn!("MySQL LOGIN attempt: user={}", username);
 
         // Return OK packet (let them "in" to capture more commands)
-        Self::build_ok_packet(seq + 1)
+        Self::build_ok_packet(response_seq)
     }
 
     fn handle_command(&self, data: &[u8], seq: u8) -> Vec<u8> {
@@ -131,6 +140,7 @@ impl MysqlHandler {
             return Vec::new();
         }
         let cmd = data[0];
+        let response_seq = seq.wrapping_add(1);
 
         match cmd {
             0x03 => {
@@ -138,7 +148,7 @@ impl MysqlHandler {
                 let query = String::from_utf8_lossy(&data[1..]);
                 tracing::warn!("MySQL QUERY: {}", query);
                 // Return empty result set
-                Self::build_ok_packet(seq + 1)
+                Self::build_ok_packet(response_seq)
             }
             0x01 => {
                 // COM_QUIT
@@ -148,15 +158,15 @@ impl MysqlHandler {
                 // COM_INIT_DB
                 let db = String::from_utf8_lossy(&data[1..]);
                 tracing::info!("MySQL USE {}", db);
-                Self::build_ok_packet(seq + 1)
+                Self::build_ok_packet(response_seq)
             }
             0x04 => {
                 // COM_FIELD_LIST
-                Self::build_ok_packet(seq + 1)
+                Self::build_ok_packet(response_seq)
             }
             _ => {
                 tracing::info!("MySQL command: 0x{:02x}", cmd);
-                Self::build_ok_packet(seq + 1)
+                Self::build_ok_packet(response_seq)
             }
         }
     }
@@ -295,6 +305,15 @@ mod tests {
         let response = handler.handle(&wrap_client_packet(&login, 1));
 
         assert_eq!(response[3], 2);
+        assert_eq!(response[4], 0x00);
+    }
+
+    #[test]
+    fn response_sequence_wraps_without_panic() {
+        let handler = MysqlHandler::new();
+        let response = handler.handle(&wrap_client_packet(&[0x03, b'S', b'E', b'L'], 255));
+
+        assert_eq!(response[3], 0);
         assert_eq!(response[4], 0x00);
     }
 }

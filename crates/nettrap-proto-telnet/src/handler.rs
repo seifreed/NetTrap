@@ -100,7 +100,7 @@ impl TelnetHandler {
             "echo" => {
                 let arg = cmd.strip_prefix("echo ").unwrap_or("");
                 // Limit echo output to 4KB to prevent memory exhaustion
-                let truncated = if arg.len() > 4096 { &arg[..4096] } else { arg };
+                let truncated = truncate_utf8(arg, 4096);
                 let echo_output = format!("{}\n", truncated);
                 return self.build_response(&echo_output, cmd);
             }
@@ -156,6 +156,18 @@ impl TelnetHandler {
     }
 }
 
+fn truncate_utf8(input: &str, max_bytes: usize) -> &str {
+    if input.len() <= max_bytes {
+        return input;
+    }
+
+    let mut end = max_bytes;
+    while !input.is_char_boundary(end) {
+        end -= 1;
+    }
+    &input[..end]
+}
+
 impl Default for TelnetHandler {
     fn default() -> Self {
         Self::new()
@@ -182,5 +194,15 @@ mod tests {
         assert_eq!(handler.handle_command("exitnow"), b"-sh: not found\n# ");
         assert_eq!(handler.handle_command("quitnow"), b"-sh: not found\n# ");
         assert_eq!(handler.handle_command("logoutnow"), b"-sh: not found\n# ");
+    }
+
+    #[test]
+    fn echo_truncates_on_utf8_boundary() {
+        let handler = TelnetHandler::new();
+        let arg = format!("{}é", "a".repeat(4095));
+        let response = handler.handle_command(&format!("echo {arg}"));
+
+        assert!(response.ends_with(b"\n# "));
+        assert_eq!(&response[..4095], vec![b'a'; 4095].as_slice());
     }
 }

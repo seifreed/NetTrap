@@ -25,7 +25,9 @@ impl LdapHandler {
             return Vec::new();
         }
 
-        let (msg_id, op_offset) = Self::parse_message_id(data);
+        let Some((msg_id, op_offset)) = Self::parse_message_id(data) else {
+            return Vec::new();
+        };
         if op_offset >= data.len() {
             return Vec::new();
         }
@@ -68,35 +70,31 @@ impl LdapHandler {
         }
     }
 
-    fn parse_message_id(data: &[u8]) -> (u32, usize) {
+    fn parse_message_id(data: &[u8]) -> Option<(u32, usize)> {
         // Skip sequence tag + length
         let mut pos = 1;
-        let (_seq_len, len_bytes) = match Self::parse_ber_length(&data[pos..]) {
-            Some(v) => v,
-            None => return (0, pos),
-        };
+        let (_seq_len, len_bytes) = Self::parse_ber_length(&data[pos..])?;
         pos += len_bytes;
 
         // Message ID: INTEGER tag (0x02) + length + value
         if pos >= data.len() || data[pos] != 0x02 {
-            return (0, pos);
+            return None;
         }
         pos += 1;
-        let (id_len, len_bytes) = match Self::parse_ber_length(&data[pos..]) {
-            Some(v) => v,
-            None => return (0, pos),
-        };
+        let (id_len, len_bytes) = Self::parse_ber_length(&data[pos..])?;
         pos += len_bytes;
 
-        // Validate id_len won't move pos past data boundary
-        let safe_id_len = id_len.min(data.len().saturating_sub(pos));
+        if id_len == 0 || id_len > 4 || pos + id_len > data.len() {
+            return None;
+        }
+
         let mut msg_id = 0u32;
-        for i in 0..safe_id_len.min(4) {
+        for i in 0..id_len {
             msg_id = (msg_id << 8) | data[pos + i] as u32;
         }
-        pos += safe_id_len;
+        pos += id_len;
 
-        (msg_id, pos)
+        Some((msg_id, pos))
     }
 
     /// Maximum allowed BER length (16MB) to prevent memory exhaustion attacks
@@ -108,8 +106,7 @@ impl LdapHandler {
         }
         if data[0] & 0x80 == 0 {
             // Short form: length in lower 7 bits
-            let len = data[0] as usize;
-            Some((len.min(Self::MAX_BER_LENGTH), 1))
+            Some((data[0] as usize, 1))
         } else {
             // Long form: lower 7 bits = number of following length bytes
             let num_bytes = (data[0] & 0x7F) as usize;
@@ -121,8 +118,10 @@ impl LdapHandler {
             for i in 0..num_bytes {
                 len = (len << 8) | data[i + 1] as usize;
             }
-            // Cap length to prevent memory exhaustion
-            Some((len.min(Self::MAX_BER_LENGTH), 1 + num_bytes))
+            if len > Self::MAX_BER_LENGTH {
+                return None;
+            }
+            Some((len, 1 + num_bytes))
         }
     }
 
@@ -288,6 +287,37 @@ mod tests {
     #[test]
     fn context_tag_with_search_low_bits_is_rejected() {
         let request = [0x30, 0x05, 0x02, 0x01, 0x01, 0xa3, 0x00];
+
+        let response = LdapHandler::new().handle(&request);
+
+        assert!(response.is_empty());
+    }
+
+    #[test]
+    fn declared_sequence_length_above_limit_is_rejected() {
+        let request = [
+            0x30, 0x84, 0x01, 0x00, 0x00, 0x01, 0x02, 0x01, 0x01, 0x60, 0x00,
+        ];
+
+        let response = LdapHandler::new().handle(&request);
+
+        assert!(response.is_empty());
+    }
+
+    #[test]
+    fn zero_length_message_id_is_rejected() {
+        let request = [0x30, 0x05, 0x02, 0x00, 0x60, 0x01, 0x00];
+
+        let response = LdapHandler::new().handle(&request);
+
+        assert!(response.is_empty());
+    }
+
+    #[test]
+    fn oversize_message_id_is_rejected() {
+        let request = [
+            0x30, 0x09, 0x02, 0x05, 0x00, 0x00, 0x00, 0x00, 0x01, 0x60, 0x00,
+        ];
 
         let response = LdapHandler::new().handle(&request);
 

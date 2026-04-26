@@ -151,7 +151,10 @@ impl Pop3Handler {
                 Pop3Response::err("Missing argument")
             }
         } else if verb == "DELE" {
-            Pop3Response::ok("Message deleted")
+            match self.parse_existing_message_index(&parts) {
+                Ok(_) => Pop3Response::ok("Message deleted"),
+                Err(response) => response,
+            }
         } else if verb == "NOOP" {
             Pop3Response::ok("")
         } else if verb == "RSET" {
@@ -201,8 +204,12 @@ impl Pop3Handler {
         } else if verb == "AUTH" {
             return self.handle_auth_command(&parts);
         } else if verb == "APOP" {
-            let user = parts.get(1).unwrap_or(&"unknown");
-            let digest = parts.get(2).unwrap_or(&"");
+            let Some(user) = parts.get(1).filter(|value| !value.is_empty()) else {
+                return Ok((Pop3Response::err("Missing argument"), Pop3AuthState::None));
+            };
+            let Some(digest) = parts.get(2).filter(|value| !value.is_empty()) else {
+                return Ok((Pop3Response::err("Missing argument"), Pop3AuthState::None));
+            };
             tracing::info!("POP3 APOP — user: {} digest: {}", user, digest);
             Pop3Response::ok("Authentication successful")
         } else if verb == "CAPA" {
@@ -218,6 +225,24 @@ impl Pop3Handler {
         };
 
         Ok((response, Pop3AuthState::None))
+    }
+
+    fn parse_existing_message_index(
+        &self,
+        parts: &[&str],
+    ) -> std::result::Result<usize, Pop3Response> {
+        let Some(raw_index) = parts.get(1) else {
+            return Err(Pop3Response::err("Missing argument"));
+        };
+
+        let index = raw_index
+            .parse::<usize>()
+            .map_err(|_| Pop3Response::err("Invalid argument"))?;
+        if index == 0 || index > self.emails.len() {
+            return Err(Pop3Response::err("No such message"));
+        }
+
+        Ok(index)
     }
 
     fn handle_auth_command(&self, parts: &[&str]) -> Result<(Pop3Response, Pop3AuthState)> {
@@ -433,5 +458,40 @@ mod tests {
 
         assert!(!response.positive);
         assert_eq!(response.to_bytes(), b"-ERR TLS not available\r\n");
+    }
+
+    #[test]
+    fn dele_validates_message_argument() {
+        let handler = Pop3Handler::new();
+
+        let valid = block_on(handler.handle("DELE 1")).expect("valid DELE response");
+        assert_eq!(valid.to_bytes(), b"+OK Message deleted\r\n");
+
+        let missing = block_on(handler.handle("DELE")).expect("missing DELE response");
+        assert_eq!(missing.to_bytes(), b"-ERR Missing argument\r\n");
+
+        let invalid = block_on(handler.handle("DELE abc")).expect("invalid DELE response");
+        assert_eq!(invalid.to_bytes(), b"-ERR Invalid argument\r\n");
+
+        let zero = block_on(handler.handle("DELE 0")).expect("zero DELE response");
+        assert_eq!(zero.to_bytes(), b"-ERR No such message\r\n");
+
+        let out_of_range = block_on(handler.handle("DELE 99")).expect("out of range DELE response");
+        assert_eq!(out_of_range.to_bytes(), b"-ERR No such message\r\n");
+    }
+
+    #[test]
+    fn apop_requires_user_and_digest() {
+        let handler = Pop3Handler::new();
+
+        let valid = block_on(handler.handle("APOP user digest")).expect("valid APOP response");
+        assert_eq!(valid.to_bytes(), b"+OK Authentication successful\r\n");
+
+        let missing_all = block_on(handler.handle("APOP")).expect("missing APOP response");
+        assert_eq!(missing_all.to_bytes(), b"-ERR Missing argument\r\n");
+
+        let missing_digest =
+            block_on(handler.handle("APOP user")).expect("missing digest response");
+        assert_eq!(missing_digest.to_bytes(), b"-ERR Missing argument\r\n");
     }
 }

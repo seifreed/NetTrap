@@ -39,10 +39,12 @@ impl SocksHandler {
             user
         );
 
-        // Reply: granted
-        vec![
-            0x00, 0x5A, data[2], data[3], data[4], data[5], data[6], data[7],
-        ]
+        if cmd != 0x01 {
+            tracing::info!("SOCKS4 unsupported command: {}", cmd);
+            return Self::socks4_reply(0x5B, data);
+        }
+
+        Self::socks4_reply(0x5A, data)
     }
 
     fn handle_socks5(&self, data: &[u8]) -> Vec<u8> {
@@ -59,8 +61,12 @@ impl SocksHandler {
                 || (data.len() > 2 + nmethods && data[2 + nmethods] == 0x05)
             {
                 tracing::info!("SOCKS5 handshake: {} auth methods", nmethods);
-                // Accept no authentication
-                return vec![0x05, 0x00];
+                let methods = &data[2..2 + nmethods];
+                return if methods.contains(&0x00) {
+                    vec![0x05, 0x00]
+                } else {
+                    vec![0x05, 0xFF]
+                };
             }
         }
 
@@ -85,10 +91,11 @@ impl SocksHandler {
                     if dlen == 0 || data.len() < 5 + dlen + 2 {
                         return Vec::new();
                     }
-                    (
-                        String::from_utf8_lossy(&data[5..5 + dlen]).to_string(),
-                        5 + dlen,
-                    )
+                    let domain = &data[5..5 + dlen];
+                    if domain.iter().any(|byte| byte.is_ascii_control()) {
+                        return Vec::new();
+                    }
+                    (String::from_utf8_lossy(domain).to_string(), 5 + dlen)
                 }
                 0x04 => {
                     // IPv6
@@ -110,6 +117,12 @@ impl SocksHandler {
         }
 
         Vec::new()
+    }
+
+    fn socks4_reply(status: u8, data: &[u8]) -> Vec<u8> {
+        vec![
+            0x00, status, data[2], data[3], data[4], data[5], data[6], data[7],
+        ]
     }
 }
 
@@ -145,6 +158,27 @@ mod tests {
     }
 
     #[test]
+    fn socks4_rejects_unsupported_commands() {
+        let handler = SocksHandler::new();
+        let request = [
+            0x04, 0x02, 0x00, 0x50, 127, 0, 0, 1, b'u', b's', b'e', b'r', 0x00,
+        ];
+
+        assert_eq!(
+            handler.handle(&request),
+            vec![0x00, 0x5B, 0x00, 0x50, 127, 0, 0, 1]
+        );
+    }
+
+    #[test]
+    fn socks5_handshake_rejects_when_no_no_auth_method_is_offered() {
+        let handler = SocksHandler::new();
+        let request = [0x05, 0x01, 0x02];
+
+        assert_eq!(handler.handle(&request), vec![0x05, 0xFF]);
+    }
+
+    #[test]
     fn socks5_connect_rejects_nonzero_reserved_byte() {
         let handler = SocksHandler::new();
         let request = [0x05, 0x01, 0x01, 0x01, 127, 0, 0, 1, 0x00, 0x50];
@@ -170,6 +204,17 @@ mod tests {
     fn socks5_connect_rejects_empty_domain() {
         let handler = SocksHandler::new();
         let request = [0x05, 0x01, 0x00, 0x03, 0x00, 0x00, 0x50];
+
+        assert!(handler.handle(&request).is_empty());
+    }
+
+    #[test]
+    fn socks5_connect_rejects_control_bytes_in_domain() {
+        let handler = SocksHandler::new();
+        let request = [
+            0x05, 0x01, 0x00, 0x03, 0x08, b'e', b'x', b'a', 0x00, b'p', b'l', b'e', b'.', 0x00,
+            0x50,
+        ];
 
         assert!(handler.handle(&request).is_empty());
     }

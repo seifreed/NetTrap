@@ -2180,8 +2180,6 @@ dependencies = [
  "memchr",
  "nettrap-core",
  "nom 8.0.0",
- "once_cell",
- "regex",
  "thiserror 2.0.18",
 ]
 
