@@ -45,6 +45,19 @@ impl SipHandler {
         Some(method)
     }
 
+    fn cseq_matches_method(cseq: &str, method: &str) -> bool {
+        let mut parts = cseq.split_whitespace();
+        let Some(sequence) = parts.next() else {
+            return false;
+        };
+        let Some(cseq_method) = parts.next() else {
+            return false;
+        };
+        parts.next().is_none()
+            && sequence.parse::<u32>().is_ok()
+            && cseq_method.eq_ignore_ascii_case(method)
+    }
+
     pub fn handle(&self, data: &[u8]) -> Vec<u8> {
         let text = String::from_utf8_lossy(data);
         let first_line = text.lines().next().unwrap_or("");
@@ -68,8 +81,13 @@ impl SipHandler {
         let call_id = Self::sanitize_header_value(
             Self::extract_header(&text, "Call-ID").unwrap_or("unknown"),
         );
-        let cseq =
-            Self::sanitize_header_value(Self::extract_header(&text, "CSeq").unwrap_or("1 UNKNOWN"));
+        let Some(cseq_raw) = Self::extract_header(&text, "CSeq") else {
+            return Vec::new();
+        };
+        if !Self::cseq_matches_method(cseq_raw, method) {
+            return Vec::new();
+        }
+        let cseq = Self::sanitize_header_value(cseq_raw);
 
         if matches!(method, "REGISTER" | "INVITE") {
             format!(
@@ -149,6 +167,31 @@ mod tests {
         assert!(
             handler
                 .handle(b"OPTIONS sip:service@example.com SIP/3.0\r\n\r\n")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn ignores_requests_without_matching_cseq_method() {
+        let handler = SipHandler::new();
+
+        assert!(
+            handler
+                .handle(b"OPTIONS sip:service@example.com SIP/2.0\r\nCall-ID: abc\r\n\r\n")
+                .is_empty()
+        );
+        assert!(
+            handler
+                .handle(
+                    b"OPTIONS sip:service@example.com SIP/2.0\r\nCall-ID: abc\r\nCSeq: 1 INVITE\r\n\r\n"
+                )
+                .is_empty()
+        );
+        assert!(
+            handler
+                .handle(
+                    b"OPTIONS sip:service@example.com SIP/2.0\r\nCall-ID: abc\r\nCSeq: one OPTIONS\r\n\r\n"
+                )
                 .is_empty()
         );
     }

@@ -72,16 +72,49 @@ impl MemcachedHandler {
         }
 
         let opcode = data[1];
+        let key_len = u16::from_be_bytes([data[2], data[3]]) as usize;
+        let extras_len = data[4] as usize;
+        if extras_len
+            .checked_add(key_len)
+            .is_none_or(|metadata_len| metadata_len > body_len)
+        {
+            tracing::debug!(
+                "MEMCACHED binary packet has invalid extras/key lengths: extras={}, key={}, body={}",
+                extras_len,
+                key_len,
+                body_len
+            );
+            return Self::binary_response(opcode, 0x0004, data);
+        }
+
         tracing::info!(
             "MEMCACHED binary opcode: 0x{:02x}, body_len: {}",
             opcode,
             body_len
         );
 
-        // Minimal binary response header
+        let status = if Self::supported_binary_opcode(opcode) {
+            0x0000
+        } else {
+            0x0081
+        };
+        Self::binary_response(opcode, status, data)
+    }
+
+    fn supported_binary_opcode(opcode: u8) -> bool {
+        matches!(opcode, 0x00..=0x17 | 0x1c | 0x1d)
+    }
+
+    fn binary_response(opcode: u8, status: u16, request: &[u8]) -> Vec<u8> {
         let mut resp = vec![0x81]; // Response magic
         resp.push(opcode);
-        resp.extend_from_slice(&[0; 22]); // Rest of header (zeros = success)
+        resp.extend_from_slice(&0u16.to_be_bytes()); // key length
+        resp.push(0); // extras length
+        resp.push(0); // data type
+        resp.extend_from_slice(&status.to_be_bytes());
+        resp.extend_from_slice(&0u32.to_be_bytes()); // body length
+        resp.extend_from_slice(request.get(12..16).unwrap_or(&[0, 0, 0, 0]));
+        resp.extend_from_slice(&0u64.to_be_bytes()); // CAS
         resp
     }
 }
@@ -192,5 +225,37 @@ mod tests {
             handler.handle(b"cas key 0 0 5 nope\r\nhello\r\n"),
             b"ERROR\r\n"
         );
+    }
+
+    #[test]
+    fn binary_packets_reject_inconsistent_extras_and_key_lengths() {
+        let handler = MemcachedHandler::new();
+        let mut request = vec![0x80, 0x00, 0x00, 0x04, 0x04, 0x00, 0x00, 0x00];
+        request.extend_from_slice(&4u32.to_be_bytes());
+        request.extend_from_slice(&0x12345678u32.to_be_bytes());
+        request.extend_from_slice(&0u64.to_be_bytes());
+        request.extend_from_slice(b"body");
+
+        let response = handler.handle(&request);
+
+        assert_eq!(response[0], 0x81);
+        assert_eq!(u16::from_be_bytes([response[6], response[7]]), 0x0004);
+        assert_eq!(&response[12..16], &0x12345678u32.to_be_bytes());
+    }
+
+    #[test]
+    fn binary_packets_report_unknown_opcodes() {
+        let handler = MemcachedHandler::new();
+        let mut request = vec![0x80, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        request.extend_from_slice(&0u32.to_be_bytes());
+        request.extend_from_slice(&0x01020304u32.to_be_bytes());
+        request.extend_from_slice(&0u64.to_be_bytes());
+
+        let response = handler.handle(&request);
+
+        assert_eq!(response[0], 0x81);
+        assert_eq!(response[1], 0xff);
+        assert_eq!(u16::from_be_bytes([response[6], response[7]]), 0x0081);
+        assert_eq!(&response[12..16], &0x01020304u32.to_be_bytes());
     }
 }

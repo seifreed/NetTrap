@@ -45,8 +45,16 @@ impl PostgresHandler {
                     return Vec::new();
                 }
                 let query_end = 1 + msg_len;
-                let raw_query = String::from_utf8_lossy(&data[5..query_end]);
-                let query = raw_query.trim_end_matches('\0');
+                let query_bytes = &data[5..query_end];
+                let Some(query_without_nul) = query_bytes.strip_suffix(&[0]) else {
+                    tracing::debug!("POSTGRES malformed Query without NUL terminator");
+                    return Vec::new();
+                };
+                if query_without_nul.contains(&0) {
+                    tracing::debug!("POSTGRES malformed Query with embedded NUL");
+                    return Vec::new();
+                }
+                let query = String::from_utf8_lossy(query_without_nul);
                 tracing::warn!("POSTGRES QUERY (v{}): {}", self.version, query);
                 // CommandComplete + ReadyForQuery
                 let mut resp = Vec::new();
@@ -163,6 +171,22 @@ mod tests {
     #[test]
     fn truncated_query_length_is_rejected() {
         let response = PostgresHandler::new().handle(&[b'Q', 0, 0, 0, 8, b'S', b'E']);
+
+        assert!(response.is_empty());
+    }
+
+    #[test]
+    fn query_without_nul_terminator_is_rejected() {
+        let response =
+            PostgresHandler::new().handle(&[b'Q', 0, 0, 0, 10, b'S', b'E', b'L', b'E', b'C', b'T']);
+
+        assert!(response.is_empty());
+    }
+
+    #[test]
+    fn query_with_embedded_nul_is_rejected() {
+        let response =
+            PostgresHandler::new().handle(&[b'Q', 0, 0, 0, 12, b'S', b'E', b'L', 0, b'C', b'T', 0]);
 
         assert!(response.is_empty());
     }

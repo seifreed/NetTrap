@@ -25,12 +25,15 @@ impl LdapHandler {
             return Vec::new();
         }
 
-        let Some((msg_id, op_offset)) = Self::parse_message_id(data) else {
+        let Some((msg_id, op_offset, seq_end)) = Self::parse_message_id(data) else {
             return Vec::new();
         };
-        if op_offset >= data.len() {
+        if op_offset >= seq_end {
             return Vec::new();
         }
+        let Some(op_end) = Self::operation_end(data, op_offset, seq_end) else {
+            return Vec::new();
+        };
 
         let op_byte = data[op_offset];
         let op_tag = op_byte & 0x1F; // Application tag number
@@ -48,7 +51,7 @@ impl LdapHandler {
                 // BindRequest (tag 0, Application class)
                 tracing::warn!("LDAP BIND request");
                 // Extract bind DN if possible
-                if let Some(dn) = Self::extract_bind_dn(data, op_offset) {
+                if let Some(dn) = Self::extract_bind_dn(data, op_offset, op_end) {
                     tracing::warn!("LDAP BIND DN: {}", dn);
                 }
                 self.build_bind_response(msg_id)
@@ -70,21 +73,25 @@ impl LdapHandler {
         }
     }
 
-    fn parse_message_id(data: &[u8]) -> Option<(u32, usize)> {
+    fn parse_message_id(data: &[u8]) -> Option<(u32, usize, usize)> {
         // Skip sequence tag + length
         let mut pos = 1;
-        let (_seq_len, len_bytes) = Self::parse_ber_length(&data[pos..])?;
+        let (seq_len, len_bytes) = Self::parse_ber_length(&data[pos..])?;
         pos += len_bytes;
+        let seq_end = pos.checked_add(seq_len)?;
+        if seq_end > data.len() {
+            return None;
+        }
 
         // Message ID: INTEGER tag (0x02) + length + value
-        if pos >= data.len() || data[pos] != 0x02 {
+        if pos >= seq_end || data[pos] != 0x02 {
             return None;
         }
         pos += 1;
-        let (id_len, len_bytes) = Self::parse_ber_length(&data[pos..])?;
+        let (id_len, len_bytes) = Self::parse_ber_length(&data[pos..seq_end])?;
         pos += len_bytes;
 
-        if id_len == 0 || id_len > 4 || pos + id_len > data.len() {
+        if id_len == 0 || id_len > 4 || pos + id_len > seq_end {
             return None;
         }
 
@@ -94,7 +101,7 @@ impl LdapHandler {
         }
         pos += id_len;
 
-        Some((msg_id, pos))
+        Some((msg_id, pos, seq_end))
     }
 
     /// Maximum allowed BER length (16MB) to prevent memory exhaustion attacks
@@ -125,32 +132,46 @@ impl LdapHandler {
         }
     }
 
-    fn extract_bind_dn(data: &[u8], op_offset: usize) -> Option<String> {
-        let mut pos = op_offset + 1; // Skip tag
-        if pos >= data.len() {
+    fn operation_end(data: &[u8], op_offset: usize, seq_end: usize) -> Option<usize> {
+        let mut pos = op_offset + 1;
+        if pos > seq_end {
             return None;
         }
-        let (_, len_bytes) = Self::parse_ber_length(&data[pos..])?;
+        let (op_len, len_bytes) = Self::parse_ber_length(&data[pos..seq_end])?;
+        pos += len_bytes;
+        let op_end = pos.checked_add(op_len)?;
+        if op_end > seq_end {
+            return None;
+        }
+        Some(op_end)
+    }
+
+    fn extract_bind_dn(data: &[u8], op_offset: usize, op_end: usize) -> Option<String> {
+        let mut pos = op_offset + 1; // Skip tag
+        if pos >= op_end {
+            return None;
+        }
+        let (_, len_bytes) = Self::parse_ber_length(&data[pos..op_end])?;
         pos += len_bytes;
         // Skip version INTEGER
-        if pos >= data.len() || data[pos] != 0x02 {
+        if pos >= op_end || data[pos] != 0x02 {
             return None;
         }
         pos += 1;
-        let (ver_len, len_bytes) = Self::parse_ber_length(&data[pos..])?;
+        let (ver_len, len_bytes) = Self::parse_ber_length(&data[pos..op_end])?;
         let advance = len_bytes.saturating_add(ver_len);
-        if pos + advance > data.len() {
+        if pos + advance > op_end {
             return None;
         }
         pos += advance;
         // DN is OCTET STRING (0x04)
-        if pos >= data.len() || data[pos] != 0x04 {
+        if pos >= op_end || data[pos] != 0x04 {
             return None;
         }
         pos += 1;
-        let (dn_len, len_bytes) = Self::parse_ber_length(&data[pos..])?;
+        let (dn_len, len_bytes) = Self::parse_ber_length(&data[pos..op_end])?;
         pos += len_bytes;
-        if pos + dn_len > data.len() {
+        if pos + dn_len > op_end {
             return None;
         }
         Some(String::from_utf8_lossy(&data[pos..pos + dn_len]).to_string())
@@ -318,6 +339,24 @@ mod tests {
         let request = [
             0x30, 0x09, 0x02, 0x05, 0x00, 0x00, 0x00, 0x00, 0x01, 0x60, 0x00,
         ];
+
+        let response = LdapHandler::new().handle(&request);
+
+        assert!(response.is_empty());
+    }
+
+    #[test]
+    fn operation_outside_declared_sequence_is_rejected() {
+        let request = [0x30, 0x03, 0x02, 0x01, 0x01, 0x60, 0x00];
+
+        let response = LdapHandler::new().handle(&request);
+
+        assert!(response.is_empty());
+    }
+
+    #[test]
+    fn operation_length_must_fit_declared_sequence() {
+        let request = [0x30, 0x05, 0x02, 0x01, 0x01, 0x60, 0x02];
 
         let response = LdapHandler::new().handle(&request);
 

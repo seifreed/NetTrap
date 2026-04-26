@@ -21,13 +21,35 @@ impl SshHandler {
 
     /// Parse client version string from first line
     pub fn parse_client_version(data: &[u8]) -> Option<String> {
-        let text = std::str::from_utf8(data).ok()?;
-        let line = text.lines().next()?;
-        if line.starts_with("SSH-") {
-            Some(line.trim().to_string())
-        } else {
-            None
+        let line_end = data
+            .iter()
+            .position(|&byte| byte == b'\n')
+            .unwrap_or(data.len());
+        let mut line = &data[..line_end];
+        if line.ends_with(b"\r") {
+            line = &line[..line.len().saturating_sub(1)];
         }
+        if line.is_empty() || line.len() > 255 {
+            return None;
+        }
+
+        let line = std::str::from_utf8(line).ok()?;
+        let prefix_len = if line.starts_with("SSH-2.0-") {
+            "SSH-2.0-".len()
+        } else if line.starts_with("SSH-1.99-") {
+            "SSH-1.99-".len()
+        } else {
+            return None;
+        };
+        let software_version = &line[prefix_len..];
+        if software_version.is_empty() || software_version.starts_with(' ') {
+            return None;
+        }
+        if !line.bytes().all(|byte| matches!(byte, 0x20..=0x7e)) {
+            return None;
+        }
+
+        Some(line.to_string())
     }
 
     /// Build a fake SSH key exchange init packet
@@ -158,5 +180,39 @@ impl SshHandler {
 impl Default for SshHandler {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_valid_client_versions() {
+        assert_eq!(
+            SshHandler::parse_client_version(b"SSH-2.0-OpenSSH_9.6\r\n"),
+            Some("SSH-2.0-OpenSSH_9.6".to_string())
+        );
+        assert_eq!(
+            SshHandler::parse_client_version(b"SSH-1.99-CompatClient\nignored"),
+            Some("SSH-1.99-CompatClient".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_client_versions() {
+        assert!(SshHandler::parse_client_version(b"SSH-\r\n").is_none());
+        assert!(SshHandler::parse_client_version(b"SSH-2.0-\r\n").is_none());
+        assert!(SshHandler::parse_client_version(b"SSH-2.0- bad\r\n").is_none());
+        assert!(SshHandler::parse_client_version(b"SSH-1.5-OldClient\r\n").is_none());
+        assert!(SshHandler::parse_client_version(b"SSH-2.0-\tbad\r\n").is_none());
+    }
+
+    #[test]
+    fn rejects_oversized_client_version_line() {
+        let mut line = b"SSH-2.0-".to_vec();
+        line.extend(std::iter::repeat_n(b'a', 248));
+
+        assert!(SshHandler::parse_client_version(&line).is_none());
     }
 }

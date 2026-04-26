@@ -57,35 +57,22 @@ impl MqttHandler {
             }
             MQTT_PUBLISH => {
                 // Parse topic and payload
-                if let Some((topic, payload)) = Self::parse_publish(data) {
+                if let Some((topic, payload, packet_id)) = Self::parse_publish(data) {
                     tracing::info!(
                         "MQTT PUBLISH: topic={}, payload_len={}",
                         topic,
                         payload.len()
                     );
                     tracing::debug!("MQTT payload: {:?}", String::from_utf8_lossy(&payload));
-                }
-                // QoS 0 = no ack, QoS 1 = PUBACK, QoS 2 = PUBREC
-                let qos = (data[0] >> 1) & 0x03;
-                if matches!(qos, 1 | 2) {
-                    // Packet ID follows topic_length(2) + topic(var) in the variable header
-                    let remaining_start = start;
-                    if remaining_start + 2 <= data.len() {
-                        let topic_len =
-                            u16::from_be_bytes([data[remaining_start], data[remaining_start + 1]])
-                                as usize;
-                        let packet_id_pos = remaining_start + 2 + topic_len;
-                        if packet_id_pos + 2 <= data.len() {
-                            let packet_id =
-                                u16::from_be_bytes([data[packet_id_pos], data[packet_id_pos + 1]]);
-                            let ack_type = if qos == 2 { MQTT_PUBREC } else { MQTT_PUBACK };
-                            return vec![
-                                (ack_type << 4),
-                                2,
-                                (packet_id >> 8) as u8,
-                                (packet_id & 0xFF) as u8,
-                            ];
-                        }
+                    let qos = (data[0] >> 1) & 0x03;
+                    if let Some(packet_id) = packet_id {
+                        let ack_type = if qos == 2 { MQTT_PUBREC } else { MQTT_PUBACK };
+                        return vec![
+                            (ack_type << 4),
+                            2,
+                            (packet_id >> 8) as u8,
+                            (packet_id & 0xFF) as u8,
+                        ];
                     }
                 }
                 Vec::new()
@@ -198,6 +185,11 @@ impl MqttHandler {
         if flags & 0x01 != 0 {
             return None;
         }
+        let username_flag = flags & 0x80 != 0;
+        let password_flag = flags & 0x40 != 0;
+        if password_flag && !username_flag {
+            return None;
+        }
         let will_flag = flags & 0x04 != 0;
         let will_qos = (flags >> 3) & 0x03;
         let will_retain = flags & 0x20 != 0;
@@ -233,13 +225,13 @@ impl MqttHandler {
             Self::read_mqtt_string(payload, &mut pos)?;
         }
 
-        if flags & 0x80 != 0 {
+        if username_flag {
             username = Some(
                 String::from_utf8_lossy(&Self::read_mqtt_string(payload, &mut pos)?).to_string(),
             );
         }
 
-        if flags & 0x40 != 0 {
+        if password_flag {
             password = Some(
                 String::from_utf8_lossy(&Self::read_mqtt_string(payload, &mut pos)?).to_string(),
             );
@@ -289,7 +281,7 @@ impl MqttHandler {
         None
     }
 
-    fn parse_publish(data: &[u8]) -> Option<(String, Vec<u8>)> {
+    fn parse_publish(data: &[u8]) -> Option<(String, Vec<u8>, Option<u16>)> {
         let (remaining_len, start) = Self::parse_remaining_length(data)?;
         if start.checked_add(remaining_len)? != data.len() {
             return None;
@@ -303,27 +295,36 @@ impl MqttHandler {
         }
 
         let topic_len = u16::from_be_bytes([payload[0], payload[1]]) as usize;
-        if 2 + topic_len > payload.len() {
+        if topic_len == 0 || 2 + topic_len > payload.len() {
             return None; // topic_len exceeds available data
         }
         let mut pos = 2 + topic_len;
-        let topic = String::from_utf8_lossy(&payload[2..2 + topic_len]).to_string();
+        let topic = std::str::from_utf8(&payload[2..2 + topic_len])
+            .ok()?
+            .to_string();
 
         // Skip packet ID for QoS 1/2
         let qos = (data[0] >> 1) & 0x03;
-        if qos >= 1 {
+        let packet_id = if qos >= 1 {
             if pos + 2 > payload.len() {
                 return None;
             }
+            let id = u16::from_be_bytes([payload[pos], payload[pos + 1]]);
+            if id == 0 {
+                return None;
+            }
             pos += 2;
-        }
+            Some(id)
+        } else {
+            None
+        };
 
         let msg_payload = if pos < payload.len() {
             payload[pos..].to_vec()
         } else {
             Vec::new()
         };
-        Some((topic, msg_payload))
+        Some((topic, msg_payload, packet_id))
     }
 
     fn parse_subscribe_packet_id(payload: &[u8]) -> Option<u16> {
@@ -417,6 +418,22 @@ mod tests {
     }
 
     #[test]
+    fn connect_rejects_password_flag_without_username_flag() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&mqtt_string(b"MQTT"));
+        payload.push(4);
+        payload.push(0x42);
+        payload.extend_from_slice(&[0x00, 0x3c]);
+        payload.extend_from_slice(&mqtt_string(b"client"));
+        payload.extend_from_slice(&mqtt_string(b"secret"));
+
+        let mut packet = vec![0x10, payload.len() as u8];
+        packet.extend_from_slice(&payload);
+
+        assert!(MqttHandler::new().handle_packet(&packet).is_empty());
+    }
+
+    #[test]
     fn pingreq_returns_empty_when_remaining_length_is_nonzero() {
         assert!(
             MqttHandler::new()
@@ -448,6 +465,26 @@ mod tests {
     #[test]
     fn publish_qos3_is_rejected() {
         let packet = vec![0x36, 0x06, 0x00, 0x01, b'a', 0x12, 0x34, b'x'];
+
+        assert!(MqttHandler::new().handle_packet(&packet).is_empty());
+    }
+
+    #[test]
+    fn publish_qos1_does_not_ack_malformed_topic() {
+        let empty_topic = [0x32, 0x05, 0x00, 0x00, 0x12, 0x34, b'x'];
+        let invalid_utf8_topic = [0x32, 0x06, 0x00, 0x01, 0xff, 0x12, 0x34, b'x'];
+
+        assert!(MqttHandler::new().handle_packet(&empty_topic).is_empty());
+        assert!(
+            MqttHandler::new()
+                .handle_packet(&invalid_utf8_topic)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn publish_qos1_does_not_ack_zero_packet_id() {
+        let packet = vec![0x32, 0x06, 0x00, 0x01, b'a', 0x00, 0x00, b'x'];
 
         assert!(MqttHandler::new().handle_packet(&packet).is_empty());
     }

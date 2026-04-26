@@ -160,27 +160,28 @@ impl Pop3Handler {
         } else if verb == "RSET" {
             Pop3Response::ok("Maildrop has been reset")
         } else if verb == "TOP" {
-            if parts.len() > 1 {
-                if let Ok(idx) = parts[1].parse::<usize>() {
-                    if idx > 0 && idx <= self.emails.len() {
-                        let email = &self.emails[idx - 1];
-                        let lines: usize = parts.get(2).and_then(|l| l.parse().ok()).unwrap_or(10);
-                        let body_lines: Vec<&str> = email.body.lines().take(lines).collect();
-                        let mut response = "+OK\r\n".to_string();
-                        for line in body_lines {
-                            response.push_str(line);
-                            response.push_str("\r\n");
-                        }
-                        response.push_str(".\r\n");
-                        Pop3Response::raw(response)
-                    } else {
-                        Pop3Response::err("No such message")
-                    }
-                } else {
-                    Pop3Response::err("Invalid argument")
-                }
-            } else {
+            if parts.len() < 3 {
                 Pop3Response::err("Missing argument")
+            } else if parts.len() > 3 {
+                Pop3Response::err("Invalid argument")
+            } else {
+                match self.parse_existing_message_index(&parts) {
+                    Ok(idx) => match parts[2].parse::<usize>() {
+                        Ok(lines) => {
+                            let email = &self.emails[idx - 1];
+                            let body_lines: Vec<&str> = email.body.lines().take(lines).collect();
+                            let mut response = "+OK\r\n".to_string();
+                            for line in body_lines {
+                                response.push_str(line);
+                                response.push_str("\r\n");
+                            }
+                            response.push_str(".\r\n");
+                            Pop3Response::raw(response)
+                        }
+                        Err(_) => Pop3Response::err("Invalid argument"),
+                    },
+                    Err(response) => response,
+                }
             }
         } else if verb == "UIDL" {
             if parts.len() > 1 {
@@ -478,6 +479,24 @@ mod tests {
 
         let out_of_range = block_on(handler.handle("DELE 99")).expect("out of range DELE response");
         assert_eq!(out_of_range.to_bytes(), b"-ERR No such message\r\n");
+    }
+
+    #[test]
+    fn top_requires_message_and_line_count_arguments() {
+        let handler = Pop3Handler::new();
+
+        let valid = block_on(handler.handle("TOP 1 2")).expect("valid TOP response");
+        assert!(valid.to_bytes().starts_with(b"+OK\r\n"));
+
+        let missing_line_count = block_on(handler.handle("TOP 1")).expect("missing TOP line count");
+        assert_eq!(missing_line_count.to_bytes(), b"-ERR Missing argument\r\n");
+
+        let invalid_line_count =
+            block_on(handler.handle("TOP 1 nope")).expect("invalid TOP line count");
+        assert_eq!(invalid_line_count.to_bytes(), b"-ERR Invalid argument\r\n");
+
+        let extra_arg = block_on(handler.handle("TOP 1 2 extra")).expect("extra TOP arg");
+        assert_eq!(extra_arg.to_bytes(), b"-ERR Invalid argument\r\n");
     }
 
     #[test]

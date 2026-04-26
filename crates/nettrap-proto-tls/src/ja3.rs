@@ -210,7 +210,7 @@ pub fn calculate_ja4(
                 "http/1.1" => "h1".to_string(),
                 "h3" => "h3".to_string(),
                 "h3-29" => "h3".to_string(),
-                _ => first[..first.len().min(2)].to_string(),
+                _ => first.chars().take(2).collect(),
             }
         })
         .unwrap_or_else(|| "00".to_string());
@@ -520,5 +520,13 @@ mod tests {
         let ja4 = ja4_from_handshake(&hello).expect("malformed ALPN should not abort JA4");
 
         assert!(ja4.starts_with("t12d010200_"));
+    }
+
+    #[test]
+    fn ja4_truncates_non_ascii_alpn_without_panicking() {
+        let alpn = String::from_utf8(vec![0xe2, 0x82, 0xac, b'h']).unwrap();
+        let ja4 = calculate_ja4(0x0303, &[], &[], None, Some(&alpn), false);
+
+        assert!(!ja4.is_empty());
     }
 }
