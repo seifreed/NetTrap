@@ -8,17 +8,16 @@ impl MemcachedHandler {
     pub fn handle(&self, data: &[u8]) -> Vec<u8> {
         let text = String::from_utf8_lossy(data);
         let cmd = text.trim();
-        let verb = cmd
-            .split_whitespace()
-            .next()
+        let parts: Vec<&str> = cmd.split_whitespace().collect();
+        let verb = parts
+            .first()
+            .copied()
             .unwrap_or_default()
             .to_ascii_lowercase();
-        let has_args = cmd.split_whitespace().nth(1).is_some();
+        let has_args = parts.get(1).is_some();
 
         if verb == "stats" {
-            tracing::info!("MEMCACHED stats request");
-            let stats = "STAT pid 1\r\nSTAT uptime 86400\r\nSTAT time 1704067200\r\nSTAT version 1.6.22\r\nSTAT curr_items 0\r\nSTAT total_items 0\r\nSTAT bytes 0\r\nSTAT curr_connections 1\r\nSTAT total_connections 1\r\nEND\r\n";
-            stats.as_bytes().to_vec()
+            stats_response(&parts)
         } else if verb == "get" && has_args {
             tracing::info!("MEMCACHED get: {}", cmd);
             b"END\r\n".to_vec()
@@ -28,26 +27,38 @@ impl MemcachedHandler {
                     "MEMCACHED write attempt: {}",
                     cmd.lines().next().unwrap_or(cmd)
                 );
-                b"STORED\r\n".to_vec()
+                if storage_command_has_noreply(data, &verb) {
+                    Vec::new()
+                } else {
+                    b"STORED\r\n".to_vec()
+                }
             } else {
                 b"ERROR\r\n".to_vec()
             }
         } else if verb == "delete" {
             if delete_command_is_valid(cmd) {
-                b"DELETED\r\n".to_vec()
+                if command_has_noreply(&parts) {
+                    Vec::new()
+                } else {
+                    b"DELETED\r\n".to_vec()
+                }
             } else {
                 b"ERROR\r\n".to_vec()
             }
         } else if verb == "flush_all" {
             if flush_all_command_is_valid(cmd) {
                 tracing::warn!("MEMCACHED flush_all attempt");
-                b"OK\r\n".to_vec()
+                if command_has_noreply(&parts) {
+                    Vec::new()
+                } else {
+                    b"OK\r\n".to_vec()
+                }
             } else {
                 b"ERROR\r\n".to_vec()
             }
-        } else if verb == "version" {
+        } else if verb == "version" && parts.len() == 1 {
             b"VERSION 1.6.22\r\n".to_vec()
-        } else if verb == "quit" {
+        } else if verb == "quit" && parts.len() == 1 {
             Vec::new()
         } else {
             // Check for binary protocol (0x80 = request magic)
@@ -106,11 +117,22 @@ impl MemcachedHandler {
         } else {
             0x0081
         };
-        Self::binary_response(opcode, status, data)
+        if status == 0 && Self::is_quiet_binary_opcode(opcode) {
+            Vec::new()
+        } else {
+            Self::binary_response(opcode, status, data)
+        }
     }
 
     fn supported_binary_opcode(opcode: u8) -> bool {
-        matches!(opcode, 0x00..=0x17 | 0x1c | 0x1d)
+        matches!(opcode, 0x00..=0x1a | 0x1c | 0x1d)
+    }
+
+    fn is_quiet_binary_opcode(opcode: u8) -> bool {
+        matches!(
+            opcode,
+            0x09 | 0x0d | 0x11 | 0x12 | 0x13 | 0x14 | 0x15 | 0x16 | 0x17 | 0x18 | 0x19 | 0x1a
+        )
     }
 
     fn binary_response(opcode: u8, status: u16, request: &[u8]) -> Vec<u8> {
@@ -138,6 +160,31 @@ fn is_storage_verb(verb: &str) -> bool {
         verb,
         "set" | "add" | "replace" | "append" | "prepend" | "cas"
     )
+}
+
+fn stats_response(parts: &[&str]) -> Vec<u8> {
+    match parts {
+        ["stats"] => {
+            tracing::info!("MEMCACHED stats request");
+            let stats = "STAT pid 1\r\nSTAT uptime 86400\r\nSTAT time 1704067200\r\nSTAT version 1.6.22\r\nSTAT curr_items 0\r\nSTAT total_items 0\r\nSTAT bytes 0\r\nSTAT curr_connections 1\r\nSTAT total_connections 1\r\nEND\r\n";
+            stats.as_bytes().to_vec()
+        }
+        ["stats", subcommand]
+            if matches!(
+                subcommand.to_ascii_lowercase().as_str(),
+                "items" | "slabs" | "settings" | "sizes"
+            ) =>
+        {
+            b"END\r\n".to_vec()
+        }
+        _ => b"ERROR\r\n".to_vec(),
+    }
+}
+
+fn command_has_noreply(parts: &[&str]) -> bool {
+    parts
+        .last()
+        .is_some_and(|value| value.eq_ignore_ascii_case("noreply"))
 }
 
 fn delete_command_is_valid(cmd: &str) -> bool {
@@ -212,6 +259,21 @@ fn storage_command_is_complete(data: &[u8], verb: &str) -> bool {
     packet_end == data.len() && data.get(body_end..packet_end) == Some(&b"\r\n"[..])
 }
 
+fn storage_command_has_noreply(data: &[u8], verb: &str) -> bool {
+    let Some(header_end) = find_crlf(data) else {
+        return false;
+    };
+    let Ok(header) = std::str::from_utf8(&data[..header_end]) else {
+        return false;
+    };
+
+    let parts: Vec<&str> = header.split_whitespace().collect();
+    let required_parts = if verb == "cas" { 6 } else { 5 };
+    parts
+        .get(required_parts)
+        .is_some_and(|value| value.eq_ignore_ascii_case("noreply"))
+}
+
 fn find_crlf(data: &[u8]) -> Option<usize> {
     data.windows(2).position(|window| window == b"\r\n")
 }
@@ -219,6 +281,18 @@ fn find_crlf(data: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn binary_request(opcode: u8) -> Vec<u8> {
+        let mut request = vec![0x80, opcode, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        request.extend_from_slice(&0u32.to_be_bytes());
+        request.extend_from_slice(&0x01020304u32.to_be_bytes());
+        request.extend_from_slice(&0u64.to_be_bytes());
+        request
+    }
+
+    fn binary_status(response: &[u8]) -> u16 {
+        u16::from_be_bytes([response[6], response[7]])
+    }
 
     #[test]
     fn prefixed_text_verbs_are_not_accepted() {
@@ -248,7 +322,7 @@ mod tests {
         let handler = MemcachedHandler::new();
 
         assert_eq!(handler.handle(b"delete key\r\n"), b"DELETED\r\n");
-        assert_eq!(handler.handle(b"delete key noreply\r\n"), b"DELETED\r\n");
+        assert!(handler.handle(b"delete key noreply\r\n").is_empty());
         assert_eq!(handler.handle(b"DELETE key\r\n"), b"DELETED\r\n");
         assert_eq!(handler.handle(b"delete key extra\r\n"), b"ERROR\r\n");
         assert_eq!(
@@ -257,10 +331,33 @@ mod tests {
         );
 
         assert_eq!(handler.handle(b"flush_all 10\r\n"), b"OK\r\n");
-        assert_eq!(handler.handle(b"flush_all 10 noreply\r\n"), b"OK\r\n");
-        assert_eq!(handler.handle(b"FLUSH_ALL noreply\r\n"), b"OK\r\n");
+        assert!(handler.handle(b"flush_all 10 noreply\r\n").is_empty());
+        assert!(handler.handle(b"FLUSH_ALL noreply\r\n").is_empty());
         assert_eq!(handler.handle(b"flush_all nope\r\n"), b"ERROR\r\n");
         assert_eq!(handler.handle(b"flush_all 10 nope extra\r\n"), b"ERROR\r\n");
+    }
+
+    #[test]
+    fn text_noreply_suppresses_success_responses() {
+        let handler = MemcachedHandler::new();
+
+        assert!(
+            handler
+                .handle(b"set key 0 0 5 noreply\r\nhello\r\n")
+                .is_empty()
+        );
+        assert!(handler.handle(b"delete key noreply\r\n").is_empty());
+        assert!(handler.handle(b"flush_all noreply\r\n").is_empty());
+        assert!(handler.handle(b"flush_all 10 noreply\r\n").is_empty());
+    }
+
+    #[test]
+    fn text_commands_reject_unsupported_arguments() {
+        let handler = MemcachedHandler::new();
+
+        assert_eq!(handler.handle(b"stats unknown\r\n"), b"ERROR\r\n");
+        assert_eq!(handler.handle(b"version now\r\n"), b"ERROR\r\n");
+        assert_eq!(handler.handle(b"quit now\r\n"), b"ERROR\r\n");
     }
 
     #[test]
@@ -268,9 +365,10 @@ mod tests {
         let handler = MemcachedHandler::new();
 
         assert_eq!(handler.handle(b"set key 0 0 5\r\nhello\r\n"), b"STORED\r\n");
-        assert_eq!(
-            handler.handle(b"append key 0 0 5 noreply\r\nhello\r\n"),
-            b"STORED\r\n"
+        assert!(
+            handler
+                .handle(b"append key 0 0 5 noreply\r\nhello\r\n")
+                .is_empty()
         );
         assert_eq!(
             handler.handle(b"cas key 0 0 5 123\r\nhello\r\n"),
@@ -289,6 +387,36 @@ mod tests {
     }
 
     #[test]
+    fn binary_quiet_successes_do_not_send_responses() {
+        let handler = MemcachedHandler::new();
+
+        for opcode in [
+            0x09, 0x0d, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a,
+        ] {
+            assert!(
+                handler.handle(&binary_request(opcode)).is_empty(),
+                "opcode 0x{opcode:02x} should be quiet on success"
+            );
+        }
+    }
+
+    #[test]
+    fn binary_quiet_errors_still_send_responses() {
+        let handler = MemcachedHandler::new();
+        let mut request = vec![0x80, 0x11, 0x00, 0x04, 0x04, 0x00, 0x00, 0x00];
+        request.extend_from_slice(&4u32.to_be_bytes());
+        request.extend_from_slice(&0x12345678u32.to_be_bytes());
+        request.extend_from_slice(&0u64.to_be_bytes());
+        request.extend_from_slice(b"body");
+
+        let response = handler.handle(&request);
+
+        assert_eq!(response[0], 0x81);
+        assert_eq!(binary_status(&response), 0x0004);
+        assert_eq!(&response[12..16], &0x12345678u32.to_be_bytes());
+    }
+
+    #[test]
     fn binary_packets_reject_inconsistent_extras_and_key_lengths() {
         let handler = MemcachedHandler::new();
         let mut request = vec![0x80, 0x00, 0x00, 0x04, 0x04, 0x00, 0x00, 0x00];
@@ -300,23 +428,20 @@ mod tests {
         let response = handler.handle(&request);
 
         assert_eq!(response[0], 0x81);
-        assert_eq!(u16::from_be_bytes([response[6], response[7]]), 0x0004);
+        assert_eq!(binary_status(&response), 0x0004);
         assert_eq!(&response[12..16], &0x12345678u32.to_be_bytes());
     }
 
     #[test]
     fn binary_packets_report_unknown_opcodes() {
         let handler = MemcachedHandler::new();
-        let mut request = vec![0x80, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
-        request.extend_from_slice(&0u32.to_be_bytes());
-        request.extend_from_slice(&0x01020304u32.to_be_bytes());
-        request.extend_from_slice(&0u64.to_be_bytes());
+        let request = binary_request(0xff);
 
         let response = handler.handle(&request);
 
         assert_eq!(response[0], 0x81);
         assert_eq!(response[1], 0xff);
-        assert_eq!(u16::from_be_bytes([response[6], response[7]]), 0x0081);
+        assert_eq!(binary_status(&response), 0x0081);
         assert_eq!(&response[12..16], &0x01020304u32.to_be_bytes());
     }
 }

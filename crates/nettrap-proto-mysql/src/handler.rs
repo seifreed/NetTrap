@@ -170,8 +170,11 @@ impl MysqlHandler {
                 }
                 let query = String::from_utf8_lossy(&data[1..]);
                 tracing::warn!("MySQL QUERY: {}", query);
-                // Return empty result set
-                Self::build_ok_packet(response_seq)
+                if is_select_query(&query) {
+                    Self::build_single_value_resultset(response_seq, "1", "1")
+                } else {
+                    Self::build_ok_packet(response_seq)
+                }
             }
             0x01 => {
                 // COM_QUIT
@@ -190,9 +193,13 @@ impl MysqlHandler {
                 // COM_FIELD_LIST
                 Self::build_ok_packet(response_seq)
             }
+            0x0e => {
+                // COM_PING
+                Self::build_ok_packet(response_seq)
+            }
             _ => {
                 tracing::info!("MySQL command: 0x{:02x}", cmd);
-                Self::build_ok_packet(response_seq)
+                Self::build_error_packet_with_state(response_seq, 1047, "08S01", "Unknown command")
             }
         }
     }
@@ -203,13 +210,53 @@ impl MysqlHandler {
     }
 
     fn build_error_packet(seq: u8, code: u16, msg: &str) -> Vec<u8> {
+        Self::build_error_packet_with_state(seq, code, "28000", msg)
+    }
+
+    fn build_error_packet_with_state(seq: u8, code: u16, state: &str, msg: &str) -> Vec<u8> {
         let mut payload = Vec::new();
         payload.push(0xFF); // Error marker
         payload.extend_from_slice(&code.to_le_bytes());
         payload.push(b'#');
-        payload.extend_from_slice(b"28000"); // SQL state
+        payload.extend_from_slice(state.as_bytes());
         payload.extend_from_slice(msg.as_bytes());
         Self::wrap_packet(&payload, seq)
+    }
+
+    fn build_single_value_resultset(seq: u8, column_name: &str, value: &str) -> Vec<u8> {
+        let mut response = Vec::new();
+        response.extend_from_slice(&Self::wrap_packet(&[0x01], seq));
+
+        let mut column = Vec::new();
+        push_lenenc_str(&mut column, b"def");
+        push_lenenc_str(&mut column, b"");
+        push_lenenc_str(&mut column, b"");
+        push_lenenc_str(&mut column, b"");
+        push_lenenc_str(&mut column, column_name.as_bytes());
+        push_lenenc_str(&mut column, b"");
+        column.push(0x0c);
+        column.extend_from_slice(&33u16.to_le_bytes());
+        column.extend_from_slice(&1024u32.to_le_bytes());
+        column.push(0xfd);
+        column.extend_from_slice(&0u16.to_le_bytes());
+        column.push(0);
+        column.extend_from_slice(&0u16.to_le_bytes());
+        response.extend_from_slice(&Self::wrap_packet(&column, seq.wrapping_add(1)));
+
+        response.extend_from_slice(&Self::wrap_packet(
+            &[0xfe, 0x00, 0x00, 0x02, 0x00],
+            seq.wrapping_add(2),
+        ));
+
+        let mut row = Vec::new();
+        push_lenenc_str(&mut row, value.as_bytes());
+        response.extend_from_slice(&Self::wrap_packet(&row, seq.wrapping_add(3)));
+        response.extend_from_slice(&Self::wrap_packet(
+            &[0xfe, 0x00, 0x00, 0x02, 0x00],
+            seq.wrapping_add(4),
+        ));
+
+        response
     }
 
     fn wrap_packet(payload: &[u8], seq: u8) -> Vec<u8> {
@@ -237,6 +284,23 @@ impl Default for MysqlHandler {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn is_select_query(query: &str) -> bool {
+    query
+        .split_whitespace()
+        .next()
+        .is_some_and(|verb| verb.eq_ignore_ascii_case("select"))
+}
+
+fn push_lenenc_str(out: &mut Vec<u8>, value: &[u8]) {
+    if value.len() < 251 {
+        out.push(value.len() as u8);
+    } else {
+        out.push(0xfc);
+        out.extend_from_slice(&(value.len() as u16).to_le_bytes());
+    }
+    out.extend_from_slice(value);
 }
 
 #[cfg(test)]
@@ -337,10 +401,38 @@ mod tests {
     #[test]
     fn response_sequence_wraps_without_panic() {
         let handler = MysqlHandler::new();
-        let response = handler.handle(&wrap_client_packet(&[0x03, b'S', b'E', b'L'], 255));
+        let response = handler.handle(&wrap_client_packet(&[0x03, b'D', b'O', b' ', b'1'], 255));
 
         assert_eq!(response[3], 0);
         assert_eq!(response[4], 0x00);
+    }
+
+    #[test]
+    fn select_query_returns_minimal_resultset_instead_of_ok_packet() {
+        let handler = MysqlHandler::new();
+        let response = handler.handle(&wrap_client_packet(
+            &[0x03, b'S', b'E', b'L', b'E', b'C', b'T', b' ', b'1'],
+            2,
+        ));
+
+        assert_eq!(response[3], 3);
+        assert_eq!(response[4], 0x01);
+        assert!(response.windows(3).any(|window| window == b"def"));
+        assert!(response.windows(2).any(|window| window == [0x01, b'1']));
+    }
+
+    #[test]
+    fn ping_gets_ok_but_unknown_commands_return_mysql_error() {
+        let handler = MysqlHandler::new();
+
+        let ping = handler.handle(&wrap_client_packet(&[0x0e], 2));
+        assert_eq!(ping[3], 3);
+        assert_eq!(ping[4], 0x00);
+
+        let unknown = handler.handle(&wrap_client_packet(&[0xff], 2));
+        assert_eq!(unknown[3], 3);
+        assert_eq!(unknown[4], 0xff);
+        assert!(String::from_utf8_lossy(&unknown).contains("Unknown command"));
     }
 
     #[test]

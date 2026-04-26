@@ -14,8 +14,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use crate::listener_context::ListenerContext;
 use crate::session::SessionDestination;
 use crate::utils::{
-    build_http_response_with_fakefile, dump_http_post, extract_http_body, extract_http_host,
-    extract_http_method, extract_http_path, extract_http_target, log_event,
+    build_http_response_with_fakefile, dump_http_post, log_event, normalize_http_path,
 };
 
 const MAX_HTTP_HEADER_SIZE: usize = 64 * 1024;
@@ -2286,9 +2285,10 @@ async fn handle_telnet(
     telnet_state: &mut nettrap_proto_telnet::TelnetState,
     telnet_username: &mut String,
 ) -> Vec<u8> {
-    let cleaned = nettrap_proto_telnet::strip_telnet_commands(data);
-    let line = String::from_utf8_lossy(&cleaned);
-    let value = line.trim_matches(['\r', '\n']);
+    let Some(value) = telnet_line_value(data) else {
+        return Vec::new();
+    };
+    let value = value.as_str();
 
     match telnet_state.clone() {
         nettrap_proto_telnet::TelnetState::WaitingUsername => {
@@ -2339,6 +2339,15 @@ async fn handle_telnet(
         }
         nettrap_proto_telnet::TelnetState::Disconnected => Vec::new(),
     }
+}
+
+fn telnet_line_value(data: &[u8]) -> Option<String> {
+    let cleaned = nettrap_proto_telnet::strip_telnet_commands(data);
+    if cleaned.is_empty() {
+        return None;
+    }
+    let line = String::from_utf8_lossy(&cleaned);
+    Some(line.trim_matches(['\r', '\n']).to_string())
 }
 
 async fn handle_ftp_command(
@@ -2394,6 +2403,10 @@ async fn prepare_ftp_command(
             )
             .await,
         );
+    }
+
+    if matches!(verb.as_str(), "ABOR" | "QUIT") {
+        ftp_passive_state.clear();
     }
 
     if matches!(verb.as_str(), "LIST" | "NLST" | "RETR") {
@@ -3298,6 +3311,35 @@ async fn handle_https(
     .await
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedHttpForResponse {
+    method: String,
+    target: String,
+    path: String,
+    host: String,
+    body: Vec<u8>,
+}
+
+fn parse_http_for_response(data: &[u8]) -> Option<ParsedHttpForResponse> {
+    let request = nettrap_proto_http::HttpRequestParsed::parse(data)?;
+    let host = request.host().cloned().unwrap_or_default();
+    let target = request.path;
+    let path = normalize_http_path(&target);
+    let body = request.body.unwrap_or_default();
+
+    Some(ParsedHttpForResponse {
+        method: request.method,
+        target,
+        path,
+        host,
+        body,
+    })
+}
+
+fn build_bad_http_request_response() -> Vec<u8> {
+    b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec()
+}
+
 async fn handle_http_response(
     ctx: &Arc<ListenerContext>,
     data: &[u8],
@@ -3316,32 +3358,36 @@ async fn handle_http_response(
 
     log_event(output_path, ctx.name(), peer, event_name, "").await;
 
-    let target = extract_http_target(data);
-    let path = extract_http_path(data);
-    let host = extract_http_host(data);
-    let method = extract_http_method(data);
+    let Some(parsed) = parse_http_for_response(data) else {
+        tracing::warn!(
+            "{} malformed request from {} ({} bytes)",
+            transport_label,
+            peer,
+            data.len()
+        );
+        return build_bad_http_request_response();
+    };
+
     let nbi = crate::nbi::http_nbi(crate::nbi::HttpNbiInput {
         listener: ctx.name(),
         src_ip: &peer.ip().to_string(),
         src_port: peer.port(),
         destination,
-        method: &method,
-        uri: &target,
-        host: &host,
+        method: &parsed.method,
+        uri: &parsed.target,
+        host: &parsed.host,
         user_agent: "",
-        body_len: data.len(),
+        body_len: parsed.body.len(),
     });
     ctx.runtime.nbi_collector.record(&nbi).await;
 
-    if ctx.dump_http_posts() && method.eq_ignore_ascii_case("POST") {
-        if let Some(body) = extract_http_body(data) {
-            let dump_prefix = ctx.dump_prefix().map(|s| s.to_string());
-            dump_http_post(&body, &dump_prefix, peer).await;
-        }
+    if ctx.dump_http_posts() && parsed.method.eq_ignore_ascii_case("POST") {
+        let dump_prefix = ctx.dump_prefix().map(|s| s.to_string());
+        dump_http_post(&parsed.body, &dump_prefix, peer).await;
     }
 
     // DynDNS checkip emulation
-    if is_dyn_dns_checkip_request(&host, &path) {
+    if is_dyn_dns_checkip_request(&parsed.host, &parsed.path) {
         let src_ip = peer.ip().to_string();
         let body = format!("Current IP Address: {}", src_ip);
         let date = crate::faketime::fake_now().format("%a, %d %b %Y %H:%M:%S GMT");
@@ -3357,7 +3403,7 @@ async fn handle_http_response(
     }
 
     // WPAD / proxy.pac
-    if path == "/wpad.dat" || path == "/proxy.pac" {
+    if parsed.path == "/wpad.dat" || parsed.path == "/proxy.pac" {
         let pac = "function FindProxyForURL(url, host) { return \"DIRECT\"; }";
         let date = crate::faketime::fake_now().format("%a, %d %b %Y %H:%M:%S GMT");
         tracing::info!("WPAD/PAC response for {} ({})", peer, transport_label);
@@ -3369,15 +3415,17 @@ async fn handle_http_response(
 
     // Custom response or webroot
     if let Some(ref crc) = ctx.config.custom_response_config {
-        if let Some(resp) = crc.build_response_for_request(&host, &path, &target) {
+        if let Some(resp) =
+            crc.build_response_for_request(&parsed.host, &parsed.path, &parsed.target)
+        {
             return resp;
         }
     }
 
     if let Some(ws) = webroot_server {
-        ws.build_http_response(&path)
+        ws.build_http_response(&parsed.path)
     } else {
-        build_http_response_with_fakefile(&path, ctx.server_version().unwrap_or("NetTrap"))
+        build_http_response_with_fakefile(&parsed.path, ctx.server_version().unwrap_or("NetTrap"))
     }
 }
 
@@ -3605,6 +3653,35 @@ mod tests {
             );
             assert!(buffer.is_empty());
         }
+    }
+
+    #[test]
+    fn http_response_parser_rejects_malformed_requests_without_defaults() {
+        assert!(parse_http_for_response(b"garbage\r\n\r\n").is_none());
+        assert!(parse_http_for_response(b"GET / HTTP/1.1 extra\r\n\r\n").is_none());
+        assert!(
+            parse_http_for_response(
+                b"POST /upload HTTP/1.1\r\nHost: example.test\r\nContent-Length: 5\r\nContent-Length: 4\r\n\r\nhello"
+            )
+            .is_none()
+        );
+
+        let parsed = parse_http_for_response(
+            b"POST /upload HTTP/1.1\r\nHost: example.test\r\nContent-Length: 5\r\n\r\nhello",
+        )
+        .expect("valid request");
+
+        assert_eq!(parsed.method, "POST");
+        assert_eq!(parsed.target, "/upload");
+        assert_eq!(parsed.path, "/upload");
+        assert_eq!(parsed.host, "example.test");
+        assert_eq!(parsed.body, b"hello");
+    }
+
+    #[test]
+    fn telnet_iac_only_input_has_no_login_value() {
+        assert!(telnet_line_value(&[255, 251, 1]).is_none());
+        assert_eq!(telnet_line_value(b"\r\n").as_deref(), Some(""));
     }
 
     #[test]
@@ -4319,6 +4396,65 @@ mod tests {
             }
             FtpCommandAction::Transfer { .. } => panic!("prefixed PASV must not open data socket"),
         }
+        assert!(state.listener.is_none());
+        assert!(state.permit.is_none());
+    }
+
+    #[tokio::test]
+    async fn ftp_abor_and_quit_clear_passive_state() {
+        let handler = nettrap_proto_ftp::FtpHandler::new().with_pasv_ports(0, 0);
+        let mut state = FtpPassiveState::default();
+        let peer: std::net::SocketAddr = "127.0.0.1:40000".parse().expect("peer addr");
+        let destination = SessionDestination::new("127.0.0.1", 21);
+        let control_local: std::net::SocketAddr = "127.0.0.1:2121".parse().expect("local addr");
+
+        let response = open_ftp_passive_data_socket(
+            &handler,
+            &mut state,
+            &peer,
+            &destination,
+            Some(control_local),
+            false,
+        )
+        .await;
+        assert!(response.starts_with(b"227 "));
+        assert!(state.listener.is_some());
+        assert!(state.permit.is_some());
+
+        let response = prepare_ftp_command(
+            &handler,
+            &mut state,
+            "ABOR",
+            &peer,
+            &destination,
+            Some(control_local),
+        )
+        .await;
+        assert!(matches!(response, FtpCommandAction::Response(_)));
+        assert!(state.listener.is_none());
+        assert!(state.permit.is_none());
+
+        let response = open_ftp_passive_data_socket(
+            &handler,
+            &mut state,
+            &peer,
+            &destination,
+            Some(control_local),
+            false,
+        )
+        .await;
+        assert!(response.starts_with(b"227 "));
+
+        let response = prepare_ftp_command(
+            &handler,
+            &mut state,
+            "QUIT",
+            &peer,
+            &destination,
+            Some(control_local),
+        )
+        .await;
+        assert!(matches!(response, FtpCommandAction::Response(_)));
         assert!(state.listener.is_none());
         assert!(state.permit.is_none());
     }

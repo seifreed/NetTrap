@@ -848,6 +848,13 @@ async fn handle_tftp(
         ctx.record_nbi(&nbi).await;
         let responses_result: nettrap_core::error::Result<Vec<nettrap_proto_tftp::TftpPacket>> =
             match &tftp_packet {
+                nettrap_proto_tftp::TftpPacket::ReadRequest {
+                    filename, options, ..
+                } if !options.is_empty() => {
+                    Ok(vec![nettrap_proto_tftp::option_negotiation_failed(
+                        filename,
+                    )])
+                }
                 nettrap_proto_tftp::TftpPacket::ReadRequest { filename, .. } => {
                     let key = TftpTransferKey::new(*packet.src, packet.destination);
                     let mut active = transfers.lock().await;
@@ -869,6 +876,13 @@ async fn handle_tftp(
                         );
                         Ok(vec![response])
                     }
+                }
+                nettrap_proto_tftp::TftpPacket::WriteRequest {
+                    filename, options, ..
+                } if !options.is_empty() => {
+                    Ok(vec![nettrap_proto_tftp::option_negotiation_failed(
+                        filename,
+                    )])
                 }
                 nettrap_proto_tftp::TftpPacket::WriteRequest { filename, .. } => {
                     let key = TftpTransferKey::new(*packet.src, packet.destination);

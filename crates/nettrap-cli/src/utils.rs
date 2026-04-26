@@ -190,7 +190,7 @@ pub fn extract_http_body(data: &[u8]) -> Option<Vec<u8>> {
     Some(Vec::new())
 }
 
-fn normalize_http_path(target: &str) -> String {
+pub(crate) fn normalize_http_path(target: &str) -> String {
     let path = if let Some(rest) = target
         .strip_prefix("http://")
         .or_else(|| target.strip_prefix("https://"))

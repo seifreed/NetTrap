@@ -264,7 +264,13 @@ pub trait TftpHandlerTrait: Send + Sync {
 impl TftpHandlerTrait for TftpHandler {
     async fn handle_packet(&self, packet: &TftpPacket) -> Result<Vec<TftpPacket>> {
         match packet {
+            TftpPacket::ReadRequest {
+                options, filename, ..
+            } if !options.is_empty() => Ok(vec![option_negotiation_failed(filename)]),
             TftpPacket::ReadRequest { filename, .. } => Ok(self.handle_read_request(filename)),
+            TftpPacket::WriteRequest {
+                options, filename, ..
+            } if !options.is_empty() => Ok(vec![option_negotiation_failed(filename)]),
             TftpPacket::WriteRequest { filename, .. } => {
                 Ok(vec![self.handle_write_request(filename)])
             }
@@ -281,6 +287,14 @@ impl TftpHandlerTrait for TftpHandler {
 
     fn name(&self) -> &'static str {
         "tftp"
+    }
+}
+
+pub fn option_negotiation_failed(filename: &str) -> TftpPacket {
+    tracing::debug!("TFTP request for {} included unsupported options", filename);
+    TftpPacket::Error {
+        code: 8,
+        message: "Option negotiation failed".to_string(),
     }
 }
 
@@ -343,6 +357,14 @@ mod tests {
         assert!(matches!(packet, TftpPacket::Error { code: 2, .. }));
 
         std::fs::remove_dir_all(root).expect("cleanup temp root");
+    }
+
+    #[test]
+    fn requests_with_options_fail_without_silent_downgrade() {
+        assert!(matches!(
+            option_negotiation_failed("firmware.bin"),
+            TftpPacket::Error { code: 8, message } if message == "Option negotiation failed"
+        ));
     }
 
     #[cfg(unix)]
