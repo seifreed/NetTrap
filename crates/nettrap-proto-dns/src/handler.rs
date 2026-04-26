@@ -335,13 +335,12 @@ impl DnsHandler {
     }
 
     fn build_mx_records(&self, domain: &str, name: &Name) -> Result<Vec<Record>> {
-        if !self.wildcard_response {
-            return Ok(vec![]);
-        }
         let exchange_name = if let Some(ref mx) = self.default_response_mx {
             mx.clone()
-        } else {
+        } else if self.wildcard_response {
             format!("mail.{}", domain)
+        } else {
+            return Ok(vec![]);
         };
         let exchange = Name::from_utf8(&exchange_name)
             .unwrap_or_else(|_| Name::from_utf8("mail.nettrap.local.").unwrap());
@@ -351,13 +350,12 @@ impl DnsHandler {
     }
 
     fn build_txt_records(&self, _domain: &str, name: &Name) -> Result<Vec<Record>> {
-        if !self.wildcard_response {
-            return Ok(vec![]);
-        }
         let txt_value = if let Some(ref txt) = self.default_response_txt {
             txt.clone()
-        } else {
+        } else if self.wildcard_response {
             "v=spf1 +a +mx ~all".to_string()
+        } else {
+            return Ok(vec![]);
         };
         let txt = hickory_proto::rr::rdata::TXT::new(vec![txt_value]);
         let record = Record::from_rdata(name.clone(), 300, RData::TXT(txt));

@@ -21,16 +21,26 @@ impl NknHandler {
             );
             tracing::warn!("NKN method: {}", request.method);
 
-            // Return a valid JSON-RPC response
-            let response = serde_json::json!({
-                "jsonrpc": "2.0",
-                "result": {
-                    "id": "nettrap-node-id",
-                    "version": "2.2.0",
-                    "height": 1000000,
-                },
-                "id": request.id,
-            });
+            let response = if Self::is_known_nkn_method(&request.method) {
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "result": {
+                        "id": "nettrap-node-id",
+                        "version": "2.2.0",
+                        "height": 1000000,
+                    },
+                    "id": request.id,
+                })
+            } else {
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "error": {
+                        "code": -32601,
+                        "message": "Method not found",
+                    },
+                    "id": request.id,
+                })
+            };
             return response.to_string().into_bytes();
         }
 
@@ -52,8 +62,12 @@ impl NknHandler {
         let Some(request) = Self::parse_json_rpc(data) else {
             return false;
         };
+        Self::is_known_nkn_method(&request.method)
+    }
+
+    fn is_known_nkn_method(method: &str) -> bool {
         matches!(
-            request.method.as_str(),
+            method,
             "getlatestblockheight" | "getnodestate" | "getwsaddr"
         )
     }
@@ -115,5 +129,16 @@ mod tests {
             br#"{"jsonrpc":"2.0","method":"unknown","id":1}"#
         ));
         assert!(!NknHandler::is_nkn_traffic(br#""jsonrpc" "getnodestate""#));
+    }
+
+    #[test]
+    fn unknown_json_rpc_method_returns_method_not_found() {
+        let response = NknHandler::new().handle(br#"{"jsonrpc":"2.0","method":"unknown","id":9}"#);
+
+        let response: serde_json::Value =
+            serde_json::from_slice(&response).expect("response should be JSON");
+        assert_eq!(response["id"], 9);
+        assert_eq!(response["error"]["code"], -32601);
+        assert!(response.get("result").is_none());
     }
 }

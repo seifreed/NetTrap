@@ -105,6 +105,57 @@ mod tests {
         assert!(response_has_no_answers(&response));
     }
 
+    #[tokio::test]
+    async fn test_dns_explicit_mx_response_works_without_wildcard() {
+        let handler = DnsHandler::new()
+            .with_wildcard(false)
+            .with_default_response_mx("mail.example.net.");
+        let query = build_dns_query("example.com", 15);
+        let response = handler
+            .handle_query(&query, "127.0.0.1:53".parse().unwrap())
+            .await
+            .unwrap();
+
+        assert!(response_has_mx_record(&response, "mail.example.net."));
+    }
+
+    #[tokio::test]
+    async fn test_dns_explicit_txt_response_works_without_wildcard() {
+        let handler = DnsHandler::new()
+            .with_wildcard(false)
+            .with_default_response_txt("nettrap-test");
+        let query = build_dns_query("example.com", 16);
+        let response = handler
+            .handle_query(&query, "127.0.0.1:53".parse().unwrap())
+            .await
+            .unwrap();
+
+        assert!(response_has_txt_record(&response, "nettrap-test"));
+    }
+
+    #[tokio::test]
+    async fn test_dns_mx_txt_fallbacks_stay_disabled_without_wildcard() {
+        let handler = DnsHandler::new().with_wildcard(false);
+
+        let mx_response = handler
+            .handle_query(
+                &build_dns_query("example.com", 15),
+                "127.0.0.1:53".parse().unwrap(),
+            )
+            .await
+            .unwrap();
+        let txt_response = handler
+            .handle_query(
+                &build_dns_query("example.com", 16),
+                "127.0.0.1:53".parse().unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(response_has_no_answers(&mx_response));
+        assert!(response_has_no_answers(&txt_response));
+    }
+
     fn build_dns_query(domain: &str, qtype: u16) -> Vec<u8> {
         use hickory_proto::op::{Message, MessageType, OpCode, Query};
         use hickory_proto::rr::{Name, RecordType};
@@ -117,6 +168,8 @@ mod tests {
         let name = Name::from_ascii(domain).unwrap();
         let query_type = match qtype {
             1 => RecordType::A,
+            15 => RecordType::MX,
+            16 => RecordType::TXT,
             28 => RecordType::AAAA,
             _ => RecordType::A,
         };
@@ -146,6 +199,31 @@ mod tests {
         let message = Message::from_vec(response).unwrap();
         message.answers().iter().any(|record| match record.data() {
             RData::AAAA(aaaa) => aaaa.0 == expected,
+            _ => false,
+        })
+    }
+
+    fn response_has_mx_record(response: &[u8], exchange: &str) -> bool {
+        use hickory_proto::op::Message;
+        use hickory_proto::rr::RData;
+
+        let message = Message::from_vec(response).unwrap();
+        message.answers().iter().any(|record| match record.data() {
+            RData::MX(mx) => mx.exchange().to_utf8() == exchange,
+            _ => false,
+        })
+    }
+
+    fn response_has_txt_record(response: &[u8], value: &str) -> bool {
+        use hickory_proto::op::Message;
+        use hickory_proto::rr::RData;
+
+        let message = Message::from_vec(response).unwrap();
+        message.answers().iter().any(|record| match record.data() {
+            RData::TXT(txt) => txt
+                .txt_data()
+                .iter()
+                .any(|chunk| chunk.as_ref() == value.as_bytes()),
             _ => false,
         })
     }

@@ -25,24 +25,44 @@ impl SmbHandler {
             return Vec::new();
         }
 
-        // NetBIOS session header: 4 bytes (type + length)
-        // SMB header starts with 0xFF 'S' 'M' 'B' (SMB1) or 0xFE 'S' 'M' 'B' (SMB2)
-        let smb_offset = if data[0] == 0x00 { 4 } else { 0 }; // Skip NetBIOS header
+        let smb_data = if data[0] == 0x00 {
+            let Some(payload_len) = Self::netbios_payload_len(data) else {
+                return Vec::new();
+            };
+            if payload_len < 4 || data.len() < 4 + payload_len {
+                tracing::debug!(
+                    "SMB: invalid NetBIOS payload length {}, captured {}",
+                    payload_len,
+                    data.len().saturating_sub(4)
+                );
+                return Vec::new();
+            }
+            &data[4..4 + payload_len]
+        } else {
+            data
+        };
 
-        if data.len() < smb_offset + 4 {
+        if smb_data.len() < 4 {
             return Vec::new();
         }
 
-        let magic = &data[smb_offset..smb_offset + 4];
+        let magic = &smb_data[..4];
 
         if magic == b"\xffSMB" {
-            self.handle_smb1(&data[smb_offset..])
+            self.handle_smb1(smb_data)
         } else if magic == b"\xfeSMB" {
-            self.handle_smb2(&data[smb_offset..])
+            self.handle_smb2(smb_data)
         } else {
             tracing::debug!("SMB: unknown magic {:?}, ignoring packet", magic);
             Vec::new()
         }
+    }
+
+    fn netbios_payload_len(data: &[u8]) -> Option<usize> {
+        if data.len() < 4 || data[0] != 0x00 {
+            return None;
+        }
+        Some((((data[1] & 0x01) as usize) << 16) | ((data[2] as usize) << 8) | data[3] as usize)
     }
 
     fn handle_smb1(&self, data: &[u8]) -> Vec<u8> {
@@ -288,5 +308,16 @@ mod tests {
         let response = SmbHandler::new().handle(&[0x00, 0x00, 0x00, 0x04, b'B', b'A', b'D', b'!']);
 
         assert!(response.is_empty());
+    }
+
+    #[test]
+    fn rejects_invalid_netbios_payload_lengths() {
+        let short_declared_payload =
+            SmbHandler::new().handle(&[0x00, 0x00, 0x00, 0x03, b'\xfe', b'S', b'M', b'B']);
+        assert!(short_declared_payload.is_empty());
+
+        let truncated_declared_payload =
+            SmbHandler::new().handle(&[0x00, 0x00, 0x00, 0x08, b'\xfe', b'S', b'M', b'B']);
+        assert!(truncated_declared_payload.is_empty());
     }
 }

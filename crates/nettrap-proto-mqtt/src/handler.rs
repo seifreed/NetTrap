@@ -93,9 +93,7 @@ impl MqttHandler {
             MQTT_SUBSCRIBE => {
                 // Parse topics
                 let remaining_start = start;
-                if remaining_start + 2 <= data.len() {
-                    let packet_id =
-                        u16::from_be_bytes([data[remaining_start], data[remaining_start + 1]]);
+                if let Some(packet_id) = Self::parse_subscribe_packet_id(&data[remaining_start..]) {
                     tracing::info!("MQTT SUBSCRIBE: packet_id={}", packet_id);
                     // SUBACK with granted QoS 0
                     return vec![
@@ -327,6 +325,42 @@ impl MqttHandler {
         };
         Some((topic, msg_payload))
     }
+
+    fn parse_subscribe_packet_id(payload: &[u8]) -> Option<u16> {
+        if payload.len() < 5 {
+            return None;
+        }
+        let packet_id = u16::from_be_bytes([payload[0], payload[1]]);
+        let mut pos = 2usize;
+        let mut topic_count = 0usize;
+
+        while pos < payload.len() {
+            if pos + 2 > payload.len() {
+                return None;
+            }
+            let topic_len = u16::from_be_bytes([payload[pos], payload[pos + 1]]) as usize;
+            pos += 2;
+            if topic_len == 0 {
+                return None;
+            }
+            let topic_end = pos.checked_add(topic_len)?;
+            if topic_end >= payload.len() {
+                return None;
+            }
+            pos = topic_end;
+            let requested_qos = payload[pos];
+            if requested_qos > 2 {
+                return None;
+            }
+            pos += 1;
+            topic_count += 1;
+        }
+
+        if topic_count == 0 {
+            return None;
+        }
+        Some(packet_id)
+    }
 }
 
 pub struct MqttConnectInfo {
@@ -416,6 +450,38 @@ mod tests {
         let packet = vec![0x36, 0x06, 0x00, 0x01, b'a', 0x12, 0x34, b'x'];
 
         assert!(MqttHandler::new().handle_packet(&packet).is_empty());
+    }
+
+    #[test]
+    fn subscribe_requires_complete_topic_filter() {
+        let handler = MqttHandler::new();
+
+        assert!(handler.handle_packet(&[0x82, 0x02, 0x12, 0x34]).is_empty());
+        assert!(
+            handler
+                .handle_packet(&[0x82, 0x05, 0x12, 0x34, 0x00, 0x01, b'a'])
+                .is_empty()
+        );
+        assert!(
+            handler
+                .handle_packet(&[0x82, 0x04, 0x12, 0x34, 0x00, 0x00])
+                .is_empty()
+        );
+        assert!(
+            handler
+                .handle_packet(&[0x82, 0x06, 0x12, 0x34, 0x00, 0x01, b'a', 0x03])
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn subscribe_with_valid_topic_gets_suback() {
+        let packet = [0x82, 0x06, 0x12, 0x34, 0x00, 0x01, b'a', 0x00];
+
+        assert_eq!(
+            MqttHandler::new().handle_packet(&packet),
+            vec![0x90, 0x03, 0x12, 0x34, 0x00]
+        );
     }
 
     #[test]

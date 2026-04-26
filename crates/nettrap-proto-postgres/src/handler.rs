@@ -63,6 +63,10 @@ impl PostgresHandler {
             b'X' => Vec::new(), // Terminate
             // Post-auth commands: Parse, Bind, Describe, Execute, Close, Flush, Sync, FunctionCall
             b'P' | b'B' | b'D' | b'E' | b'C' | b'H' | b'S' | b'F' => {
+                if !Self::typed_message_is_complete(data) {
+                    tracing::debug!("POSTGRES malformed typed message: tag=0x{:02x}", data[0]);
+                    return Vec::new();
+                }
                 tracing::info!("POSTGRES command: 0x{:02x}", data[0]);
                 // Respond with ReadyForQuery (idle)
                 let mut resp = Vec::new();
@@ -73,13 +77,27 @@ impl PostgresHandler {
             }
             _ if data.len() >= 8 => {
                 // Startup message (no type byte, starts with length + version)
-                let len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+                let len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+                if len < 8 || data.len() < len {
+                    tracing::debug!(
+                        "POSTGRES malformed startup length: declared={}, available={}",
+                        len,
+                        data.len()
+                    );
+                    return Vec::new();
+                }
                 let pg_version = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
                 if pg_version == POSTGRES_SSL_REQUEST {
+                    if len != 8 {
+                        return Vec::new();
+                    }
                     // SSLRequest → respond 'N' (no SSL), client will retry with normal startup
                     tracing::info!("POSTGRES SSLRequest from client, declining");
                     vec![b'N']
                 } else if pg_version == POSTGRES_GSSENC_REQUEST {
+                    if len != 8 {
+                        return Vec::new();
+                    }
                     // GSSENCRequest → respond 'N' (no GSS encryption), client will retry startup.
                     tracing::info!("POSTGRES GSSENCRequest from client, declining");
                     vec![b'N']
@@ -91,8 +109,7 @@ impl PostgresHandler {
                         pg_version
                     );
                     if len > 8 {
-                        let msg_end = (len as usize).min(data.len());
-                        let params = String::from_utf8_lossy(&data[8..msg_end]);
+                        let params = String::from_utf8_lossy(&data[8..len]);
                         tracing::info!("POSTGRES params: {}", params.replace('\0', " "));
                     }
                     self.get_handshake_response()
@@ -103,6 +120,17 @@ impl PostgresHandler {
             }
             _ => Vec::new(),
         }
+    }
+
+    fn typed_message_is_complete(data: &[u8]) -> bool {
+        if data.len() < 5 {
+            return false;
+        }
+        let msg_len = u32::from_be_bytes([data[1], data[2], data[3], data[4]]) as usize;
+        msg_len >= 4
+            && msg_len
+                .checked_add(1)
+                .is_some_and(|frame_len| data.len() >= frame_len)
     }
 }
 
@@ -137,5 +165,27 @@ mod tests {
         let response = PostgresHandler::new().handle(&[b'Q', 0, 0, 0, 8, b'S', b'E']);
 
         assert!(response.is_empty());
+    }
+
+    #[test]
+    fn malformed_startup_lengths_are_rejected() {
+        let short_len = [0, 0, 0, 7, 0, 3, 0, 0];
+        assert!(PostgresHandler::new().handle(&short_len).is_empty());
+
+        let truncated = [0, 0, 0, 12, 0, 3, 0, 0, b'u'];
+        assert!(PostgresHandler::new().handle(&truncated).is_empty());
+    }
+
+    #[test]
+    fn typed_messages_require_complete_declared_length() {
+        assert!(PostgresHandler::new().handle(b"S").is_empty());
+        assert!(
+            PostgresHandler::new()
+                .handle(&[b'S', 0, 0, 0, 3])
+                .is_empty()
+        );
+
+        let response = PostgresHandler::new().handle(&[b'S', 0, 0, 0, 4]);
+        assert_eq!(response, b"Z\0\0\0\x05I");
     }
 }

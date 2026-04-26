@@ -285,6 +285,12 @@ impl SmtpHandler {
         let verb = verb_raw.to_ascii_uppercase();
 
         if verb == "EHLO" || verb == "HELO" {
+            if rest.is_empty() {
+                return (
+                    SmtpResponse::new(501, "5.5.4 Domain required"),
+                    SmtpAuthState::None,
+                );
+            }
             let resp = if verb == "EHLO" {
                 SmtpResponse::raw(format!(
                     "250-{} Hello\r\n250-AUTH PLAIN LOGIN CRAM-MD5 CRAM-SHA1\r\n250-SIZE 10485760\r\n250-8BITMIME\r\n250 OK",
@@ -302,6 +308,12 @@ impl SmtpHandler {
         {
             (SmtpResponse::ok(), SmtpAuthState::None)
         } else if verb == "DATA" {
+            if !rest.is_empty() {
+                return (
+                    SmtpResponse::new(501, "5.5.4 Syntax error in parameters"),
+                    SmtpAuthState::None,
+                );
+            }
             (SmtpResponse::start_data(), SmtpAuthState::None)
         } else if verb == "QUIT" {
             (SmtpResponse::bye(), SmtpAuthState::None)
@@ -338,21 +350,41 @@ impl SmtpHandler {
                                     user
                                 );
                             }
+                            (
+                                SmtpResponse::new(235, "2.7.0 Authentication successful"),
+                                SmtpAuthState::None,
+                            )
                         } else {
                             tracing::info!("SMTP AUTH PLAIN captured (decode failed): {}", data);
+                            (
+                                SmtpResponse::new(535, "5.7.8 Authentication credentials invalid"),
+                                SmtpAuthState::None,
+                            )
                         }
-                        (
-                            SmtpResponse::new(235, "2.7.0 Authentication successful"),
-                            SmtpAuthState::None,
-                        )
                     } else {
                         (SmtpResponse::new(334, ""), SmtpAuthState::PlainContinuation)
                     }
                 }
-                "LOGIN" => (
-                    SmtpResponse::new(334, "VXNlcm5hbWU6"),
-                    SmtpAuthState::LoginUsername,
-                ),
+                "LOGIN" => {
+                    if let Some(initial_response) = parts.get(2).filter(|data| !data.is_empty()) {
+                        let Some(username) = Self::decode_auth_login(initial_response) else {
+                            return (
+                                SmtpResponse::new(535, "5.7.8 Authentication credentials invalid"),
+                                SmtpAuthState::None,
+                            );
+                        };
+                        tracing::info!("SMTP AUTH LOGIN username: {}", username);
+                        (
+                            SmtpResponse::new(334, "UGFzc3dvcmQ6"),
+                            SmtpAuthState::LoginPassword(username),
+                        )
+                    } else {
+                        (
+                            SmtpResponse::new(334, "VXNlcm5hbWU6"),
+                            SmtpAuthState::LoginUsername,
+                        )
+                    }
+                }
                 "CRAM-MD5" => {
                     let fresh_challenge = Self::generate_cram_challenge();
                     let challenge_b64 = BASE64.encode(fresh_challenge.as_bytes());
@@ -468,5 +500,55 @@ mod tests {
         assert!(matches!(state, SmtpAuthState::None));
         let bytes = response.to_bytes();
         assert!(bytes.starts_with(b"250-nettrap.local Hello\r\n"));
+    }
+
+    #[test]
+    fn helo_and_ehlo_require_domain_argument() {
+        let handler = SmtpHandler::new();
+
+        let (response, state) = handler.handle_with_state("EHLO", SmtpAuthState::None);
+        assert!(matches!(state, SmtpAuthState::None));
+        assert_eq!(response.to_bytes(), b"501 5.5.4 Domain required\r\n");
+
+        let (response, state) = handler.handle_with_state("HELO   ", SmtpAuthState::None);
+        assert!(matches!(state, SmtpAuthState::None));
+        assert_eq!(response.to_bytes(), b"501 5.5.4 Domain required\r\n");
+    }
+
+    #[test]
+    fn data_rejects_extra_arguments() {
+        let handler = SmtpHandler::new();
+
+        let (response, state) = handler.handle_with_state("DATA now", SmtpAuthState::None);
+
+        assert!(matches!(state, SmtpAuthState::None));
+        assert_eq!(
+            response.to_bytes(),
+            b"501 5.5.4 Syntax error in parameters\r\n"
+        );
+    }
+
+    #[test]
+    fn auth_plain_invalid_base64_does_not_authenticate() {
+        let handler = SmtpHandler::new();
+
+        let (response, state) = handler.handle_with_state("AUTH PLAIN !!!", SmtpAuthState::None);
+
+        assert!(matches!(state, SmtpAuthState::None));
+        assert_eq!(
+            response.to_bytes(),
+            b"535 5.7.8 Authentication credentials invalid\r\n"
+        );
+    }
+
+    #[test]
+    fn auth_login_inline_username_moves_to_password_challenge() {
+        let handler = SmtpHandler::new();
+
+        let (response, state) =
+            handler.handle_with_state("AUTH LOGIN dXNlcg==", SmtpAuthState::None);
+
+        assert_eq!(response.to_bytes(), b"334 UGFzc3dvcmQ6\r\n");
+        assert!(matches!(state, SmtpAuthState::LoginPassword(username) if username == "user"));
     }
 }

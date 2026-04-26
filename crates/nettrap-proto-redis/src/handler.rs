@@ -57,19 +57,22 @@ impl RedisHandler {
                 "AUTH" => {
                     // Capture credentials: AUTH [username] password
                     // Always accept (honeypot) and mark this connection authenticated.
-                    if args.len() >= 2 {
+                    if !auth_args_are_valid(&args) {
+                        tracing::warn!("REDIS AUTH attempt with missing credentials");
+                        "-ERR wrong number of arguments for 'auth' command\r\n".to_string()
+                    } else if args.len() == 2 {
                         tracing::warn!(
                             "REDIS AUTH attempt: username='{}', password='{}'",
                             args[0],
                             args[1]
                         );
-                    } else if args.len() == 1 {
-                        tracing::warn!("REDIS AUTH attempt: password='{}'", args[0]);
+                        *authenticated = true;
+                        "+OK\r\n".to_string()
                     } else {
-                        tracing::warn!("REDIS AUTH attempt (no credentials)");
+                        tracing::warn!("REDIS AUTH attempt: password='{}'", args[0]);
+                        *authenticated = true;
+                        "+OK\r\n".to_string()
                     }
-                    *authenticated = true;
-                    "+OK\r\n".to_string()
                 }
                 "SET" => {
                     tracing::warn!("REDIS SET attempt: {:?}", args);
@@ -203,6 +206,7 @@ impl RedisHandler {
             pos = bulk_header_end + 2;
 
             if bulk_len == -1 {
+                parts.push(String::new());
                 continue;
             }
             if bulk_len < -1 {
@@ -226,6 +230,10 @@ impl RedisHandler {
 
         Some((parts, pos))
     }
+}
+
+fn auth_args_are_valid(args: &[&str]) -> bool {
+    matches!(args.len(), 1 | 2) && args.iter().all(|arg| !arg.is_empty())
 }
 
 fn find_lf_from(haystack: &[u8], start: usize) -> Option<usize> {
@@ -289,6 +297,34 @@ mod tests {
             handler.handle_command_with_auth_state(b"PING\r\n", &mut authenticated),
             b"+PONG\r\n".to_vec()
         );
+    }
+
+    #[test]
+    fn auth_requires_non_empty_credentials() {
+        let handler = RedisHandler::new().with_auth(true);
+        let mut authenticated = false;
+
+        assert_eq!(
+            handler.handle_command_with_auth_state(b"AUTH\r\n", &mut authenticated),
+            b"-ERR wrong number of arguments for 'auth' command\r\n".to_vec()
+        );
+        assert!(!authenticated);
+
+        assert_eq!(
+            handler
+                .handle_command_with_auth_state(b"*2\r\n$4\r\nAUTH\r\n$-1\r\n", &mut authenticated),
+            b"-ERR wrong number of arguments for 'auth' command\r\n".to_vec()
+        );
+        assert!(!authenticated);
+
+        assert_eq!(
+            handler.handle_command_with_auth_state(
+                b"*3\r\n$4\r\nAUTH\r\n$4\r\nuser\r\n$6\r\nsecret\r\n",
+                &mut authenticated,
+            ),
+            b"+OK\r\n".to_vec()
+        );
+        assert!(authenticated);
     }
 
     #[test]
