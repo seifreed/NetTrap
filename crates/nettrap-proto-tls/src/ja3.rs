@@ -44,23 +44,30 @@ pub fn ja3_hash(ja3: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+fn client_hello_record(data: &[u8]) -> Option<&[u8]> {
+    if data.len() < 44 || data[0] != 0x16 || data[1] != 0x03 || data[5] != 0x01 {
+        return None;
+    }
+
+    let record_len = u16::from_be_bytes([data[3], data[4]]) as usize;
+    let record_end = 5usize.checked_add(record_len)?;
+    if record_len < 4 || record_end > data.len() {
+        return None;
+    }
+
+    let handshake_len = ((data[6] as usize) << 16) | ((data[7] as usize) << 8) | data[8] as usize;
+    let handshake_end = 9usize.checked_add(handshake_len)?;
+    if handshake_end > record_end || handshake_end < 44 {
+        return None;
+    }
+
+    Some(&data[..handshake_end])
+}
+
 pub fn ja3_from_handshake(data: &[u8]) -> Option<(String, String)> {
-    if data.len() < 6 {
-        return None;
-    }
-
-    if data[0] != 0x16 {
-        return None;
-    }
-
-    if data[5] != 0x01 {
-        return None;
-    }
+    let data = client_hello_record(data)?;
 
     // Use ClientHello version (offset 9-10), not record-layer version (offset 1-2)
-    if data.len() < 11 {
-        return None;
-    }
     let version = u16::from_be_bytes([data[9], data[10]]);
 
     let mut pos = 43usize;
@@ -317,9 +324,7 @@ fn extract_alpn_from_extension(ext_data: &[u8]) -> Option<String> {
 
 /// Calculate JA4 from raw ClientHello bytes
 pub fn ja4_from_handshake(data: &[u8]) -> Option<String> {
-    if data.len() < 11 || data[0] != 0x16 || data[5] != 0x01 {
-        return None;
-    }
+    let data = client_hello_record(data)?;
 
     // Use ClientHello version (offset 9-10), not record-layer version (offset 1-2)
     let tls_version = u16::from_be_bytes([data[9], data[10]]);

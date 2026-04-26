@@ -59,11 +59,29 @@ impl TlsFingerprint {
 }
 
 fn client_hello_version(data: &[u8]) -> Option<u16> {
-    if data.len() < 11 || data[0] != 0x16 || data[5] != 0x01 {
+    let handshake = client_hello_record(data)?;
+
+    Some(u16::from_be_bytes([handshake[9], handshake[10]]))
+}
+
+fn client_hello_record(data: &[u8]) -> Option<&[u8]> {
+    if data.len() < 44 || data[0] != 0x16 || data[1] != 0x03 || data[5] != 0x01 {
         return None;
     }
 
-    Some(u16::from_be_bytes([data[9], data[10]]))
+    let record_len = u16::from_be_bytes([data[3], data[4]]) as usize;
+    let record_end = 5usize.checked_add(record_len)?;
+    if record_len < 4 || record_end > data.len() {
+        return None;
+    }
+
+    let handshake_len = ((data[6] as usize) << 16) | ((data[7] as usize) << 8) | data[8] as usize;
+    let handshake_end = 9usize.checked_add(handshake_len)?;
+    if handshake_end > record_end || handshake_end < 44 {
+        return None;
+    }
+
+    Some(&data[..handshake_end])
 }
 
 /// Compute the byte range containing TLS extensions in a ClientHello.
@@ -71,9 +89,7 @@ fn client_hello_version(data: &[u8]) -> Option<u16> {
 ///         + session_id_len(1) + session_id(var) + cipher_suites_len(2) + cipher_suites(var)
 ///         + compression_len(1) + compression(var) + extensions_len(2)
 fn find_extensions_range(data: &[u8]) -> Option<std::ops::Range<usize>> {
-    if data.len() < 44 || data[0] != 0x16 || data[1] != 0x03 || data[5] != 0x01 {
-        return None;
-    }
+    let data = client_hello_record(data)?;
     let mut pos = 43; // session_id_length byte
     if pos >= data.len() {
         return None;
@@ -206,18 +222,7 @@ pub fn extract_alpn(data: &[u8]) -> Option<String> {
 }
 
 pub fn parse_tls_handshake(data: &[u8]) -> Option<TlsFingerprint> {
-    if data.len() < 44 {
-        return None;
-    }
-
-    if data[0] != 0x16 || data[1] != 0x03 {
-        return None;
-    }
-
-    let handshake_type = data[5];
-    if handshake_type != 0x01 {
-        return None;
-    }
+    let client_hello = client_hello_record(data)?;
 
     let client_version = client_hello_version(data)?;
     let mut fingerprint = TlsFingerprint {
@@ -234,24 +239,25 @@ pub fn parse_tls_handshake(data: &[u8]) -> Option<TlsFingerprint> {
         alpn: extract_alpn(data),
     };
 
-    let session_id_len = data[43] as usize;
-    if 44 + session_id_len > data.len() {
+    let session_id_len = client_hello[43] as usize;
+    if 44 + session_id_len > client_hello.len() {
         return Some(fingerprint);
     }
     let ciphers_start = 44 + session_id_len;
 
-    if ciphers_start + 2 > data.len() {
+    if ciphers_start + 2 > client_hello.len() {
         return Some(fingerprint);
     }
 
-    let ciphers_len = u16::from_be_bytes([data[ciphers_start], data[ciphers_start + 1]]) as usize;
+    let ciphers_len =
+        u16::from_be_bytes([client_hello[ciphers_start], client_hello[ciphers_start + 1]]) as usize;
     let ciphers_end = ciphers_start + 2 + ciphers_len;
 
-    if ciphers_end <= data.len() && ciphers_len % 2 == 0 {
+    if ciphers_end <= client_hello.len() && ciphers_len % 2 == 0 {
         for i in (ciphers_start + 2..ciphers_end).step_by(2) {
             fingerprint
                 .cipher_suites
-                .push(u16::from_be_bytes([data[i], data[i + 1]]));
+                .push(u16::from_be_bytes([client_hello[i], client_hello[i + 1]]));
         }
     }
 
@@ -401,6 +407,37 @@ mod tests {
         assert_eq!(extract_alpn(&data), None);
         assert_eq!(fingerprint.sni, None);
         assert_eq!(fingerprint.alpn, None);
+    }
+
+    #[test]
+    fn tls_metadata_extractors_reject_bytes_outside_declared_record() {
+        let mut data = build_client_hello(0x0303, &sni_extension("outside-record.example"));
+        data[3..5].copy_from_slice(&8u16.to_be_bytes());
+
+        assert_eq!(parse_tls_handshake(&data).map(|f| f.sni), None);
+        assert_eq!(extract_sni(&data), None);
+        assert_eq!(extract_alpn(&data), None);
+        assert_eq!(crate::ja3::ja3_from_handshake(&data), None);
+        assert_eq!(crate::ja3::ja4_from_handshake(&data), None);
+    }
+
+    #[test]
+    fn tls_metadata_extractors_ignore_bytes_outside_declared_handshake() {
+        let mut extensions = sni_extension("outside-handshake.example");
+        extensions.extend_from_slice(&alpn_extension("h2"));
+        let mut data = build_client_hello(0x0303, &extensions);
+        let handshake_len_without_extensions = 43u32;
+        data[6] = ((handshake_len_without_extensions >> 16) & 0xff) as u8;
+        data[7] = ((handshake_len_without_extensions >> 8) & 0xff) as u8;
+        data[8] = (handshake_len_without_extensions & 0xff) as u8;
+
+        let fingerprint = parse_tls_handshake(&data).expect("bounded ClientHello should parse");
+
+        assert_eq!(fingerprint.sni, None);
+        assert_eq!(fingerprint.alpn, None);
+        assert_eq!(extract_sni(&data), None);
+        assert_eq!(extract_alpn(&data), None);
+        assert_eq!(crate::ja3::ja4_from_handshake(&data), None);
     }
 
     #[test]

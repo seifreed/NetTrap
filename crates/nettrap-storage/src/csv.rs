@@ -57,9 +57,7 @@ impl CsvStorage {
 
     /// Escape a field for CSV (quote if it contains comma, quote, or newline)
     fn csv_escape(s: &str) -> String {
-        // Sanitize CSV formula injection (values starting with =, +, -, @)
-        let needs_formula_guard =
-            s.starts_with('=') || s.starts_with('+') || s.starts_with('-') || s.starts_with('@');
+        let needs_formula_guard = Self::needs_formula_guard(s);
         if needs_formula_guard
             || s.contains(',')
             || s.contains('"')
@@ -74,6 +72,11 @@ impl CsvStorage {
         } else {
             s.to_string()
         }
+    }
+
+    fn needs_formula_guard(s: &str) -> bool {
+        let trimmed = s.trim_start_matches([' ', '\t']);
+        matches!(trimmed.as_bytes().first(), Some(b'=' | b'+' | b'-' | b'@'))
     }
 }
 
@@ -218,5 +221,13 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn csv_escape_guards_formulas_after_leading_whitespace() {
+        assert_eq!(CsvStorage::csv_escape("=cmd"), "\"'=cmd\"");
+        assert_eq!(CsvStorage::csv_escape(" =cmd"), "\"' =cmd\"");
+        assert_eq!(CsvStorage::csv_escape("\t@cmd"), "\"'\t@cmd\"");
+        assert_eq!(CsvStorage::csv_escape("normal"), "normal");
     }
 }

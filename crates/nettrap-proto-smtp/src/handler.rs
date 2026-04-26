@@ -69,9 +69,10 @@ impl SmtpHandler {
     /// Decode AUTH PLAIN credentials from base64
     fn decode_auth_plain(data: &str) -> Option<(String, String)> {
         let decoded = BASE64.decode(data.trim()).ok()?;
-        // PLAIN format: \0authzid\0authcid\0passwd  or  authzid\0authcid\0passwd
+        // PLAIN format: [authzid]\0authcid\0passwd. Accept the legacy two-field
+        // form used by some clients, but reject extra NUL-separated fields.
         let parts: Vec<&[u8]> = decoded.split(|&b| b == 0).collect();
-        let (user, pass) = if parts.len() >= 3 {
+        let (user, pass) = if parts.len() == 3 {
             (parts[1], parts[2])
         } else if parts.len() == 2 {
             (parts[0], parts[1])
@@ -620,6 +621,21 @@ mod tests {
         let handler = SmtpHandler::new();
 
         let (response, state) = handler.handle_with_state("AUTH PLAIN !!!", SmtpAuthState::None);
+
+        assert!(matches!(state, SmtpAuthState::None));
+        assert_eq!(
+            response.to_bytes(),
+            b"535 5.7.8 Authentication credentials invalid\r\n"
+        );
+    }
+
+    #[test]
+    fn auth_plain_rejects_extra_nul_fields() {
+        let handler = SmtpHandler::new();
+        let invalid = BASE64.encode(b"\0user\0pass\0extra");
+
+        let (response, state) =
+            handler.handle_with_state(&format!("AUTH PLAIN {invalid}"), SmtpAuthState::None);
 
         assert!(matches!(state, SmtpAuthState::None));
         assert_eq!(

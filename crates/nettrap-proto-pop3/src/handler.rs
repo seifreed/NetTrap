@@ -319,27 +319,42 @@ impl Pop3HandlerTrait for Pop3Handler {
 }
 
 fn handle_auth_plain_data(data: &str) -> Pop3Response {
-    let decoded = match decode_auth_bytes(data, "POP3 AUTH PLAIN") {
-        Ok(decoded) => decoded,
+    let (user, pass) = match decode_auth_plain_credentials(data) {
+        Ok(credentials) => credentials,
         Err(response) => return response,
     };
 
+    tracing::info!("POP3 AUTH PLAIN — user: {} pass: {}", user, pass);
+    Pop3Response::ok("Authentication successful")
+}
+
+fn decode_auth_plain_credentials(
+    data: &str,
+) -> std::result::Result<(String, String), Pop3Response> {
+    let decoded = decode_auth_bytes(data, "POP3 AUTH PLAIN")?;
     let cred_parts: Vec<&[u8]> = decoded.split(|&b| b == 0).collect();
-    if cred_parts.len() >= 3 {
-        let user = String::from_utf8_lossy(cred_parts[1]);
-        let pass = String::from_utf8_lossy(cred_parts[2]);
-        tracing::info!("POP3 AUTH PLAIN — user: {} pass: {}", user, pass);
+    let (user, pass) = if cred_parts.len() == 3 {
+        (cred_parts[1], cred_parts[2])
     } else if cred_parts.len() == 2 {
-        let user = String::from_utf8_lossy(cred_parts[0]);
-        let pass = String::from_utf8_lossy(cred_parts[1]);
-        tracing::info!("POP3 AUTH PLAIN — user: {} pass: {}", user, pass);
+        (cred_parts[0], cred_parts[1])
+    } else {
+        return Err(Pop3Response::err("Invalid authentication data"));
+    };
+
+    let user = String::from_utf8_lossy(user).to_string();
+    let pass = String::from_utf8_lossy(pass).to_string();
+    if user.is_empty() || pass.is_empty() {
+        return Err(Pop3Response::err("Invalid authentication data"));
     }
 
-    Pop3Response::ok("Authentication successful")
+    Ok((user, pass))
 }
 
 fn decode_auth_field(data: &str) -> std::result::Result<String, Pop3Response> {
     let decoded = decode_auth_bytes(data, "POP3 AUTH LOGIN")?;
+    if decoded.is_empty() {
+        return Err(Pop3Response::err("Invalid authentication data"));
+    }
     Ok(String::from_utf8_lossy(&decoded).to_string())
 }
 
@@ -432,6 +447,38 @@ mod tests {
 
         let response = block_on(handler.handle("AHVzZXIAcGFzcw==")).expect("AUTH PLAIN data");
         assert_eq!(response.to_bytes(), b"+OK Authentication successful\r\n");
+    }
+
+    #[test]
+    fn auth_plain_rejects_extra_nul_fields() {
+        let handler = Pop3Handler::new();
+        let invalid = BASE64.encode(b"\0user\0pass\0extra");
+
+        let response = block_on(handler.handle(&format!("AUTH PLAIN {invalid}")))
+            .expect("AUTH PLAIN extra field response");
+        assert_eq!(response.to_bytes(), b"-ERR Invalid authentication data\r\n");
+
+        let response = block_on(handler.handle("AUTH PLAIN")).expect("AUTH PLAIN response");
+        assert_eq!(response.to_bytes(), b"+\r\n");
+        let response = block_on(handler.handle(&invalid)).expect("AUTH PLAIN continuation");
+        assert_eq!(response.to_bytes(), b"-ERR Invalid authentication data\r\n");
+    }
+
+    #[test]
+    fn auth_login_rejects_empty_continuation_fields() {
+        let handler = Pop3Handler::new();
+
+        let response = block_on(handler.handle("AUTH LOGIN")).expect("AUTH LOGIN response");
+        assert_eq!(response.to_bytes(), b"+ VXNlcm5hbWU6\r\n");
+        let response = block_on(handler.handle("")).expect("empty username response");
+        assert_eq!(response.to_bytes(), b"-ERR Invalid authentication data\r\n");
+
+        let response = block_on(handler.handle("AUTH LOGIN")).expect("AUTH LOGIN response");
+        assert_eq!(response.to_bytes(), b"+ VXNlcm5hbWU6\r\n");
+        let response = block_on(handler.handle("dXNlcg==")).expect("AUTH LOGIN username");
+        assert_eq!(response.to_bytes(), b"+ UGFzc3dvcmQ6\r\n");
+        let response = block_on(handler.handle("")).expect("empty password response");
+        assert_eq!(response.to_bytes(), b"-ERR Invalid authentication data\r\n");
     }
 
     #[test]

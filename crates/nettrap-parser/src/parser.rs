@@ -220,13 +220,64 @@ pub fn detect_protocol(data: &[u8]) -> Option<ApplicationProtocol> {
         let qdcount = u16::from_be_bytes([data[4], data[5]]);
         // Valid DNS: is query, standard/inverse opcode (0-2), has 1+ questions,
         // and does NOT start with printable ASCII (which would indicate HTTP/SMTP/etc.)
-        if is_query && opcode <= 2 && (1..=100).contains(&qdcount) && !data[0].is_ascii_alphabetic()
+        if is_query
+            && opcode <= 2
+            && (1..=100).contains(&qdcount)
+            && !data[0].is_ascii_alphabetic()
+            && dns_questions_fit(data, qdcount)
         {
             return Some(ApplicationProtocol::Dns);
         }
     }
 
     None
+}
+
+fn dns_questions_fit(data: &[u8], qdcount: u16) -> bool {
+    let mut pos = 12usize;
+
+    for _ in 0..qdcount {
+        loop {
+            let Some(&label_len) = data.get(pos) else {
+                return false;
+            };
+
+            match label_len & 0xc0 {
+                0x00 => {
+                    pos += 1;
+                    if label_len == 0 {
+                        break;
+                    }
+                    if label_len > 63 {
+                        return false;
+                    }
+                    pos = match pos.checked_add(label_len as usize) {
+                        Some(next) if next <= data.len() => next,
+                        _ => return false,
+                    };
+                }
+                0xc0 => {
+                    let Some(&pointer_low) = data.get(pos + 1) else {
+                        return false;
+                    };
+                    let pointer = (((label_len & 0x3f) as usize) << 8) | pointer_low as usize;
+                    if pointer >= data.len() {
+                        return false;
+                    }
+                    pos += 2;
+                    break;
+                }
+                _ => return false,
+            }
+        }
+
+        pos = match pos.checked_add(4) {
+            Some(next) if next <= data.len() => next,
+            _ => return false,
+        };
+    }
+
+    true
 }
 
 fn looks_like_http_request_line(line: &str) -> bool {
@@ -329,12 +380,22 @@ mod tests {
     #[test]
     fn dns_detection_reads_flags_from_dns_flags_field() {
         let query = [
-            0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0, b'e', b'x', b'a', b'm',
+            0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 7, b'e', b'x', b'a', b'm', b'p',
+            b'l', b'e', 4, b't', b'e', b's', b't', 0, 0, 1, 0, 1,
         ];
         let response = [0x12, 0x34, 0x81, 0x80, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
 
         assert_eq!(detect_protocol(&query), Some(ApplicationProtocol::Dns));
         assert_eq!(detect_protocol(&response), None);
+    }
+
+    #[test]
+    fn dns_detection_rejects_truncated_declared_questions() {
+        let truncated_question = [
+            0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 7, b'e', b'x', b'a',
+        ];
+
+        assert_eq!(detect_protocol(&truncated_question), None);
     }
 
     #[test]

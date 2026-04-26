@@ -510,11 +510,7 @@ fn export_csv(events: &[NetworkBehaviorIndicator], path: &Path) -> std::io::Resu
 }
 
 fn csv_escape(value: &str) -> String {
-    // Sanitize CSV formula injection (values starting with =, +, -, @)
-    let needs_formula_guard = value.starts_with('=')
-        || value.starts_with('+')
-        || value.starts_with('-')
-        || value.starts_with('@');
+    let needs_formula_guard = needs_formula_guard(value);
     if needs_formula_guard
         || value.contains(',')
         || value.contains('"')
@@ -529,6 +525,11 @@ fn csv_escape(value: &str) -> String {
     } else {
         value.to_string()
     }
+}
+
+fn needs_formula_guard(value: &str) -> bool {
+    let trimmed = value.trim_start_matches([' ', '\t']);
+    matches!(trimmed.as_bytes().first(), Some(b'=' | b'+' | b'-' | b'@'))
 }
 
 #[derive(Debug, Clone, Default)]
@@ -594,6 +595,14 @@ mod tests {
 
         let err = "xml".parse::<OutputFormat>().unwrap_err();
         assert!(err.to_string().contains("unsupported output format 'xml'"));
+    }
+
+    #[test]
+    fn csv_escape_guards_formulas_after_leading_whitespace() {
+        assert_eq!(csv_escape("=cmd"), "\"'=cmd\"");
+        assert_eq!(csv_escape(" =cmd"), "\"' =cmd\"");
+        assert_eq!(csv_escape("\t@cmd"), "\"'\t@cmd\"");
+        assert_eq!(csv_escape("normal"), "normal");
     }
 
     #[test]
