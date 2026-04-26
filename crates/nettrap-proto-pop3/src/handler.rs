@@ -106,9 +106,17 @@ impl Pop3Handler {
             .unwrap_or_default();
 
         let response = if verb == "USER" {
-            Pop3Response::ok("User accepted")
+            if parts.get(1).is_some_and(|value| !value.is_empty()) {
+                Pop3Response::ok("User accepted")
+            } else {
+                Pop3Response::err("Missing argument")
+            }
         } else if verb == "PASS" {
-            Pop3Response::ok("Mailbox locked and ready")
+            if parts.get(1).is_some_and(|value| !value.is_empty()) {
+                Pop3Response::ok("Mailbox locked and ready")
+            } else {
+                Pop3Response::err("Missing argument")
+            }
         } else if verb == "STAT" {
             let total_size: usize = self.emails.iter().map(|e| e.size).sum();
             Pop3Response::ok(format!("{} {}", self.emails.len(), total_size))
@@ -512,5 +520,22 @@ mod tests {
         let missing_digest =
             block_on(handler.handle("APOP user")).expect("missing digest response");
         assert_eq!(missing_digest.to_bytes(), b"-ERR Missing argument\r\n");
+    }
+
+    #[test]
+    fn user_and_pass_require_arguments() {
+        let handler = Pop3Handler::new();
+
+        let missing_user = block_on(handler.handle("USER")).expect("missing USER response");
+        assert_eq!(missing_user.to_bytes(), b"-ERR Missing argument\r\n");
+
+        let valid_user = block_on(handler.handle("USER alice")).expect("valid USER response");
+        assert_eq!(valid_user.to_bytes(), b"+OK User accepted\r\n");
+
+        let missing_pass = block_on(handler.handle("PASS")).expect("missing PASS response");
+        assert_eq!(missing_pass.to_bytes(), b"-ERR Missing argument\r\n");
+
+        let valid_pass = block_on(handler.handle("PASS secret")).expect("valid PASS response");
+        assert_eq!(valid_pass.to_bytes(), b"+OK Mailbox locked and ready\r\n");
     }
 }

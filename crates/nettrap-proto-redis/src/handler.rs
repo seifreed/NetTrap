@@ -46,7 +46,7 @@ impl RedisHandler {
             }
 
             let resp = match cmd.as_str() {
-                "PING" => "+PONG\r\n".to_string(),
+                "PING" => ping_response(&args),
                 "INFO" => {
                     let info = format!(
                         "# Server\r\nredis_version:{}\r\nos:Linux\r\narch_bits:64\r\ntcp_port:6379\r\nuptime_in_seconds:86400\r\nuptime_in_days:1\r\n\r\n# Clients\r\nconnected_clients:1\r\n\r\n# Memory\r\nused_memory:1000000\r\nused_memory_human:976.56K\r\n",
@@ -145,7 +145,7 @@ impl RedisHandler {
                     "+OK\r\n".to_string()
                 }
                 "DBSIZE" => ":0\r\n".to_string(),
-                "SELECT" => "+OK\r\n".to_string(),
+                "SELECT" => select_response(&args),
                 "QUIT" => "+OK\r\n".to_string(),
                 "COMMAND" => "*0\r\n".to_string(),
                 "CLUSTER" => "-ERR This instance has cluster support disabled\r\n".to_string(),
@@ -259,6 +259,22 @@ fn auth_args_are_valid(args: &[&str]) -> bool {
     matches!(args.len(), 1 | 2) && args.iter().all(|arg| !arg.is_empty())
 }
 
+fn ping_response(args: &[&str]) -> String {
+    match args {
+        [] => "+PONG\r\n".to_string(),
+        [message] => format!("${}\r\n{}\r\n", message.len(), message),
+        _ => wrong_number_of_arguments("ping"),
+    }
+}
+
+fn select_response(args: &[&str]) -> String {
+    match args {
+        [index] if index.parse::<u64>().is_ok() => "+OK\r\n".to_string(),
+        [_] => "-ERR invalid DB index\r\n".to_string(),
+        _ => wrong_number_of_arguments("select"),
+    }
+}
+
 fn wrong_number_of_arguments(command: &str) -> String {
     format!(
         "-ERR wrong number of arguments for '{}' command\r\n",
@@ -364,6 +380,40 @@ mod tests {
         assert_eq!(
             handler.handle_command(b"PING\r\n"),
             b"-NOAUTH Authentication required.\r\n".to_vec()
+        );
+    }
+
+    #[test]
+    fn ping_validates_arguments_and_echoes_single_message() {
+        let handler = RedisHandler::new();
+
+        assert_eq!(handler.handle_command(b"PING\r\n"), b"+PONG\r\n".to_vec());
+        assert_eq!(
+            handler.handle_command(b"PING hello\r\n"),
+            b"$5\r\nhello\r\n".to_vec()
+        );
+        assert_eq!(
+            handler.handle_command(b"PING one two\r\n"),
+            b"-ERR wrong number of arguments for 'ping' command\r\n".to_vec()
+        );
+    }
+
+    #[test]
+    fn select_requires_single_numeric_database_index() {
+        let handler = RedisHandler::new();
+
+        assert_eq!(handler.handle_command(b"SELECT 0\r\n"), b"+OK\r\n".to_vec());
+        assert_eq!(
+            handler.handle_command(b"SELECT\r\n"),
+            b"-ERR wrong number of arguments for 'select' command\r\n".to_vec()
+        );
+        assert_eq!(
+            handler.handle_command(b"SELECT abc\r\n"),
+            b"-ERR invalid DB index\r\n".to_vec()
+        );
+        assert_eq!(
+            handler.handle_command(b"SELECT 1 extra\r\n"),
+            b"-ERR wrong number of arguments for 'select' command\r\n".to_vec()
         );
     }
 

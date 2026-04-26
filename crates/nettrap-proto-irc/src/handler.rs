@@ -110,10 +110,15 @@ impl IrcHandlerTrait for IrcHandler {
             }
             "PONG" => Ok(IrcResponse::new()),
             "JOIN" => {
-                let channel = if args.is_empty() {
-                    &self.channel
-                } else {
-                    args.split(',').next().unwrap_or(&self.channel)
+                let Some(channel) = args
+                    .split(',')
+                    .map(str::trim)
+                    .find(|channel| !channel.is_empty())
+                else {
+                    return Ok(IrcResponse::single(format!(
+                        ":{} 461 {} JOIN :Not enough parameters\r\n",
+                        srv, nick
+                    )));
                 };
                 let mut resp = IrcResponse::new();
                 resp.add(format!(":{}!user@host JOIN :{}\r\n", nick, channel));
@@ -132,10 +137,11 @@ impl IrcHandlerTrait for IrcHandler {
                 Ok(resp)
             }
             "PART" => {
-                let channel = if args.is_empty() {
-                    &self.channel
-                } else {
-                    args.split(' ').next().unwrap_or(&self.channel)
+                let Some(channel) = first_arg(args) else {
+                    return Ok(IrcResponse::single(format!(
+                        ":{} 461 {} PART :Not enough parameters\r\n",
+                        srv, nick
+                    )));
                 };
                 Ok(IrcResponse::single(format!(
                     ":{}!user@host PART {}\r\n",
@@ -177,10 +183,11 @@ impl IrcHandlerTrait for IrcHandler {
                 Ok(resp)
             }
             "WHOIS" => {
-                let target = if args.is_empty() {
-                    nick
-                } else {
-                    args.split(' ').next().unwrap_or(nick)
+                let Some(target) = first_arg(args) else {
+                    return Ok(IrcResponse::single(format!(
+                        ":{} 431 {} :No nickname given\r\n",
+                        srv, nick
+                    )));
                 };
                 let mut resp = IrcResponse::new();
                 resp.add(format!(
@@ -310,6 +317,29 @@ mod tests {
         assert_eq!(
             valid.to_bytes(),
             b":irc.nettrap.local PONG irc.nettrap.local :token\r\n"
+        );
+    }
+
+    #[test]
+    fn join_part_and_whois_require_targets() {
+        let handler = IrcHandler::new();
+
+        let join = block_on(handler.handle("JOIN", "guest")).expect("JOIN response");
+        assert_eq!(
+            join.to_bytes(),
+            b":irc.nettrap.local 461 guest JOIN :Not enough parameters\r\n"
+        );
+
+        let part = block_on(handler.handle("PART", "guest")).expect("PART response");
+        assert_eq!(
+            part.to_bytes(),
+            b":irc.nettrap.local 461 guest PART :Not enough parameters\r\n"
+        );
+
+        let whois = block_on(handler.handle("WHOIS", "guest")).expect("WHOIS response");
+        assert_eq!(
+            whois.to_bytes(),
+            b":irc.nettrap.local 431 guest :No nickname given\r\n"
         );
     }
 }

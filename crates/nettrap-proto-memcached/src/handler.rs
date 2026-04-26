@@ -32,11 +32,19 @@ impl MemcachedHandler {
             } else {
                 b"ERROR\r\n".to_vec()
             }
-        } else if verb == "delete" && has_args {
-            b"DELETED\r\n".to_vec()
+        } else if verb == "delete" {
+            if delete_command_is_valid(cmd) {
+                b"DELETED\r\n".to_vec()
+            } else {
+                b"ERROR\r\n".to_vec()
+            }
         } else if verb == "flush_all" {
-            tracing::warn!("MEMCACHED flush_all attempt");
-            b"OK\r\n".to_vec()
+            if flush_all_command_is_valid(cmd) {
+                tracing::warn!("MEMCACHED flush_all attempt");
+                b"OK\r\n".to_vec()
+            } else {
+                b"ERROR\r\n".to_vec()
+            }
         } else if verb == "version" {
             b"VERSION 1.6.22\r\n".to_vec()
         } else if verb == "quit" {
@@ -132,6 +140,39 @@ fn is_storage_verb(verb: &str) -> bool {
     )
 }
 
+fn delete_command_is_valid(cmd: &str) -> bool {
+    let parts: Vec<&str> = cmd.split_whitespace().collect();
+    if !parts
+        .first()
+        .is_some_and(|verb| verb.eq_ignore_ascii_case("delete"))
+    {
+        return false;
+    }
+    match parts.as_slice() {
+        [_, key] => !key.is_empty(),
+        [_, key, noreply] => !key.is_empty() && noreply.eq_ignore_ascii_case("noreply"),
+        _ => false,
+    }
+}
+
+fn flush_all_command_is_valid(cmd: &str) -> bool {
+    let parts: Vec<&str> = cmd.split_whitespace().collect();
+    if !parts
+        .first()
+        .is_some_and(|verb| verb.eq_ignore_ascii_case("flush_all"))
+    {
+        return false;
+    }
+    match parts.as_slice() {
+        [_] => true,
+        [_, arg] => arg.eq_ignore_ascii_case("noreply") || arg.parse::<u32>().is_ok(),
+        [_, delay, noreply] => {
+            delay.parse::<u32>().is_ok() && noreply.eq_ignore_ascii_case("noreply")
+        }
+        _ => false,
+    }
+}
+
 fn storage_command_is_complete(data: &[u8], verb: &str) -> bool {
     let Some(header_end) = find_crlf(data) else {
         return false;
@@ -200,6 +241,26 @@ mod tests {
         assert_eq!(handler.handle(b"version\r\n"), b"VERSION 1.6.22\r\n");
         assert_eq!(handler.handle(b"flush_all\r\n"), b"OK\r\n");
         assert!(handler.handle(b"quit\r\n").is_empty());
+    }
+
+    #[test]
+    fn delete_and_flush_all_validate_arguments() {
+        let handler = MemcachedHandler::new();
+
+        assert_eq!(handler.handle(b"delete key\r\n"), b"DELETED\r\n");
+        assert_eq!(handler.handle(b"delete key noreply\r\n"), b"DELETED\r\n");
+        assert_eq!(handler.handle(b"DELETE key\r\n"), b"DELETED\r\n");
+        assert_eq!(handler.handle(b"delete key extra\r\n"), b"ERROR\r\n");
+        assert_eq!(
+            handler.handle(b"delete key noreply extra\r\n"),
+            b"ERROR\r\n"
+        );
+
+        assert_eq!(handler.handle(b"flush_all 10\r\n"), b"OK\r\n");
+        assert_eq!(handler.handle(b"flush_all 10 noreply\r\n"), b"OK\r\n");
+        assert_eq!(handler.handle(b"FLUSH_ALL noreply\r\n"), b"OK\r\n");
+        assert_eq!(handler.handle(b"flush_all nope\r\n"), b"ERROR\r\n");
+        assert_eq!(handler.handle(b"flush_all 10 nope extra\r\n"), b"ERROR\r\n");
     }
 
     #[test]

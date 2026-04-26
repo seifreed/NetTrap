@@ -3,7 +3,7 @@ pub struct NknHandler;
 #[derive(Debug)]
 struct NknJsonRpcRequest {
     method: String,
-    id: serde_json::Value,
+    id: Option<serde_json::Value>,
 }
 
 impl NknHandler {
@@ -21,6 +21,9 @@ impl NknHandler {
             );
             tracing::warn!("NKN method: {}", request.method);
 
+            let Some(id) = request.id else {
+                return Vec::new();
+            };
             let response = if Self::is_known_nkn_method(&request.method) {
                 serde_json::json!({
                     "jsonrpc": "2.0",
@@ -29,7 +32,7 @@ impl NknHandler {
                         "version": "2.2.0",
                         "height": 1000000,
                     },
-                    "id": request.id,
+                    "id": id,
                 })
             } else {
                 serde_json::json!({
@@ -38,7 +41,7 @@ impl NknHandler {
                         "code": -32601,
                         "message": "Method not found",
                     },
-                    "id": request.id,
+                    "id": id,
                 })
             };
             return response.to_string().into_bytes();
@@ -82,7 +85,7 @@ impl NknHandler {
         if method.is_empty() {
             return None;
         }
-        let id = object.get("id").cloned().unwrap_or(serde_json::Value::Null);
+        let id = object.get("id").cloned();
 
         Some(NknJsonRpcRequest {
             method: method.to_string(),
@@ -140,5 +143,14 @@ mod tests {
         assert_eq!(response["id"], 9);
         assert_eq!(response["error"]["code"], -32601);
         assert!(response.get("result").is_none());
+    }
+
+    #[test]
+    fn json_rpc_notifications_do_not_get_responses() {
+        let known = NknHandler::new().handle(br#"{"jsonrpc":"2.0","method":"getnodestate"}"#);
+        assert!(known.is_empty());
+
+        let unknown = NknHandler::new().handle(br#"{"jsonrpc":"2.0","method":"unknown"}"#);
+        assert!(unknown.is_empty());
     }
 }

@@ -40,11 +40,13 @@ impl RdpHandler {
                 }
                 self.build_connection_confirm(frame)
             }
+            0x0F => {
+                tracing::info!("RDP X.224 data transfer received");
+                self.build_mcs_disconnect()
+            }
             _ => {
                 tracing::info!("RDP X.224 type: 0x{:x}", x224_type);
-                // After CC, client sends MCS Connect Initial
-                // Log it but respond with error to capture credentials
-                self.build_mcs_disconnect()
+                Vec::new()
             }
         }
     }
@@ -152,6 +154,17 @@ mod tests {
         request[4] = 0x20;
 
         let response = RdpHandler::new().handle(&request);
+
+        assert!(response.is_empty());
+    }
+
+    #[test]
+    fn ignores_non_connection_request_control_frames() {
+        let disconnect_request = vec![
+            0x03, 0x00, 0x00, 0x0b, 0x06, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+
+        let response = RdpHandler::new().handle(&disconnect_request);
 
         assert!(response.is_empty());
     }
