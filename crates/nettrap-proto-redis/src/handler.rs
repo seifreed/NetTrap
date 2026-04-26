@@ -74,14 +74,7 @@ impl RedisHandler {
                         "+OK\r\n".to_string()
                     }
                 }
-                "SET" => {
-                    if args.len() < 2 {
-                        wrong_number_of_arguments("set")
-                    } else {
-                        tracing::warn!("REDIS SET attempt: {:?}", args);
-                        "+OK\r\n".to_string()
-                    }
-                }
+                "SET" => set_response(&args),
                 "GET" => {
                     if args.len() == 1 {
                         "$-1\r\n".to_string()
@@ -128,32 +121,30 @@ impl RedisHandler {
                         }
                     }
                 }
-                "SLAVEOF" | "REPLICAOF" => {
-                    tracing::warn!("REDIS REPLICATION attempt: {:?}", args);
-                    "+OK\r\n".to_string()
-                }
+                "SLAVEOF" => replication_response("slaveof", &args),
+                "REPLICAOF" => replication_response("replicaof", &args),
                 "MODULE" => {
                     tracing::warn!("REDIS MODULE LOAD attempt");
                     "-ERR Module loading is disabled\r\n".to_string()
                 }
-                "EVAL" | "EVALSHA" => {
-                    tracing::warn!("REDIS EVAL/LUA attempt: {:?}", args);
-                    "+OK\r\n".to_string()
-                }
-                "FLUSHALL" | "FLUSHDB" => {
-                    tracing::warn!("REDIS FLUSH attempt: {}", cmd);
-                    "+OK\r\n".to_string()
-                }
+                "EVAL" => eval_response("eval", &args),
+                "EVALSHA" => eval_response("evalsha", &args),
+                "FLUSHALL" => flush_response("flushall", &args),
+                "FLUSHDB" => flush_response("flushdb", &args),
                 "DBSIZE" => ":0\r\n".to_string(),
                 "SELECT" => select_response(&args),
-                "QUIT" => "+OK\r\n".to_string(),
+                "QUIT" => {
+                    if args.is_empty() {
+                        "+OK\r\n".to_string()
+                    } else {
+                        wrong_number_of_arguments("quit")
+                    }
+                }
                 "COMMAND" => "*0\r\n".to_string(),
                 "CLUSTER" => "-ERR This instance has cluster support disabled\r\n".to_string(),
-                "CLIENT" => "+OK\r\n".to_string(),
-                "SAVE" | "BGSAVE" => {
-                    tracing::warn!("REDIS SAVE attempt (RDB dump attack)");
-                    "+OK\r\n".to_string()
-                }
+                "CLIENT" => client_response(&args),
+                "SAVE" => save_response("save", &args),
+                "BGSAVE" => bgsave_response(&args),
                 _ => "-ERR unknown command\r\n".to_string(),
             };
             response.extend_from_slice(resp.as_bytes());
@@ -273,6 +264,143 @@ fn select_response(args: &[&str]) -> String {
         [_] => "-ERR invalid DB index\r\n".to_string(),
         _ => wrong_number_of_arguments("select"),
     }
+}
+
+fn set_response(args: &[&str]) -> String {
+    if args.len() < 2 {
+        return wrong_number_of_arguments("set");
+    }
+
+    let mut index = 2;
+    while index < args.len() {
+        match args[index].to_ascii_uppercase().as_str() {
+            "EX" | "PX" => {
+                index += 1;
+                let Some(expiry) = args.get(index) else {
+                    return syntax_error();
+                };
+                if expiry.parse::<u64>().map_or(true, |value| value == 0) {
+                    return "-ERR invalid expire time in 'set' command\r\n".to_string();
+                }
+            }
+            "NX" | "XX" => {}
+            _ => return syntax_error(),
+        }
+        index += 1;
+    }
+
+    tracing::warn!("REDIS SET attempt: {:?}", args);
+    "+OK\r\n".to_string()
+}
+
+fn replication_response(command: &str, args: &[&str]) -> String {
+    if args.len() != 2 {
+        return wrong_number_of_arguments(command);
+    }
+
+    if args[0].eq_ignore_ascii_case("NO") && args[1].eq_ignore_ascii_case("ONE") {
+        tracing::warn!("REDIS REPLICATION disable attempt: {:?}", args);
+        return "+OK\r\n".to_string();
+    }
+
+    if args[1].parse::<u16>().is_err() {
+        return "-ERR invalid port\r\n".to_string();
+    }
+
+    tracing::warn!("REDIS REPLICATION attempt: {:?}", args);
+    "+OK\r\n".to_string()
+}
+
+fn eval_response(command: &str, args: &[&str]) -> String {
+    if args.len() < 2 {
+        return wrong_number_of_arguments(command);
+    }
+
+    let Ok(key_count) = args[1].parse::<usize>() else {
+        return "-ERR value is not an integer or out of range\r\n".to_string();
+    };
+
+    if key_count > args.len().saturating_sub(2) {
+        return "-ERR Number of keys can't be greater than number of args\r\n".to_string();
+    }
+
+    tracing::warn!("REDIS EVAL/LUA attempt: {:?}", args);
+    "+OK\r\n".to_string()
+}
+
+fn flush_response(command: &str, args: &[&str]) -> String {
+    match args {
+        [] => {
+            tracing::warn!("REDIS FLUSH attempt: {}", command);
+            "+OK\r\n".to_string()
+        }
+        [mode] if mode.eq_ignore_ascii_case("ASYNC") || mode.eq_ignore_ascii_case("SYNC") => {
+            tracing::warn!("REDIS FLUSH attempt: {} {:?}", command, args);
+            "+OK\r\n".to_string()
+        }
+        [_] => syntax_error(),
+        _ => wrong_number_of_arguments(command),
+    }
+}
+
+fn client_response(args: &[&str]) -> String {
+    let Some((subcommand, rest)) = args.split_first() else {
+        return wrong_number_of_arguments("client");
+    };
+
+    match subcommand.to_ascii_uppercase().as_str() {
+        "SETNAME" => match rest {
+            [name] if !name.is_empty() => {
+                tracing::warn!("REDIS CLIENT SETNAME attempt: {}", name);
+                "+OK\r\n".to_string()
+            }
+            _ => wrong_number_of_arguments("client|setname"),
+        },
+        "GETNAME" => {
+            if rest.is_empty() {
+                "$-1\r\n".to_string()
+            } else {
+                wrong_number_of_arguments("client|getname")
+            }
+        }
+        "LIST" => {
+            if rest.is_empty() {
+                let listing = "id=1 addr=127.0.0.1:0 fd=1 name= age=0 idle=0 flags=N db=0 sub=0 psub=0 multi=-1 qbuf=0 qbuf-free=0 obl=0 oll=0 omem=0 events=r cmd=client\r\n";
+                format!("${}\r\n{}\r\n", listing.len(), listing)
+            } else {
+                wrong_number_of_arguments("client|list")
+            }
+        }
+        _ => "-ERR unknown CLIENT subcommand\r\n".to_string(),
+    }
+}
+
+fn save_response(command: &str, args: &[&str]) -> String {
+    if args.is_empty() {
+        tracing::warn!("REDIS SAVE attempt (RDB dump attack)");
+        "+OK\r\n".to_string()
+    } else {
+        wrong_number_of_arguments(command)
+    }
+}
+
+fn bgsave_response(args: &[&str]) -> String {
+    match args {
+        [] => {
+            tracing::warn!("REDIS BGSAVE attempt (RDB dump attack)");
+            "+OK\r\n".to_string()
+        }
+        [mode] if mode.eq_ignore_ascii_case("SCHEDULE") => {
+            tracing::warn!("REDIS BGSAVE SCHEDULE attempt (RDB dump attack)");
+            "+OK\r\n".to_string()
+        }
+        [_] => syntax_error(),
+        _ => wrong_number_of_arguments("bgsave"),
+    }
+}
+
+fn syntax_error() -> String {
+    "-ERR syntax error\r\n".to_string()
 }
 
 fn wrong_number_of_arguments(command: &str) -> String {
@@ -435,8 +563,28 @@ mod tests {
             b"+OK\r\n".to_vec()
         );
         assert_eq!(
+            handler.handle_command(b"SET key value EX 60\r\n"),
+            b"+OK\r\n".to_vec()
+        );
+        assert_eq!(
+            handler.handle_command(b"SET key value PX 100 NX\r\n"),
+            b"+OK\r\n".to_vec()
+        );
+        assert_eq!(
             handler.handle_command(b"SET key\r\n"),
             b"-ERR wrong number of arguments for 'set' command\r\n".to_vec()
+        );
+        assert_eq!(
+            handler.handle_command(b"SET key value EX\r\n"),
+            b"-ERR syntax error\r\n".to_vec()
+        );
+        assert_eq!(
+            handler.handle_command(b"SET key value EX nope\r\n"),
+            b"-ERR invalid expire time in 'set' command\r\n".to_vec()
+        );
+        assert_eq!(
+            handler.handle_command(b"SET key value UNKNOWN\r\n"),
+            b"-ERR syntax error\r\n".to_vec()
         );
     }
 
@@ -467,6 +615,114 @@ mod tests {
         assert_eq!(
             handler.handle_command(b"CONFIG REWRITE\r\n"),
             b"-ERR unknown CONFIG subcommand\r\n".to_vec()
+        );
+    }
+
+    #[test]
+    fn replication_commands_validate_arguments() {
+        let handler = RedisHandler::new();
+
+        assert_eq!(
+            handler.handle_command(b"SLAVEOF NO ONE\r\n"),
+            b"+OK\r\n".to_vec()
+        );
+        assert_eq!(
+            handler.handle_command(b"REPLICAOF host 6379\r\n"),
+            b"+OK\r\n".to_vec()
+        );
+        assert_eq!(
+            handler.handle_command(b"SLAVEOF\r\n"),
+            b"-ERR wrong number of arguments for 'slaveof' command\r\n".to_vec()
+        );
+        assert_eq!(
+            handler.handle_command(b"REPLICAOF host nope\r\n"),
+            b"-ERR invalid port\r\n".to_vec()
+        );
+        assert_eq!(
+            handler.handle_command(b"SLAVEOF NO ONE extra\r\n"),
+            b"-ERR wrong number of arguments for 'slaveof' command\r\n".to_vec()
+        );
+    }
+
+    #[test]
+    fn eval_commands_validate_script_and_key_count() {
+        let handler = RedisHandler::new();
+
+        assert_eq!(
+            handler.handle_command(b"EVAL return 0\r\n"),
+            b"+OK\r\n".to_vec()
+        );
+        assert_eq!(
+            handler.handle_command(b"EVALSHA abc 1 key\r\n"),
+            b"+OK\r\n".to_vec()
+        );
+        assert_eq!(
+            handler.handle_command(b"EVAL return\r\n"),
+            b"-ERR wrong number of arguments for 'eval' command\r\n".to_vec()
+        );
+        assert_eq!(
+            handler.handle_command(b"EVAL return nope\r\n"),
+            b"-ERR value is not an integer or out of range\r\n".to_vec()
+        );
+        assert_eq!(
+            handler.handle_command(b"EVAL return 2 onlykey\r\n"),
+            b"-ERR Number of keys can't be greater than number of args\r\n".to_vec()
+        );
+    }
+
+    #[test]
+    fn flush_quit_client_and_save_validate_arguments() {
+        let handler = RedisHandler::new();
+
+        assert_eq!(handler.handle_command(b"FLUSHALL\r\n"), b"+OK\r\n".to_vec());
+        assert_eq!(
+            handler.handle_command(b"FLUSHDB ASYNC\r\n"),
+            b"+OK\r\n".to_vec()
+        );
+        assert_eq!(
+            handler.handle_command(b"FLUSHALL LATER\r\n"),
+            b"-ERR syntax error\r\n".to_vec()
+        );
+        assert_eq!(
+            handler.handle_command(b"QUIT now\r\n"),
+            b"-ERR wrong number of arguments for 'quit' command\r\n".to_vec()
+        );
+        assert_eq!(
+            handler.handle_command(b"SAVE x\r\n"),
+            b"-ERR wrong number of arguments for 'save' command\r\n".to_vec()
+        );
+        assert_eq!(
+            handler.handle_command(b"BGSAVE SCHEDULE\r\n"),
+            b"+OK\r\n".to_vec()
+        );
+        assert_eq!(
+            handler.handle_command(b"BGSAVE NOW\r\n"),
+            b"-ERR syntax error\r\n".to_vec()
+        );
+        assert_eq!(
+            handler.handle_command(b"CLIENT SETNAME worker\r\n"),
+            b"+OK\r\n".to_vec()
+        );
+        assert_eq!(
+            handler.handle_command(b"CLIENT GETNAME\r\n"),
+            b"$-1\r\n".to_vec()
+        );
+
+        let client_list = handler.handle_command(b"CLIENT LIST\r\n");
+        assert!(client_list.starts_with(b"$"));
+        assert!(
+            client_list
+                .windows(b"cmd=client".len())
+                .any(|w| w == b"cmd=client")
+        );
+
+        assert_eq!(
+            handler.handle_command(b"CLIENT\r\n"),
+            b"-ERR wrong number of arguments for 'client' command\r\n".to_vec()
+        );
+        assert_eq!(
+            handler.handle_command(b"CLIENT KILL all\r\n"),
+            b"-ERR unknown CLIENT subcommand\r\n".to_vec()
         );
     }
 }

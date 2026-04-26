@@ -41,6 +41,35 @@ fn command_arg(command: &str) -> &str {
     trimmed[verb_end..].trim()
 }
 
+fn missing_argument() -> FtpResponse {
+    FtpResponse::new(501, "Missing argument")
+}
+
+fn required_arg(command: &str) -> Result<&str, FtpResponse> {
+    let arg = command_arg(command);
+    if arg.is_empty() {
+        Err(missing_argument())
+    } else {
+        Ok(arg)
+    }
+}
+
+fn type_response(command: &str) -> FtpResponse {
+    let mut args = command_arg(command).split_ascii_whitespace();
+    match (args.next(), args.next(), args.next()) {
+        (Some(mode), None, None) if mode.eq_ignore_ascii_case("A") => {
+            FtpResponse::new(200, "Type set to A")
+        }
+        (Some(mode), None, None) if mode.eq_ignore_ascii_case("I") => {
+            FtpResponse::new(200, "Type set to I")
+        }
+        (Some(mode), Some("8"), None) if mode.eq_ignore_ascii_case("L") => {
+            FtpResponse::new(200, "Type set to L 8")
+        }
+        _ => FtpResponse::new(504, "Unsupported type"),
+    }
+}
+
 pub struct FtpHandler {
     banner: String,
     root_dir: Option<std::path::PathBuf>,
@@ -479,7 +508,7 @@ impl FtpHandler {
         } else if verb == "PWD" {
             FtpResponse::new(257, "/")
         } else if verb == "TYPE" {
-            FtpResponse::new(200, "Type set to I")
+            type_response(command)
         } else if verb == "PASV" {
             let port = self.next_passive_port();
             let p1 = port / 256;
@@ -512,7 +541,10 @@ impl FtpHandler {
                 raw: None,
             }
         } else if verb == "SIZE" {
-            let filename = command_arg(command);
+            let filename = match required_arg(command) {
+                Ok(filename) => filename,
+                Err(response) => return response,
+            };
             if has_path_traversal(filename) {
                 return FtpResponse::new(550, "Invalid path");
             }
@@ -543,21 +575,42 @@ impl FtpHandler {
                 FtpResponse::new(213, "0")
             }
         } else if verb == "MDTM" {
-            FtpResponse::new(213, "20240101000000")
-        } else if matches!(verb.as_str(), "CWD" | "CDUP") {
+            match required_arg(command) {
+                Ok(_) => FtpResponse::new(213, "20240101000000"),
+                Err(response) => response,
+            }
+        } else if verb == "CWD" {
+            match required_arg(command) {
+                Ok(_) => FtpResponse::new(250, "Directory changed"),
+                Err(response) => response,
+            }
+        } else if verb == "CDUP" {
             FtpResponse::new(250, "Directory changed")
         } else if matches!(verb.as_str(), "MKD" | "XMKD") {
-            let dir = command_arg(command);
-            let dir = if dir.is_empty() { "/new" } else { dir };
-            FtpResponse::new(257, format!("\"{}\" directory created", dir))
+            match required_arg(command) {
+                Ok(dir) => FtpResponse::new(257, format!("\"{}\" directory created", dir)),
+                Err(response) => response,
+            }
         } else if matches!(verb.as_str(), "RMD" | "XRMD") {
-            FtpResponse::new(250, "Directory removed")
+            match required_arg(command) {
+                Ok(_) => FtpResponse::new(250, "Directory removed"),
+                Err(response) => response,
+            }
         } else if verb == "DELE" {
-            FtpResponse::new(250, "File deleted")
+            match required_arg(command) {
+                Ok(_) => FtpResponse::new(250, "File deleted"),
+                Err(response) => response,
+            }
         } else if verb == "RNFR" {
-            FtpResponse::new(350, "Ready for RNTO")
+            match required_arg(command) {
+                Ok(_) => FtpResponse::new(350, "Ready for RNTO"),
+                Err(response) => response,
+            }
         } else if verb == "RNTO" {
-            FtpResponse::new(250, "Rename successful")
+            match required_arg(command) {
+                Ok(_) => FtpResponse::new(250, "Rename successful"),
+                Err(response) => response,
+            }
         } else if matches!(verb.as_str(), "STOR" | "APPE") {
             FtpResponse::new(502, "Upload data transfers are not supported")
         } else if verb == "NOOP" {
@@ -931,6 +984,79 @@ mod tests {
         let pass = handler.handle("PASS");
         assert_eq!(pass.code, 501);
         assert_eq!(pass.message, "Missing argument");
+    }
+
+    #[test]
+    fn size_and_mdtm_require_filename() {
+        let handler = FtpHandler::new();
+
+        let size = handler.handle("SIZE");
+        assert_eq!(size.code, 501);
+        assert_eq!(size.message, "Missing argument");
+
+        let mdtm = handler.handle("MDTM");
+        assert_eq!(mdtm.code, 501);
+        assert_eq!(mdtm.message, "Missing argument");
+
+        let size_with_filename = handler.handle("SIZE file.txt");
+        assert_eq!(size_with_filename.code, 213);
+        assert_eq!(size_with_filename.message, "0");
+
+        let mdtm_with_filename = handler.handle("MDTM file.txt");
+        assert_eq!(mdtm_with_filename.code, 213);
+        assert_eq!(mdtm_with_filename.message, "20240101000000");
+    }
+
+    #[test]
+    fn path_commands_require_arguments() {
+        let handler = FtpHandler::new();
+
+        let cwd = handler.handle("CWD");
+        assert_eq!(cwd.code, 501);
+        assert_eq!(cwd.message, "Missing argument");
+
+        let cwd_root = handler.handle("CWD /");
+        assert_eq!(cwd_root.code, 250);
+
+        let cdup = handler.handle("CDUP");
+        assert_eq!(cdup.code, 250);
+
+        for command in ["MKD", "XMKD", "RMD", "XRMD", "DELE", "RNFR", "RNTO"] {
+            let response = handler.handle(command);
+            assert_eq!(response.code, 501, "{command} must require an argument");
+            assert_eq!(response.message, "Missing argument");
+        }
+
+        assert_eq!(handler.handle("MKD new").code, 257);
+        assert_eq!(handler.handle("XMKD new").code, 257);
+        assert_eq!(handler.handle("RMD old").code, 250);
+        assert_eq!(handler.handle("XRMD old").code, 250);
+        assert_eq!(handler.handle("DELE file").code, 250);
+        assert_eq!(handler.handle("RNFR old").code, 350);
+        assert_eq!(handler.handle("RNTO new").code, 250);
+    }
+
+    #[test]
+    fn type_validates_transfer_mode() {
+        let handler = FtpHandler::new();
+
+        let ascii = handler.handle("TYPE A");
+        assert_eq!(ascii.code, 200);
+        assert_eq!(ascii.message, "Type set to A");
+
+        let binary = handler.handle("TYPE I");
+        assert_eq!(binary.code, 200);
+        assert_eq!(binary.message, "Type set to I");
+
+        let local = handler.handle("TYPE L 8");
+        assert_eq!(local.code, 200);
+        assert_eq!(local.message, "Type set to L 8");
+
+        for command in ["TYPE", "TYPE E", "TYPE L 7", "TYPE I extra"] {
+            let response = handler.handle(command);
+            assert_eq!(response.code, 504, "{command} must be rejected");
+            assert_eq!(response.message, "Unsupported type");
+        }
     }
 
     #[cfg(unix)]
