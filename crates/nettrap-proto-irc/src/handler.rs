@@ -90,11 +90,24 @@ impl IrcHandlerTrait for IrcHandler {
             "NICK" => {
                 Ok(IrcResponse::new()) // handled by state
             }
-            "USER" => Ok(self.welcome_sequence(nick)),
-            "PING" => Ok(IrcResponse::single(format!(
-                ":{} PONG {} :{}\r\n",
-                srv, srv, args
-            ))),
+            "USER" => {
+                if user_args_are_valid(args) {
+                    Ok(self.welcome_sequence(nick))
+                } else {
+                    Ok(IrcResponse::single(format!(
+                        ":{} 461 {} USER :Not enough parameters\r\n",
+                        srv, nick
+                    )))
+                }
+            }
+            "PING" => {
+                let message = if let Some(token) = first_arg(args) {
+                    format!(":{} PONG {} :{}\r\n", srv, srv, token)
+                } else {
+                    format!(":{} 409 {} :No origin specified\r\n", srv, nick)
+                };
+                Ok(IrcResponse::single(message))
+            }
             "PONG" => Ok(IrcResponse::new()),
             "JOIN" => {
                 let channel = if args.is_empty() {
@@ -224,9 +237,40 @@ fn is_cap_ls(args: &str) -> bool {
         .is_some_and(|subcommand| subcommand.eq_ignore_ascii_case("LS"))
 }
 
+fn first_arg(args: &str) -> Option<&str> {
+    args.split_whitespace().next()
+}
+
+fn user_args_are_valid(args: &str) -> bool {
+    let mut parts = args.split_whitespace();
+    (0..4).all(|_| parts.next().is_some_and(|part| !part.is_empty()))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::is_cap_ls;
+    use super::*;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
+
+    struct NoopWake;
+
+    impl Wake for NoopWake {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    fn block_on<F: Future>(future: F) -> F::Output {
+        let waker = Waker::from(Arc::new(NoopWake));
+        let mut cx = Context::from_waker(&waker);
+        let mut future = Pin::from(Box::new(future));
+        loop {
+            match future.as_mut().poll(&mut cx) {
+                Poll::Ready(output) => return output,
+                Poll::Pending => std::thread::yield_now(),
+            }
+        }
+    }
 
     #[test]
     fn cap_ls_requires_exact_subcommand() {
@@ -234,5 +278,38 @@ mod tests {
         assert!(is_cap_ls("ls 302"));
         assert!(!is_cap_ls("LSXYZ"));
         assert!(!is_cap_ls(""));
+    }
+
+    #[test]
+    fn user_requires_required_registration_parameters() {
+        let handler = IrcHandler::new();
+
+        let invalid = block_on(handler.handle("USER guest 0 *", "guest")).expect("USER response");
+        assert_eq!(
+            invalid.to_bytes(),
+            b":irc.nettrap.local 461 guest USER :Not enough parameters\r\n"
+        );
+
+        let valid =
+            block_on(handler.handle("USER guest 0 * :Guest User", "guest")).expect("USER response");
+        let bytes = valid.to_bytes();
+        assert!(String::from_utf8_lossy(&bytes).contains(" 001 guest "));
+    }
+
+    #[test]
+    fn ping_requires_origin_token() {
+        let handler = IrcHandler::new();
+
+        let missing = block_on(handler.handle("PING", "guest")).expect("PING response");
+        assert_eq!(
+            missing.to_bytes(),
+            b":irc.nettrap.local 409 guest :No origin specified\r\n"
+        );
+
+        let valid = block_on(handler.handle("PING token extra", "guest")).expect("PING response");
+        assert_eq!(
+            valid.to_bytes(),
+            b":irc.nettrap.local PONG irc.nettrap.local :token\r\n"
+        );
     }
 }

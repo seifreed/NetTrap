@@ -52,7 +52,8 @@ impl Default for FingerHandler {
 }
 
 fn sanitize_user(query: &str) -> String {
-    query
+    let first_line = query.lines().next().unwrap_or("");
+    first_line
         .trim()
         .chars()
         .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '@'))
@@ -76,7 +77,8 @@ mod tests {
     fn sanitizes_control_characters_from_user_query() {
         let response = FingerHandler::new().handle("ro\r\nInjected: yes");
 
-        assert!(response.contains("Login: roInjectedyes\r\n"));
+        assert!(response.contains("Login: ro\r\n"));
+        assert!(!response.contains("roInjectedyes"));
         assert!(!response.contains("Injected: yes"));
     }
 

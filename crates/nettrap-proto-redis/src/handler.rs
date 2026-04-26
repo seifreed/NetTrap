@@ -75,34 +75,57 @@ impl RedisHandler {
                     }
                 }
                 "SET" => {
-                    tracing::warn!("REDIS SET attempt: {:?}", args);
-                    "+OK\r\n".to_string()
-                }
-                "GET" => "$-1\r\n".to_string(), // nil
-                "CONFIG" => {
-                    if args.first().map(|a| a.to_uppercase()) == Some("SET".to_string()) {
-                        tracing::warn!("REDIS CONFIG SET attempt: {:?}", args);
-                        // This is how attackers write SSH keys or crontabs
-                        "+OK\r\n".to_string()
-                    } else if args.first().map(|a| a.to_uppercase()) == Some("GET".to_string()) {
-                        let key = args.get(1).copied().unwrap_or("dir");
-                        let value = match key.to_lowercase().as_str() {
-                            "dir" => "/tmp/",
-                            "dbfilename" => "dump.rdb",
-                            "save" => "3600 1 300 100 60 10000",
-                            "maxmemory" => "0",
-                            "bind" => "0.0.0.0",
-                            _ => "",
-                        };
-                        format!(
-                            "*2\r\n${}\r\n{}\r\n${}\r\n{}\r\n",
-                            key.len(),
-                            key,
-                            value.len(),
-                            value
-                        )
+                    if args.len() < 2 {
+                        wrong_number_of_arguments("set")
                     } else {
+                        tracing::warn!("REDIS SET attempt: {:?}", args);
                         "+OK\r\n".to_string()
+                    }
+                }
+                "GET" => {
+                    if args.len() == 1 {
+                        "$-1\r\n".to_string()
+                    } else {
+                        wrong_number_of_arguments("get")
+                    }
+                }
+                "CONFIG" => {
+                    if args.is_empty() {
+                        wrong_number_of_arguments("config")
+                    } else {
+                        let subcommand = args[0].to_uppercase();
+                        if subcommand == "SET" {
+                            if args.len() != 3 {
+                                wrong_number_of_arguments("config|set")
+                            } else {
+                                tracing::warn!("REDIS CONFIG SET attempt: {:?}", args);
+                                // This is how attackers write SSH keys or crontabs
+                                "+OK\r\n".to_string()
+                            }
+                        } else if subcommand == "GET" {
+                            if args.len() != 2 {
+                                wrong_number_of_arguments("config|get")
+                            } else {
+                                let key = args[1];
+                                let value = match key.to_lowercase().as_str() {
+                                    "dir" => "/tmp/",
+                                    "dbfilename" => "dump.rdb",
+                                    "save" => "3600 1 300 100 60 10000",
+                                    "maxmemory" => "0",
+                                    "bind" => "0.0.0.0",
+                                    _ => "",
+                                };
+                                format!(
+                                    "*2\r\n${}\r\n{}\r\n${}\r\n{}\r\n",
+                                    key.len(),
+                                    key,
+                                    value.len(),
+                                    value
+                                )
+                            }
+                        } else {
+                            "-ERR unknown CONFIG subcommand\r\n".to_string()
+                        }
                     }
                 }
                 "SLAVEOF" | "REPLICAOF" => {
@@ -110,7 +133,7 @@ impl RedisHandler {
                     "+OK\r\n".to_string()
                 }
                 "MODULE" => {
-                    tracing::warn!("REDIS MODULE LOAD attempt: {:?}", args);
+                    tracing::warn!("REDIS MODULE LOAD attempt");
                     "-ERR Module loading is disabled\r\n".to_string()
                 }
                 "EVAL" | "EVALSHA" => {
@@ -236,6 +259,13 @@ fn auth_args_are_valid(args: &[&str]) -> bool {
     matches!(args.len(), 1 | 2) && args.iter().all(|arg| !arg.is_empty())
 }
 
+fn wrong_number_of_arguments(command: &str) -> String {
+    format!(
+        "-ERR wrong number of arguments for '{}' command\r\n",
+        command
+    )
+}
+
 fn find_lf_from(haystack: &[u8], start: usize) -> Option<usize> {
     haystack
         .get(start..)?
@@ -334,6 +364,59 @@ mod tests {
         assert_eq!(
             handler.handle_command(b"PING\r\n"),
             b"-NOAUTH Authentication required.\r\n".to_vec()
+        );
+    }
+
+    #[test]
+    fn get_and_set_validate_argument_counts() {
+        let handler = RedisHandler::new();
+
+        assert_eq!(handler.handle_command(b"GET key\r\n"), b"$-1\r\n".to_vec());
+        assert_eq!(
+            handler.handle_command(b"GET\r\n"),
+            b"-ERR wrong number of arguments for 'get' command\r\n".to_vec()
+        );
+        assert_eq!(
+            handler.handle_command(b"GET one two\r\n"),
+            b"-ERR wrong number of arguments for 'get' command\r\n".to_vec()
+        );
+        assert_eq!(
+            handler.handle_command(b"SET key value\r\n"),
+            b"+OK\r\n".to_vec()
+        );
+        assert_eq!(
+            handler.handle_command(b"SET key\r\n"),
+            b"-ERR wrong number of arguments for 'set' command\r\n".to_vec()
+        );
+    }
+
+    #[test]
+    fn config_validates_subcommand_and_argument_counts() {
+        let handler = RedisHandler::new();
+
+        assert_eq!(
+            handler.handle_command(b"CONFIG\r\n"),
+            b"-ERR wrong number of arguments for 'config' command\r\n".to_vec()
+        );
+        assert_eq!(
+            handler.handle_command(b"CONFIG GET\r\n"),
+            b"-ERR wrong number of arguments for 'config|get' command\r\n".to_vec()
+        );
+        assert_eq!(
+            handler.handle_command(b"CONFIG GET dir\r\n"),
+            b"*2\r\n$3\r\ndir\r\n$5\r\n/tmp/\r\n".to_vec()
+        );
+        assert_eq!(
+            handler.handle_command(b"CONFIG SET dir /tmp extra\r\n"),
+            b"-ERR wrong number of arguments for 'config|set' command\r\n".to_vec()
+        );
+        assert_eq!(
+            handler.handle_command(b"CONFIG SET dir /tmp\r\n"),
+            b"+OK\r\n".to_vec()
+        );
+        assert_eq!(
+            handler.handle_command(b"CONFIG REWRITE\r\n"),
+            b"-ERR unknown CONFIG subcommand\r\n".to_vec()
         );
     }
 }

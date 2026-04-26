@@ -55,6 +55,17 @@ impl MysqlHandler {
         if data.len() < 5 {
             return Vec::new();
         }
+        let declared_payload_len =
+            data[0] as usize | ((data[1] as usize) << 8) | ((data[2] as usize) << 16);
+        if declared_payload_len != data.len() - 4 {
+            tracing::debug!(
+                "MySQL packet length mismatch: declared={}, actual={}",
+                declared_payload_len,
+                data.len().saturating_sub(4)
+            );
+            return Vec::new();
+        }
+
         let seq = data[3];
         let payload = &data[4..];
 
@@ -92,6 +103,13 @@ impl MysqlHandler {
         let username_start = if is_41 {
             // Protocol 4.1: 4-byte flags + 4-byte max_packet + 1-byte charset + 23-byte reserved
             if data.len() > 32 {
+                if data[9..32].iter().any(|&byte| byte != 0) {
+                    return Self::build_error_packet(
+                        response_seq,
+                        1043,
+                        "Malformed handshake response",
+                    );
+                }
                 32
             } else {
                 return Self::build_error_packet(
@@ -122,8 +140,10 @@ impl MysqlHandler {
         let username_end = data[username_start..]
             .iter()
             .position(|&b| b == 0)
-            .map(|p| username_start + p)
-            .unwrap_or(data.len());
+            .map(|p| username_start + p);
+        let Some(username_end) = username_end else {
+            return Self::build_error_packet(response_seq, 1043, "Malformed handshake response");
+        };
 
         // Sanity check: limit username length to prevent log injection
         let max_username_len = (username_end - username_start).min(256);
@@ -145,6 +165,9 @@ impl MysqlHandler {
         match cmd {
             0x03 => {
                 // COM_QUERY
+                if data.len() == 1 {
+                    return Self::build_error_packet(response_seq, 1065, "Query was empty");
+                }
                 let query = String::from_utf8_lossy(&data[1..]);
                 tracing::warn!("MySQL QUERY: {}", query);
                 // Return empty result set
@@ -156,6 +179,9 @@ impl MysqlHandler {
             }
             0x02 => {
                 // COM_INIT_DB
+                if data.len() == 1 {
+                    return Self::build_error_packet(response_seq, 1049, "Unknown database");
+                }
                 let db = String::from_utf8_lossy(&data[1..]);
                 tracing::info!("MySQL USE {}", db);
                 Self::build_ok_packet(response_seq)
@@ -315,5 +341,65 @@ mod tests {
 
         assert_eq!(response[3], 0);
         assert_eq!(response[4], 0x00);
+    }
+
+    #[test]
+    fn packet_header_length_must_match_captured_payload() {
+        let handler = MysqlHandler::new();
+        let mut packet = wrap_client_packet(&[0x03, b'S'], 2);
+        packet[0] = 3;
+
+        assert!(handler.handle(&packet).is_empty());
+
+        let mut packet = wrap_client_packet(&[0x03, b'S'], 2);
+        packet.push(b'E');
+
+        assert!(handler.handle(&packet).is_empty());
+    }
+
+    #[test]
+    fn protocol_41_login_rejects_nonzero_reserved_bytes() {
+        let handler = MysqlHandler::new();
+        let mut login = vec![0; 32];
+        let capabilities = CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION;
+        login[..4].copy_from_slice(&capabilities.to_le_bytes());
+        login[9] = 1;
+        login.extend_from_slice(b"root\0");
+
+        let response = handler.handle(&wrap_client_packet(&login, 1));
+
+        assert_eq!(response[3], 2);
+        assert_eq!(response[4], 0xff);
+        assert!(String::from_utf8_lossy(&response).contains("Malformed handshake response"));
+    }
+
+    #[test]
+    fn login_username_must_be_null_terminated() {
+        let handler = MysqlHandler::new();
+        let mut login = vec![0; 32];
+        let capabilities = CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION;
+        login[..4].copy_from_slice(&capabilities.to_le_bytes());
+        login.extend_from_slice(b"root");
+
+        let response = handler.handle(&wrap_client_packet(&login, 1));
+
+        assert_eq!(response[3], 2);
+        assert_eq!(response[4], 0xff);
+        assert!(String::from_utf8_lossy(&response).contains("Malformed handshake response"));
+    }
+
+    #[test]
+    fn empty_query_and_init_db_are_rejected() {
+        let handler = MysqlHandler::new();
+
+        let empty_query = handler.handle(&wrap_client_packet(&[0x03], 2));
+        assert_eq!(empty_query[3], 3);
+        assert_eq!(empty_query[4], 0xff);
+        assert!(String::from_utf8_lossy(&empty_query).contains("Query was empty"));
+
+        let empty_db = handler.handle(&wrap_client_packet(&[0x02], 2));
+        assert_eq!(empty_db[3], 3);
+        assert_eq!(empty_db[4], 0xff);
+        assert!(String::from_utf8_lossy(&empty_db).contains("Unknown database"));
     }
 }
