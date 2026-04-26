@@ -29,14 +29,17 @@ impl SipHandler {
     }
 
     fn request_method(first_line: &str) -> Option<&str> {
-        let (method, rest) = first_line.split_once(' ')?;
+        let mut parts = first_line.split(' ');
+        let method = parts.next()?;
+        let target = parts.next()?;
+        let version = parts.next()?;
         if method.is_empty()
+            || target.is_empty()
             || method.starts_with("SIP/")
             || !method.bytes().all(|byte| byte.is_ascii_uppercase())
+            || version != "SIP/2.0"
+            || parts.next().is_some()
         {
-            return None;
-        }
-        if !rest.split_whitespace().any(|part| part == "SIP/2.0") {
             return None;
         }
         Some(method)
@@ -131,5 +134,22 @@ mod tests {
             .handle(b"MESSAGE sip:service@example.com SIP/2.0\r\nCall-ID: abc\r\n\r\n");
 
         assert!(response.is_empty());
+    }
+
+    #[test]
+    fn ignores_malformed_sip_request_lines() {
+        let handler = SipHandler::new();
+
+        assert!(
+            handler
+                .handle(b"OPTIONS sip:service@example.com SIP/2.0 extra\r\n\r\n")
+                .is_empty()
+        );
+        assert!(handler.handle(b"OPTIONS  SIP/2.0\r\n\r\n").is_empty());
+        assert!(
+            handler
+                .handle(b"OPTIONS sip:service@example.com SIP/3.0\r\n\r\n")
+                .is_empty()
+        );
     }
 }

@@ -136,11 +136,9 @@ impl TelnetHandler {
         self.build_response(output, cmd)
     }
 
-    fn build_response(&self, output: &str, cmd: &str) -> Vec<u8> {
+    fn build_response(&self, output: &str, _cmd: &str) -> Vec<u8> {
         let mut response = output.as_bytes().to_vec();
-        if !cmd.starts_with("exit") && !cmd.starts_with("quit") && !cmd.starts_with("logout") {
-            response.extend_from_slice(self.shell_prompt.as_bytes());
-        }
+        response.extend_from_slice(self.shell_prompt.as_bytes());
         response
     }
 
@@ -161,5 +159,28 @@ impl TelnetHandler {
 impl Default for TelnetHandler {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exact_close_commands_close_connection() {
+        let handler = TelnetHandler::new();
+
+        assert_eq!(handler.handle_command("exit"), b"Connection closed.\r\n");
+        assert_eq!(handler.handle_command("quit"), b"Connection closed.\r\n");
+        assert_eq!(handler.handle_command("logout"), b"Connection closed.\r\n");
+    }
+
+    #[test]
+    fn prefixed_close_commands_are_regular_shell_commands() {
+        let handler = TelnetHandler::new();
+
+        assert_eq!(handler.handle_command("exitnow"), b"-sh: not found\n# ");
+        assert_eq!(handler.handle_command("quitnow"), b"-sh: not found\n# ");
+        assert_eq!(handler.handle_command("logoutnow"), b"-sh: not found\n# ");
     }
 }

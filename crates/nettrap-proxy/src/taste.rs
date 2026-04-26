@@ -446,12 +446,7 @@ impl ProtocolTaste for RedisTaste {
         if dst_port == 6379 {
             return 90;
         }
-        let text = String::from_utf8_lossy(data).to_uppercase();
-        if text.starts_with("*")
-            || text.starts_with("PING")
-            || text.starts_with("INFO")
-            || text.starts_with("AUTH")
-        {
+        if looks_like_resp_array(data) || command_token_matches(data, &["PING", "INFO", "AUTH"]) {
             return 80;
         }
         0
@@ -459,6 +454,19 @@ impl ProtocolTaste for RedisTaste {
     fn protocol_name(&self) -> &'static str {
         "redis"
     }
+}
+
+fn looks_like_resp_array(data: &[u8]) -> bool {
+    if !data.starts_with(b"*") {
+        return false;
+    }
+    let Some(line_end) = data.windows(2).position(|window| window == b"\r\n") else {
+        return false;
+    };
+    let Ok(count) = std::str::from_utf8(&data[1..line_end]) else {
+        return false;
+    };
+    count.parse::<u64>().is_ok_and(|value| value > 0)
 }
 
 pub struct MysqlTaste;
@@ -972,6 +980,25 @@ mod tests {
 
         assert_eq!(MemcachedTaste.taste(b"statsfoo\r\n", 0), 0);
         assert_eq!(MemcachedTaste.taste(b"stats\r\n", 0), 85);
+    }
+
+    #[test]
+    fn test_redis_taste_requires_structured_command() {
+        let taste = RedisTaste;
+
+        assert_eq!(taste.taste(b"PING\r\n", 0), 80);
+        assert_eq!(taste.taste(b"AUTH password\r\n", 0), 80);
+        assert_eq!(
+            taste.taste(b"*2\r\n$4\r\nAUTH\r\n$8\r\npassword\r\n", 0),
+            80
+        );
+
+        assert_eq!(taste.taste(b"PINGX\r\n", 0), 0);
+        assert_eq!(taste.taste(b"INFOO\r\n", 0), 0);
+        assert_eq!(taste.taste(b"AUTHZ password\r\n", 0), 0);
+        assert_eq!(taste.taste(b"*garbage\r\n", 0), 0);
+        assert_eq!(taste.taste(b"*0\r\n", 0), 0);
+        assert_eq!(taste.taste(b"*2", 0), 0);
     }
 
     #[test]
