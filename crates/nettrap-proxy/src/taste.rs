@@ -693,11 +693,8 @@ impl ProtocolTaste for SipTaste {
 pub struct UpnpTaste;
 impl ProtocolTaste for UpnpTaste {
     fn taste(&self, data: &[u8], dst_port: u16) -> TasteScore {
-        if dst_port == 1900 {
-            return 85;
-        }
-        if command_token_matches(data, &["M-SEARCH", "NOTIFY"]) {
-            return 90;
+        if looks_like_ssdp_request(data) {
+            return if dst_port == 1900 { 90 } else { 75 };
         }
         0
     }
@@ -706,14 +703,78 @@ impl ProtocolTaste for UpnpTaste {
     }
 }
 
+fn looks_like_ssdp_request(data: &[u8]) -> bool {
+    let Some(line) = first_text_line(data) else {
+        return false;
+    };
+    let mut parts = line.split(' ');
+    let Some(method) = parts.next() else {
+        return false;
+    };
+    let Some(target) = parts.next() else {
+        return false;
+    };
+    let Some(version) = parts.next() else {
+        return false;
+    };
+    if parts.next().is_some() || target != "*" || version != "HTTP/1.1" {
+        return false;
+    }
+    if !headers_are_well_formed(data) || header_value(data, "HOST").is_none() {
+        return false;
+    }
+    if method.eq_ignore_ascii_case("M-SEARCH") {
+        return header_value(data, "MAN")
+            .is_some_and(|value| value.eq_ignore_ascii_case("\"ssdp:discover\""))
+            && header_value(data, "ST").is_some();
+    }
+    if method.eq_ignore_ascii_case("NOTIFY") {
+        return header_value(data, "NT").is_some() && header_value(data, "NTS").is_some();
+    }
+    false
+}
+
+fn headers_are_well_formed(data: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(data) else {
+        return false;
+    };
+    for line in text.lines().skip(1) {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            return true;
+        }
+        let Some((key, _)) = line.split_once(':') else {
+            return false;
+        };
+        if key.trim().is_empty() {
+            return false;
+        }
+    }
+    false
+}
+
+fn header_value<'a>(data: &'a [u8], name: &str) -> Option<&'a str> {
+    let text = std::str::from_utf8(data).ok()?;
+    for line in text.lines().skip(1) {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            break;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        if key.trim().eq_ignore_ascii_case(name) {
+            return Some(value.trim());
+        }
+    }
+    None
+}
+
 pub struct NtpTaste;
 impl ProtocolTaste for NtpTaste {
     fn taste(&self, data: &[u8], dst_port: u16) -> TasteScore {
-        if dst_port == 123 {
-            return 90;
-        }
         if looks_like_ntp_client_request(data) {
-            return 60;
+            return if dst_port == 123 { 90 } else { 60 };
         }
         0
     }
@@ -734,11 +795,8 @@ fn looks_like_ntp_client_request(data: &[u8]) -> bool {
 pub struct CoapTaste;
 impl ProtocolTaste for CoapTaste {
     fn taste(&self, data: &[u8], dst_port: u16) -> TasteScore {
-        if dst_port == 5683 || dst_port == 5684 {
-            return 90;
-        }
         if looks_like_plain_coap_request(data) {
-            return 50;
+            return if dst_port == 5683 { 90 } else { 50 };
         }
         0
     }
@@ -761,11 +819,12 @@ fn looks_like_plain_coap_request(data: &[u8]) -> bool {
 pub struct NknTaste;
 impl ProtocolTaste for NknTaste {
     fn taste(&self, data: &[u8], dst_port: u16) -> TasteScore {
-        if (30001..=30003).contains(&dst_port) {
-            return 85;
-        }
         if looks_like_nkn_json_rpc(data) {
-            return 90;
+            return if (30001..=30003).contains(&dst_port) {
+                95
+            } else {
+                90
+            };
         }
         0
     }
@@ -867,18 +926,40 @@ impl ProtocolTaste for QuotdTaste {
 pub struct SyslogRecvTaste;
 impl ProtocolTaste for SyslogRecvTaste {
     fn taste(&self, data: &[u8], dst_port: u16) -> TasteScore {
-        if dst_port == 514 {
-            return 90;
-        }
-        // Syslog messages start with <PRI>
-        if data.len() >= 3 && data[0] == b'<' && data.iter().take(6).any(|&b| b == b'>') {
-            return 75;
+        if looks_like_syslog_pri(data) {
+            return if dst_port == 514 { 90 } else { 75 };
         }
         0
     }
     fn protocol_name(&self) -> &'static str {
         "syslogrecv"
     }
+}
+
+fn looks_like_syslog_pri(data: &[u8]) -> bool {
+    if data.first() != Some(&b'<') {
+        return false;
+    }
+    let Some(end) = data.iter().take(6).position(|&byte| byte == b'>') else {
+        return false;
+    };
+    if end <= 1 {
+        return false;
+    }
+    let pri = &data[1..end];
+    if pri.len() > 3
+        || !pri.iter().all(|byte| byte.is_ascii_digit())
+        || (pri.len() > 1 && pri.first() == Some(&b'0'))
+    {
+        return false;
+    }
+    let Ok(pri_text) = std::str::from_utf8(pri) else {
+        return false;
+    };
+    let Ok(pri) = pri_text.parse::<u16>() else {
+        return false;
+    };
+    pri <= 191
 }
 
 pub struct DummyTaste;
@@ -955,25 +1036,51 @@ mod tests {
     }
 
     #[test]
-    fn test_ntp_taste_requires_client_mode_off_standard_port() {
+    fn test_ntp_taste_requires_client_mode_even_on_standard_port() {
         let taste = NtpTaste;
         let mut client = vec![0u8; 48];
         client[0] = 0x23;
         let mut server = vec![0u8; 48];
         server[0] = 0x24;
 
+        assert_eq!(taste.taste(&client, 123), 90);
         assert_eq!(taste.taste(&client, 12345), 60);
+        assert_eq!(taste.taste(&server, 123), 0);
         assert_eq!(taste.taste(&server, 12345), 0);
+        assert_eq!(taste.taste(b"garbage", 123), 0);
         assert_eq!(taste.taste(&[0u8; 48], 12345), 0);
     }
 
     #[test]
-    fn test_coap_taste_requires_request_code_off_standard_port() {
+    fn test_coap_taste_requires_plain_request_even_on_standard_ports() {
         let taste = CoapTaste;
 
+        assert_eq!(taste.taste(&[0x40, 0x01, 0x12, 0x34], 5683), 90);
+        assert_eq!(taste.taste(&[0x40, 0x01, 0x12, 0x34], 5684), 50);
         assert_eq!(taste.taste(&[0x40, 0x01, 0x12, 0x34], 12345), 50);
+        assert_eq!(taste.taste(b"garbage", 5683), 0);
+        assert_eq!(taste.taste(b"garbage", 5684), 0);
         assert_eq!(taste.taste(&[0x60, 0x41, 0x12, 0x34], 12345), 0);
         assert_eq!(taste.taste(&[0x49, 0x01, 0x12, 0x34], 12345), 0);
+    }
+
+    #[test]
+    fn test_upnp_taste_requires_well_formed_ssdp() {
+        let taste = UpnpTaste;
+        let m_search = b"M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nST: upnp:rootdevice\r\n\r\n";
+        let notify = b"NOTIFY * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nNT: upnp:rootdevice\r\nNTS: ssdp:alive\r\n\r\n";
+
+        assert_eq!(taste.taste(m_search, 1900), 90);
+        assert_eq!(taste.taste(m_search, 9999), 75);
+        assert_eq!(taste.taste(notify, 1900), 90);
+        assert_eq!(taste.taste(b"garbage", 1900), 0);
+        assert_eq!(
+            taste.taste(
+                b"M-SEARCH * HTTP/1.1\r\nHOST: x\r\nST: upnp:rootdevice\r\n\r\n",
+                1900
+            ),
+            0
+        );
     }
 
     #[test]
@@ -1088,7 +1195,21 @@ mod tests {
         let valid = br#"{"jsonrpc":"2.0","method":"getlatestblockheight","params":[],"id":1}"#;
 
         assert_eq!(taste.taste(valid, 0), 90);
+        assert_eq!(taste.taste(valid, 30001), 95);
+        assert_eq!(taste.taste(b"garbage", 30001), 0);
         assert_eq!(taste.taste(b"noise \"jsonrpc\" getlatestblockheight", 0), 0);
+    }
+
+    #[test]
+    fn test_syslog_taste_validates_pri() {
+        let taste = SyslogRecvTaste;
+
+        assert_eq!(taste.taste(b"<13>message", 514), 90);
+        assert_eq!(taste.taste(b"<13>message", 1514), 75);
+        assert_eq!(taste.taste(b"<013>message", 514), 0);
+        assert_eq!(taste.taste(b"<192>message", 514), 0);
+        assert_eq!(taste.taste(b"<abc>message", 514), 0);
+        assert_eq!(taste.taste(b"garbage", 514), 0);
     }
 
     #[test]

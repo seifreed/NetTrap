@@ -13,7 +13,7 @@ impl FingerHandler {
     }
 
     pub fn with_hostname(mut self, hostname: impl Into<String>) -> Self {
-        self.hostname = hostname.into();
+        self.hostname = sanitize_hostname(&hostname.into());
         self
     }
 
@@ -61,6 +61,23 @@ fn sanitize_user(query: &str) -> String {
         .collect()
 }
 
+fn sanitize_hostname(hostname: &str) -> String {
+    let safe: String = hostname
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_' | ':'))
+        .take(128)
+        .collect();
+    if safe.is_empty() {
+        "nettrap.local".to_string()
+    } else {
+        safe
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::FingerHandler;
@@ -98,5 +115,15 @@ mod tests {
 
         assert!(response.contains("Login    Name"));
         assert!(response.contains("System Administrator"));
+    }
+
+    #[test]
+    fn configured_hostname_cannot_inject_listing_lines() {
+        let response = FingerHandler::new()
+            .with_hostname("host\r\nLogin: injected")
+            .handle("\r\n");
+
+        assert!(response.contains("Mon 08:00  host\r\n"));
+        assert!(!response.contains("Login: injected"));
     }
 }

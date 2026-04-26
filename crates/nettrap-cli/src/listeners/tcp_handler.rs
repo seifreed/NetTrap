@@ -2317,6 +2317,21 @@ async fn handle_telnet(
                 "telnet",
             )
             .await;
+            if !telnet_handler.accepts_credentials(telnet_username, value) {
+                crate::protocol_handlers::log_tcp_event(
+                    ctx,
+                    output_path,
+                    peer,
+                    destination,
+                    "telnet_auth_failure",
+                    &format!("username={} password={}", telnet_username, value),
+                    "telnet",
+                )
+                .await;
+                telnet_username.clear();
+                *telnet_state = nettrap_proto_telnet::TelnetState::WaitingUsername;
+                return telnet_handler.get_login_failure();
+            }
             *telnet_state = nettrap_proto_telnet::TelnetState::Shell;
             telnet_handler.get_login_success()
         }
@@ -2332,7 +2347,7 @@ async fn handle_telnet(
             )
             .await;
             let response = telnet_handler.handle_command(value);
-            if matches!(value, "exit" | "quit" | "logout") {
+            if telnet_command_closes_session(value) {
                 *telnet_state = nettrap_proto_telnet::TelnetState::Disconnected;
             }
             response
@@ -2348,6 +2363,13 @@ fn telnet_line_value(data: &[u8]) -> Option<String> {
     }
     let line = String::from_utf8_lossy(&cleaned);
     Some(line.trim_matches(['\r', '\n']).to_string())
+}
+
+fn telnet_command_closes_session(value: &str) -> bool {
+    matches!(
+        value.split_whitespace().next(),
+        Some("exit" | "quit" | "logout")
+    )
 }
 
 async fn handle_ftp_command(
@@ -3682,6 +3704,15 @@ mod tests {
     fn telnet_iac_only_input_has_no_login_value() {
         assert!(telnet_line_value(&[255, 251, 1]).is_none());
         assert_eq!(telnet_line_value(b"\r\n").as_deref(), Some(""));
+    }
+
+    #[test]
+    fn telnet_close_detection_uses_normalized_command() {
+        assert!(telnet_command_closes_session(" exit \r\n"));
+        assert!(telnet_command_closes_session("quit"));
+        assert!(telnet_command_closes_session("logout now"));
+        assert!(!telnet_command_closes_session("exitnow"));
+        assert!(!telnet_command_closes_session(""));
     }
 
     #[test]

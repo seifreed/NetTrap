@@ -39,6 +39,14 @@ impl TelnetHandler {
         self
     }
 
+    pub fn accepts_credentials(&self, username: &str, password: &str) -> bool {
+        self.credentials.is_empty()
+            || self
+                .credentials
+                .iter()
+                .any(|(user, pass)| user == username && pass == password)
+    }
+
     pub fn state(&self) -> &TelnetState {
         &self.state
     }
@@ -71,6 +79,10 @@ impl TelnetHandler {
             self.fake_system, self.shell_prompt
         )
         .into_bytes()
+    }
+
+    pub fn get_login_failure(&self) -> Vec<u8> {
+        format!("\r\nLogin incorrect\r\n\r\n{} login: ", self.hostname).into_bytes()
     }
 
     /// Handle a shell command and return fake output
@@ -204,5 +216,22 @@ mod tests {
 
         assert!(response.ends_with(b"\n# "));
         assert_eq!(&response[..4095], vec![b'a'; 4095].as_slice());
+    }
+
+    #[test]
+    fn configured_credentials_are_enforced() {
+        let handler = TelnetHandler::new()
+            .with_credentials(vec![("admin".to_string(), "secret".to_string())]);
+
+        assert!(handler.accepts_credentials("admin", "secret"));
+        assert!(!handler.accepts_credentials("admin", "wrong"));
+        assert!(!handler.accepts_credentials("root", "secret"));
+    }
+
+    #[test]
+    fn empty_credentials_accept_honeypot_logins() {
+        let handler = TelnetHandler::new();
+
+        assert!(handler.accepts_credentials("anything", "anything"));
     }
 }

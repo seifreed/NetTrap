@@ -15,7 +15,7 @@ impl IdentHandler {
     }
 
     pub fn with_user(mut self, user: impl Into<String>) -> Self {
-        self.default_user = user.into();
+        self.default_user = sanitize_identity_field(&user.into(), "root");
         self
     }
 
@@ -62,6 +62,24 @@ fn sanitize_error_query(query: &str) -> String {
         .collect()
 }
 
+fn sanitize_identity_field(value: &str, fallback: &str) -> String {
+    let safe: String = value
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(64)
+        .collect::<String>()
+        .trim()
+        .to_string();
+    if safe.is_empty() {
+        fallback.to_string()
+    } else {
+        safe
+    }
+}
+
 impl Default for IdentHandler {
     fn default() -> Self {
         Self::new()
@@ -105,5 +123,15 @@ mod tests {
         let response = IdentHandler::new().handle("6191, 23, 80");
 
         assert_eq!(response, "6191, 23, 80 : ERROR : INVALID-PORT\r\n");
+    }
+
+    #[test]
+    fn configured_user_cannot_inject_response_lines() {
+        let response = IdentHandler::new()
+            .with_user("root\r\n6191 , 23 : USERID : UNIX : injected")
+            .handle("6191, 23");
+
+        assert_eq!(response, "6191 , 23 : USERID : UNIX : root\r\n");
+        assert_eq!(response.matches("\r\n").count(), 1);
     }
 }
