@@ -198,4 +198,32 @@ mod tests {
         assert_eq!(parsed.path, "/a");
         assert!(parsed.body.is_none());
     }
+
+    #[test]
+    fn parse_rejects_request_line_with_extra_fields() {
+        let request = b"GET / HTTP/1.1 junk\r\nHost: example.test\r\n\r\n";
+
+        assert!(HttpRequest::parse(request).is_none());
+    }
+
+    #[test]
+    fn parse_rejects_tabs_as_request_line_separators() {
+        let request = b"GET\t/\tHTTP/1.1\r\nHost: example.test\r\n\r\n";
+
+        assert!(HttpRequest::parse(request).is_none());
+    }
+
+    #[test]
+    fn parse_rejects_invalid_http_version() {
+        let request = b"GET / HTTP/2.0\r\nHost: example.test\r\n\r\n";
+
+        assert!(HttpRequest::parse(request).is_none());
+    }
+
+    #[test]
+    fn parse_rejects_non_token_method() {
+        let request = b"GE(T / HTTP/1.1\r\nHost: example.test\r\n\r\n";
+
+        assert!(HttpRequest::parse(request).is_none());
+    }
 }

@@ -207,4 +207,26 @@ mod tests {
 
         assert_eq!(extract_sni(&data), None);
     }
+
+    #[test]
+    fn extracts_sni_from_client_hello_larger_than_512_bytes() {
+        let mut extensions = Vec::new();
+        extensions.extend_from_slice(&0x1234u16.to_be_bytes());
+        extensions.extend_from_slice(&520u16.to_be_bytes());
+        extensions.resize(extensions.len() + 520, 0);
+
+        let hostname = b"example.com";
+        let sni_ext_len = 2 + 1 + 2 + hostname.len();
+        extensions.extend_from_slice(&0x0000u16.to_be_bytes());
+        extensions.extend_from_slice(&(sni_ext_len as u16).to_be_bytes());
+        extensions.extend_from_slice(&((1 + 2 + hostname.len()) as u16).to_be_bytes());
+        extensions.push(0);
+        extensions.extend_from_slice(&(hostname.len() as u16).to_be_bytes());
+        extensions.extend_from_slice(hostname);
+
+        let data = client_hello_with_extensions(extensions.len() as u16, &extensions, &[]);
+
+        assert!(data.len() > 512);
+        assert_eq!(extract_sni(&data).as_deref(), Some("example.com"));
+    }
 }

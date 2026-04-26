@@ -78,12 +78,12 @@ pub async fn handle_udp_generic(
     let mut sent_bytes = 0u64;
     if !packet.response.is_empty() {
         ctx.apply_response_delay().await;
-        ctx.write_pcap_response_udp_for_destination(
-            packet.response,
-            &packet.src,
-            packet.destination,
-        );
         if socket.send_to(packet.response, packet.src).await.is_ok() {
+            ctx.write_pcap_response_udp_for_destination(
+                packet.response,
+                &packet.src,
+                packet.destination,
+            );
             sent_bytes = packet.response.len() as u64;
         }
     }

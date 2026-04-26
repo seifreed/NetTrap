@@ -953,13 +953,13 @@ async fn handle_tftp(
                     if resp_bytes.is_empty() {
                         continue;
                     }
-                    ctx.write_pcap_response_udp_for_destination(
-                        &resp_bytes,
-                        packet.src,
-                        packet.destination,
-                    );
                     match socket.send_to(&resp_bytes, *packet.src).await {
                         Ok(_) => {
+                            ctx.write_pcap_response_udp_for_destination(
+                                &resp_bytes,
+                                packet.src,
+                                packet.destination,
+                            );
                             sent_bytes += resp_bytes.len() as u64;
                         }
                         Err(e) => {
@@ -1701,12 +1701,13 @@ async fn handle_detected_udp(
                     );
                     ctx.record_nbi(&nbi).await;
                     ctx.apply_response_delay().await;
-                    ctx.write_pcap_response_udp_for_destination(
-                        b"OK\n",
-                        packet.src,
-                        packet.destination,
-                    );
-                    let _ = socket.send_to(b"OK\n", *packet.src).await;
+                    if socket.send_to(b"OK\n", *packet.src).await.is_ok() {
+                        ctx.write_pcap_response_udp_for_destination(
+                            b"OK\n",
+                            packet.src,
+                            packet.destination,
+                        );
+                    }
                 }
             }
         }

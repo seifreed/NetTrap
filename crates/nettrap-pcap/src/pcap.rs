@@ -355,16 +355,35 @@ impl PcapReader {
         if ihl < 20 || data.len() < ihl {
             return None;
         }
+        let total_len = u16::from_be_bytes([data[2], data[3]]) as usize;
+        if total_len < ihl || total_len > data.len() {
+            return None;
+        }
+        let packet_data = &data[..total_len];
 
-        let protocol = data[9];
+        let protocol = packet_data[9];
         let src_ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(
-            data[12], data[13], data[14], data[15],
+            packet_data[12],
+            packet_data[13],
+            packet_data[14],
+            packet_data[15],
         ));
         let dst_ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(
-            data[16], data[17], data[18], data[19],
+            packet_data[16],
+            packet_data[17],
+            packet_data[18],
+            packet_data[19],
         ));
 
-        Self::parse_transport(data, ihl, protocol, src_ip, dst_ip, timestamp, orig_len)
+        Self::parse_transport(
+            packet_data,
+            ihl,
+            protocol,
+            src_ip,
+            dst_ip,
+            timestamp,
+            orig_len,
+        )
     }
 
     fn parse_ipv6_packet(
@@ -376,17 +395,60 @@ impl PcapReader {
             return None;
         }
 
-        let protocol = data[6]; // next header
+        let payload_len = u16::from_be_bytes([data[4], data[5]]) as usize;
+        let total_len = 40usize.checked_add(payload_len)?;
+        if total_len > data.len() {
+            return None;
+        }
+        let packet_data = &data[..total_len];
+
+        let protocol = packet_data[6]; // next header
         let src_ip = std::net::IpAddr::V6(std::net::Ipv6Addr::from([
-            data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15], data[16],
-            data[17], data[18], data[19], data[20], data[21], data[22], data[23],
+            packet_data[8],
+            packet_data[9],
+            packet_data[10],
+            packet_data[11],
+            packet_data[12],
+            packet_data[13],
+            packet_data[14],
+            packet_data[15],
+            packet_data[16],
+            packet_data[17],
+            packet_data[18],
+            packet_data[19],
+            packet_data[20],
+            packet_data[21],
+            packet_data[22],
+            packet_data[23],
         ]));
         let dst_ip = std::net::IpAddr::V6(std::net::Ipv6Addr::from([
-            data[24], data[25], data[26], data[27], data[28], data[29], data[30], data[31],
-            data[32], data[33], data[34], data[35], data[36], data[37], data[38], data[39],
+            packet_data[24],
+            packet_data[25],
+            packet_data[26],
+            packet_data[27],
+            packet_data[28],
+            packet_data[29],
+            packet_data[30],
+            packet_data[31],
+            packet_data[32],
+            packet_data[33],
+            packet_data[34],
+            packet_data[35],
+            packet_data[36],
+            packet_data[37],
+            packet_data[38],
+            packet_data[39],
         ]));
 
-        Self::parse_transport(data, 40, protocol, src_ip, dst_ip, timestamp, orig_len)
+        Self::parse_transport(
+            packet_data,
+            40,
+            protocol,
+            src_ip,
+            dst_ip,
+            timestamp,
+            orig_len,
+        )
     }
 
     fn parse_transport(
@@ -440,12 +502,19 @@ impl PcapReader {
                     u16::from_be_bytes([data[transport_offset], data[transport_offset + 1]]);
                 let dst_port =
                     u16::from_be_bytes([data[transport_offset + 2], data[transport_offset + 3]]);
+                let udp_len =
+                    u16::from_be_bytes([data[transport_offset + 4], data[transport_offset + 5]])
+                        as usize;
+                if udp_len < 8 || transport_offset + udp_len > data.len() {
+                    return None;
+                }
                 let payload_start = transport_offset + 8;
+                let payload_end = transport_offset + udp_len;
 
                 let mut pkt = Packet::new(
                     FiveTuple::new(src_ip, dst_ip, src_port, dst_port, Protocol::Udp),
                     PacketDirection::Unknown,
-                    bytes::Bytes::copy_from_slice(&data[payload_start.min(data.len())..]),
+                    bytes::Bytes::copy_from_slice(&data[payload_start..payload_end]),
                 );
                 pkt.timestamp = timestamp;
                 pkt.length = orig_len;
@@ -465,5 +534,73 @@ impl PcapReader {
             }
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn timestamp() -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc::now()
+    }
+
+    #[test]
+    fn ipv4_udp_payload_ignores_padding_after_declared_lengths() {
+        let mut data = vec![
+            0x45, 0x00, 0x00, 0x20, 0, 0, 0, 0, 64, 17, 0, 0, 127, 0, 0, 1, 8, 8, 8, 8, 0x30, 0x39,
+            0x00, 0x35, 0x00, 0x0c, 0, 0, b't', b'e', b's', b't',
+        ];
+        data.extend_from_slice(b"padding");
+
+        let packet = PcapReader::parse_ipv4_packet(&data, timestamp(), data.len())
+            .expect("packet should parse");
+
+        assert!(packet.is_udp());
+        assert_eq!(packet.payload.as_ref(), b"test");
+    }
+
+    #[test]
+    fn ipv4_udp_rejects_length_beyond_ip_payload() {
+        let data = [
+            0x45, 0x00, 0x00, 0x20, 0, 0, 0, 0, 64, 17, 0, 0, 127, 0, 0, 1, 8, 8, 8, 8, 0x30, 0x39,
+            0x00, 0x35, 0x00, 0x10, 0, 0, b't', b'e', b's', b't',
+        ];
+
+        assert!(PcapReader::parse_ipv4_packet(&data, timestamp(), data.len()).is_none());
+    }
+
+    #[test]
+    fn ipv4_tcp_payload_ignores_padding_after_total_length() {
+        let mut data = vec![
+            0x45, 0x00, 0x00, 0x2b, 0, 0, 0, 0, 64, 6, 0, 0, 192, 168, 1, 10, 93, 184, 216, 34,
+            0x1f, 0x90, 0x00, 0x50, 0, 0, 0, 0, 0, 0, 0, 0, 0x50, 0x18, 0x20, 0x00, 0, 0, 0, 0,
+            b'a', b'b', b'c',
+        ];
+        data.extend_from_slice(b"padding");
+
+        let packet = PcapReader::parse_ipv4_packet(&data, timestamp(), data.len())
+            .expect("packet should parse");
+
+        assert!(packet.is_tcp());
+        assert_eq!(packet.payload.as_ref(), b"abc");
+    }
+
+    #[test]
+    fn ipv6_udp_payload_ignores_padding_after_payload_length() {
+        let mut data = vec![0x60, 0, 0, 0, 0x00, 0x0c, 17, 64];
+        data.extend_from_slice(&[0u8; 16]);
+        data.extend_from_slice(&[0u8; 15]);
+        data.push(1);
+        data.extend_from_slice(&[
+            0x30, 0x39, 0x00, 0x35, 0x00, 0x0c, 0, 0, b't', b'e', b's', b't',
+        ]);
+        data.extend_from_slice(b"padding");
+
+        let packet = PcapReader::parse_ipv6_packet(&data, timestamp(), data.len())
+            .expect("packet should parse");
+
+        assert!(packet.is_udp());
+        assert_eq!(packet.payload.as_ref(), b"test");
     }
 }

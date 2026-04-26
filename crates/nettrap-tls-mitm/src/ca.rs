@@ -1,7 +1,9 @@
 use chrono::Datelike;
 use nettrap_core::error::{Error, Result};
 use parking_lot::RwLock;
-use rcgen::{CertificateParams, KeyPair, PKCS_ECDSA_P256_SHA256};
+use rcgen::{
+    CertificateParams, ExtendedKeyUsagePurpose, KeyPair, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256,
+};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
@@ -114,42 +116,24 @@ impl CertificateAuthority {
     }
 
     /// Load CA from PEM files.
-    /// Since rcgen does not support parsing existing CA certs, this re-generates
-    /// the CA with the same key pair. The original cert PEM is preserved for
-    /// chain building.
     pub fn from_pem_files(cert_path: &Path, key_path: &Path) -> Result<Self> {
-        let _cert_pem = std::fs::read_to_string(cert_path)?;
+        let cert_pem = std::fs::read_to_string(cert_path)?;
         let key_pem = std::fs::read_to_string(key_path)?;
 
         let key_pair = KeyPair::from_pem(&key_pem)
             .map_err(|e| Error::Tls(format!("Failed to load CA key: {}", e)))?;
 
-        // Re-create CA params (we cannot parse the original cert with rcgen 0.13,
-        // so we rebuild with the same key)
-        let mut params = CertificateParams::new(Vec::<String>::new())
-            .map_err(|e| Error::Tls(format!("Failed to create CA params: {}", e)))?;
-        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-        params
-            .distinguished_name
-            .push(rcgen::DnType::CommonName, "NetTrap CA");
-        params
-            .distinguished_name
-            .push(rcgen::DnType::OrganizationName, "NetTrap");
-        params.not_before = rcgen::date_time_ymd(2024, 1, 1);
-        params.not_after = rcgen::date_time_ymd(2034, 12, 31);
+        let params = CertificateParams::from_ca_cert_pem(&cert_pem)
+            .map_err(|e| Error::Tls(format!("Failed to parse CA certificate: {}", e)))?;
 
         let ca_cert = params
             .self_signed(&key_pair)
-            .map_err(|e| Error::Tls(format!("Failed to recreate CA: {}", e)))?;
-
-        // Use the re-generated cert PEM (not the original file) so that
-        // the issuer DN in signed leaf certs matches the CA cert in the chain.
-        let ca_cert_pem_regenerated = ca_cert.pem();
+            .map_err(|e| Error::Tls(format!("Failed to load CA certificate: {}", e)))?;
 
         Ok(Self {
             ca_cert,
             ca_key: key_pair,
-            ca_cert_pem: ca_cert_pem_regenerated,
+            ca_cert_pem: cert_pem,
             ca_key_pem: key_pem,
             cert_dir: None,
             cache: RwLock::new(CertCache::new()),
@@ -194,6 +178,11 @@ impl CertificateAuthority {
         params
             .distinguished_name
             .push(rcgen::DnType::CommonName, hostname);
+        params.use_authority_key_identifier_extension = true;
+        params.key_usages.push(KeyUsagePurpose::DigitalSignature);
+        params
+            .extended_key_usages
+            .push(ExtendedKeyUsagePurpose::ServerAuth);
         let now = chrono::Utc::now();
         let not_before = now - chrono::Duration::days(1);
         let not_after = now + chrono::Duration::days(730);
@@ -260,5 +249,86 @@ impl CertificateAuthority {
         let mut cache = self.cache.write();
         cache.certs.clear();
         cache.order.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rcgen::{BasicConstraints, DnType, IsCa};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use x509_parser::pem::parse_x509_pem;
+    use x509_parser::prelude::*;
+
+    static TEST_DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn common_name(pem: &str, issuer: bool) -> String {
+        let (_, pem) = parse_x509_pem(pem.as_bytes()).expect("certificate PEM should parse");
+        let (_, cert) =
+            parse_x509_certificate(&pem.contents).expect("certificate DER should parse");
+        let name = if issuer {
+            cert.issuer()
+        } else {
+            cert.subject()
+        };
+        name.iter_common_name()
+            .next()
+            .expect("certificate should have a common name")
+            .as_str()
+            .expect("common name should be UTF-8")
+            .to_string()
+    }
+
+    fn write_test_ca(common_name: &str) -> (PathBuf, PathBuf, String) {
+        let mut params =
+            CertificateParams::new(Vec::<String>::new()).expect("CA params should build");
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params
+            .distinguished_name
+            .push(DnType::CommonName, common_name);
+        params.key_usages.push(KeyUsagePurpose::KeyCertSign);
+        params.key_usages.push(KeyUsagePurpose::CrlSign);
+
+        let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("CA key should build");
+        let cert = params.self_signed(&key).expect("CA cert should build");
+        let cert_pem = cert.pem();
+        let key_pem = key.serialize_pem();
+
+        let unique = TEST_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("nettrap-ca-test-{}-{}", std::process::id(), unique));
+        std::fs::create_dir_all(&dir).expect("temp dir should be created");
+        let cert_path = dir.join("ca.crt");
+        let key_path = dir.join("ca.key");
+        std::fs::write(&cert_path, &cert_pem).expect("CA cert should be written");
+        std::fs::write(&key_path, key_pem).expect("CA key should be written");
+
+        (cert_path, key_path, cert_pem)
+    }
+
+    #[test]
+    fn from_pem_files_preserves_loaded_ca_pem() {
+        let (cert_path, key_path, original_pem) = write_test_ca("Trusted Test CA");
+        let ca = CertificateAuthority::from_pem_files(&cert_path, &key_path)
+            .expect("loaded CA should parse");
+
+        assert_eq!(ca.ca_cert_pem(), original_pem);
+
+        let _ = std::fs::remove_dir_all(cert_path.parent().expect("temp path should have parent"));
+    }
+
+    #[test]
+    fn generated_leaf_uses_loaded_ca_identity_as_issuer() {
+        let (cert_path, key_path, _original_pem) = write_test_ca("Trusted Test CA");
+        let ca = CertificateAuthority::from_pem_files(&cert_path, &key_path)
+            .expect("loaded CA should parse");
+        let (leaf_pem, _) = ca
+            .generate_cert_for_host("example.test")
+            .expect("leaf cert should be generated");
+
+        assert_eq!(common_name(&leaf_pem, true), "Trusted Test CA");
+        assert_eq!(common_name(&leaf_pem, false), "example.test");
+
+        let _ = std::fs::remove_dir_all(cert_path.parent().expect("temp path should have parent"));
     }
 }

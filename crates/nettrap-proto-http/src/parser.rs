@@ -33,14 +33,7 @@ pub(crate) fn parse_http_request_bytes(data: &[u8]) -> Result<Option<ParsedHttpR
     let request_line = lines
         .next()
         .ok_or_else(|| Error::Parse("No request line".into()))?;
-    let parts: Vec<&str> = request_line.split_whitespace().collect();
-    if parts.len() < 3 {
-        return Err(Error::Parse("Invalid request line".into()));
-    }
-
-    let method = parts[0].to_string();
-    let path = parts[1].to_string();
-    let version = parts[2].to_string();
+    let (method, path, version) = parse_request_line(request_line)?;
 
     let mut headers = Vec::new();
     for line in lines {
@@ -99,12 +92,65 @@ pub(crate) fn parse_http_request_bytes(data: &[u8]) -> Result<Option<ParsedHttpR
     };
 
     Ok(Some(ParsedHttpRequest {
-        method,
-        path,
-        version,
+        method: method.to_string(),
+        path: path.to_string(),
+        version: version.to_string(),
         headers,
         body,
     }))
+}
+
+fn parse_request_line(line: &str) -> Result<(&str, &str, &str)> {
+    let mut parts = line.split(' ');
+    let method = parts
+        .next()
+        .ok_or_else(|| Error::Parse("Invalid request line".into()))?;
+    let target = parts
+        .next()
+        .ok_or_else(|| Error::Parse("Invalid request line".into()))?;
+    let version = parts
+        .next()
+        .ok_or_else(|| Error::Parse("Invalid request line".into()))?;
+    if parts.next().is_some()
+        || !is_http_token(method)
+        || !is_valid_http_target(target)
+        || !matches!(version, "HTTP/1.0" | "HTTP/1.1")
+    {
+        return Err(Error::Parse("Invalid request line".into()));
+    }
+
+    Ok((method, target, version))
+}
+
+fn is_http_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
+}
+
+fn is_valid_http_target(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| !byte.is_ascii_control() && !byte.is_ascii_whitespace())
 }
 
 fn find_header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {

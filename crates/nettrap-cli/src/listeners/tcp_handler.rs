@@ -163,6 +163,76 @@ where
     }
 }
 
+fn tls_record_total_len(header: &[u8]) -> Option<usize> {
+    if header.len() < 5 || header[0] != 0x16 || header[1] != 0x03 || header[2] > 0x04 {
+        return None;
+    }
+
+    let record_len = u16::from_be_bytes([header[3], header[4]]) as usize;
+    let total_len = 5usize.checked_add(record_len)?;
+    if total_len > MAX_TLS_RECORD_SIZE {
+        return None;
+    }
+
+    Some(total_len)
+}
+
+async fn peek_until_len(
+    stream: &tokio::net::TcpStream,
+    buf: &mut [u8],
+    min_len: usize,
+    timeout: Duration,
+) -> std::io::Result<usize> {
+    match tokio::time::timeout(timeout, async {
+        loop {
+            let len = stream.peek(buf).await?;
+            if len == 0 || len >= min_len {
+                return Ok(len);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "TLS ClientHello peek timed out",
+        )),
+    }
+}
+
+async fn peek_complete_tls_record(
+    stream: &tokio::net::TcpStream,
+    timeout: Duration,
+) -> std::io::Result<Option<Vec<u8>>> {
+    let mut prefix = [0u8; 3];
+    let prefix_min_len = prefix.len();
+    let prefix_len = peek_until_len(stream, &mut prefix, prefix_min_len, timeout).await?;
+    if prefix_len < prefix_min_len || prefix[0] != 0x16 || prefix[1] != 0x03 || prefix[2] > 0x04 {
+        return Ok(None);
+    }
+
+    let mut header = [0u8; 5];
+    let header_min_len = header.len();
+    let header_len = peek_until_len(stream, &mut header, header_min_len, timeout).await?;
+    if header_len < header_min_len {
+        return Ok(None);
+    }
+
+    let Some(total_len) = tls_record_total_len(&header) else {
+        return Ok(None);
+    };
+
+    let mut record = vec![0u8; total_len];
+    let peeked_len = peek_until_len(stream, &mut record, total_len, timeout).await?;
+    if peeked_len < total_len {
+        return Ok(None);
+    }
+
+    Ok(Some(record))
+}
+
 fn next_tcp_frame_for_mode(buffer: &mut Vec<u8>, mode: TcpFrameMode) -> TcpFrameResult {
     match mode {
         TcpFrameMode::DnsTcp => optional_frame(extract_length_prefixed_frame(buffer)),
@@ -283,10 +353,10 @@ async fn handle_tcp_one_shot_connection(
     .await;
 
     if !response.is_empty() {
-        ctx.write_pcap_response_for_destination(&response, peer, destination);
         ctx.apply_response_delay().await;
         stream.write_all(&response).await?;
         stream.flush().await?;
+        ctx.write_pcap_response_for_destination(&response, peer, destination);
     }
     ctx.update_session_bytes(peer, "TCP", destination, 0, response.len() as u64);
     Ok(true)
@@ -1441,16 +1511,10 @@ pub async fn handle_tcp_connection(
     if ctx.use_ssl() {
         if let Some(ref ca) = ctx.runtime.ca {
             let wrapper = nettrap_tls_mitm::TlsWrapper::new(Arc::clone(ca));
-            let mut peek_buf = vec![0u8; 512];
-            match stream.peek(&mut peek_buf).await {
-                Ok(n)
-                    if n >= 3
-                        && peek_buf[0] == 0x16
-                        && peek_buf[1] == 0x03
-                        && peek_buf[2] <= 0x04 =>
-                {
+            match peek_complete_tls_record(&stream, Duration::from_millis(ctx.timeout_ms())).await {
+                Ok(Some(peek_buf)) => {
                     if let Some((ja3_str, ja3_hash)) =
-                        nettrap_proto_tls::ja3::ja3_from_handshake(&peek_buf[..n])
+                        nettrap_proto_tls::ja3::ja3_from_handshake(&peek_buf)
                     {
                         tracing::info!("JA3: {} ({})", ja3_hash, ja3_str);
                         let mut nbi = crate::nbi::tls_nbi(
@@ -1462,15 +1526,13 @@ pub async fn handle_tcp_connection(
                         );
                         nbi.add("ja3", ja3_str);
                         nbi.add("ja3_hash", ja3_hash);
-                        if let Some(ja4) =
-                            nettrap_proto_tls::ja3::ja4_from_handshake(&peek_buf[..n])
-                        {
+                        if let Some(ja4) = nettrap_proto_tls::ja3::ja4_from_handshake(&peek_buf) {
                             tracing::info!("JA4: {}", ja4);
                             nbi.add("ja4", ja4);
                         }
                         ctx.runtime.nbi_collector.record(&nbi).await;
                     }
-                    match wrapper.maybe_wrap(stream, &peek_buf[..n]).await {
+                    match wrapper.maybe_wrap(stream, &peek_buf).await {
                         Ok((wrapped, sni)) => {
                             if let Some(ref sni_name) = sni {
                                 tracing::debug!("TLS SNI: {} from {}", sni_name, peer);
@@ -1506,7 +1568,11 @@ pub async fn handle_tcp_connection(
                         }
                     }
                 }
-                _ => {}
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::debug!("TLS peek failed for {}: {}", peer, e);
+                    return Ok(());
+                }
             }
         }
     }
@@ -1569,14 +1635,14 @@ pub async fn handle_tcp_connection(
                                     } => {
                                         let start_response = transfer.start_response.to_bytes();
                                         if !start_response.is_empty() {
+                                            ctx.apply_response_delay().await;
+                                            stream.write_all(&start_response).await?;
+                                            stream.flush().await?;
                                             ctx.write_pcap_response_for_destination(
                                                 &start_response,
                                                 &peer,
                                                 &destination,
                                             );
-                                            ctx.apply_response_delay().await;
-                                            stream.write_all(&start_response).await?;
-                                            stream.flush().await?;
                                             immediate_sent_bytes += start_response.len() as u64;
                                         }
                                         let frame_response =
@@ -1647,7 +1713,6 @@ pub async fn handle_tcp_connection(
 
                 let mut sent_bytes = immediate_sent_bytes;
                 if !response.is_empty() {
-                    ctx.write_pcap_response_for_destination(&response, &peer, &destination);
                     ctx.apply_response_delay().await;
                     let send_result = async {
                         stream.write_all(&response).await?;
@@ -1655,6 +1720,7 @@ pub async fn handle_tcp_connection(
                     }
                     .await;
                     if send_result.is_ok() {
+                        ctx.write_pcap_response_for_destination(&response, &peer, &destination);
                         sent_bytes += response.len() as u64;
                     }
                     ctx.update_session_bytes(&peer, "TCP", &destination, len as u64, sent_bytes);
@@ -3072,14 +3138,14 @@ pub async fn handle_wrapped_connection(
                                     } => {
                                         let start_response = transfer.start_response.to_bytes();
                                         if !start_response.is_empty() {
+                                            ctx.apply_response_delay().await;
+                                            stream.write_all(&start_response).await?;
+                                            stream.flush().await?;
                                             ctx.write_pcap_response_for_destination(
                                                 &start_response,
                                                 &peer,
                                                 &destination,
                                             );
-                                            ctx.apply_response_delay().await;
-                                            stream.write_all(&start_response).await?;
-                                            stream.flush().await?;
                                             immediate_sent_bytes += start_response.len() as u64;
                                         }
                                         let frame_response =
@@ -3150,7 +3216,6 @@ pub async fn handle_wrapped_connection(
 
                 let mut sent_bytes = immediate_sent_bytes;
                 if !response.is_empty() {
-                    ctx.write_pcap_response_for_destination(&response, &peer, &destination);
                     ctx.apply_response_delay().await;
                     let send_result = async {
                         stream.write_all(&response).await?;
@@ -3158,6 +3223,7 @@ pub async fn handle_wrapped_connection(
                     }
                     .await;
                     if send_result.is_ok() {
+                        ctx.write_pcap_response_for_destination(&response, &peer, &destination);
                         sent_bytes += response.len() as u64;
                     }
                     ctx.update_session_bytes(&peer, "TCP", &destination, len as u64, sent_bytes);
@@ -4014,6 +4080,52 @@ mod tests {
             TcpFrameResult::TooLarge { response: Some(_) }
         ));
         assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn tls_record_total_len_accepts_records_larger_than_512_bytes() {
+        let record_len = 600u16;
+        let header = [0x16, 0x03, 0x03, (record_len >> 8) as u8, record_len as u8];
+
+        assert_eq!(tls_record_total_len(&header), Some(605));
+    }
+
+    #[tokio::test]
+    async fn tls_peek_reads_complete_record_larger_than_512_bytes() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("listener should bind");
+        let addr = listener
+            .local_addr()
+            .expect("listener address should exist");
+        let mut record = vec![0x16, 0x03, 0x03];
+        record.extend_from_slice(&600u16.to_be_bytes());
+        record.push(0x01);
+        record.resize(605, 0);
+        let expected = record.clone();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("server should accept");
+            let peeked = peek_complete_tls_record(&stream, Duration::from_secs(1))
+                .await
+                .expect("peek should succeed")
+                .expect("TLS record should be detected");
+
+            assert_eq!(peeked, expected);
+
+            let mut prefix = [0u8; 5];
+            assert_eq!(stream.peek(&mut prefix).await.expect("peek should work"), 5);
+            assert_eq!(prefix, [0x16, 0x03, 0x03, 0x02, 0x58]);
+        });
+
+        let mut client = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("client should connect");
+        client
+            .write_all(&record)
+            .await
+            .expect("client should write TLS record");
+        server.await.expect("server task should finish");
     }
 
     #[test]

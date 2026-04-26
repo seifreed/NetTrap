@@ -29,7 +29,6 @@ pub mod windivert {
     use std::sync::Arc;
 
     pub struct WinDivertInterceptor {
-        config: InterceptorConfig,
         running: Arc<RwLock<bool>>,
         stats: Arc<RwLock<InterceptStats>>,
         handle: Arc<RwLock<Option<usize>>>,
@@ -42,7 +41,6 @@ pub mod windivert {
             validate_mode(&config)?;
             Ok(Self {
                 filter: build_filter(&config),
-                config,
                 running: Arc::new(RwLock::new(false)),
                 stats: Arc::new(RwLock::new(InterceptStats::default())),
                 handle: Arc::new(RwLock::new(None)),
@@ -76,20 +74,27 @@ pub mod windivert {
             direction: PacketDirection,
         ) -> Result<Option<Packet>> {
             const IP_MIN_HEADER: usize = std::mem::size_of::<WindivertIpHdr>();
+            let captured_len = len.min(data.len());
 
-            if len < IP_MIN_HEADER {
+            if captured_len < IP_MIN_HEADER {
                 return Ok(None);
             }
 
-            let ip_header = unsafe { &*(data.as_ptr() as *const WindivertIpHdr) };
+            let ip_header =
+                unsafe { std::ptr::read_unaligned(data.as_ptr() as *const WindivertIpHdr) };
             let ihl = ((ip_header.ver_hdrlen & 0x0F) as usize) * 4;
             // Validate IHL: RFC 791 specifies minimum 5 (20 bytes), maximum 15 (60 bytes)
             if ihl < 20 || ihl > 60 {
                 return Ok(None);
             }
-            if len < ihl {
+            if captured_len < ihl {
                 return Ok(None);
             }
+            let total_len = u16::from_be(ip_header.len) as usize;
+            if total_len < ihl || total_len > captured_len {
+                return Ok(None);
+            }
+            let packet_data = &data[..total_len];
 
             let src_ip =
                 std::net::IpAddr::V4(std::net::Ipv4Addr::from(u32::from_be(ip_header.src_addr)));
@@ -98,12 +103,15 @@ pub mod windivert {
 
             match ip_header.protocol {
                 IPPROTO_TCP => {
-                    if len < ihl + std::mem::size_of::<WindivertTcpHdr>() {
+                    if total_len < ihl + std::mem::size_of::<WindivertTcpHdr>() {
                         return Ok(None);
                     }
 
-                    let tcp_header =
-                        unsafe { &*(data.as_ptr().add(ihl) as *const WindivertTcpHdr) };
+                    let tcp_header = unsafe {
+                        std::ptr::read_unaligned(
+                            packet_data.as_ptr().add(ihl) as *const WindivertTcpHdr
+                        )
+                    };
                     let src_port = u16::from_be(tcp_header.src_port);
                     let dst_port = u16::from_be(tcp_header.dst_port);
                     let tcp_header_len = ((tcp_header.flags0 >> 4) as usize) * 4;
@@ -112,7 +120,7 @@ pub mod windivert {
                         return Ok(None);
                     }
                     let payload_start = ihl + tcp_header_len;
-                    if len < payload_start {
+                    if total_len < payload_start {
                         return Ok(None);
                     }
 
@@ -122,35 +130,43 @@ pub mod windivert {
                         Packet::new(
                             FiveTuple::new(src_ip, dst_ip, src_port, dst_port, Protocol::Tcp),
                             direction,
-                            bytes::Bytes::copy_from_slice(&data[payload_start..len]),
+                            bytes::Bytes::copy_from_slice(&packet_data[payload_start..total_len]),
                         )
                         .with_tcp_flags(tcp_flags),
                     ))
                 }
                 IPPROTO_UDP => {
-                    if len < ihl + std::mem::size_of::<WindivertUdpHdr>() {
+                    if total_len < ihl + std::mem::size_of::<WindivertUdpHdr>() {
                         return Ok(None);
                     }
 
-                    let udp_header =
-                        unsafe { &*(data.as_ptr().add(ihl) as *const WindivertUdpHdr) };
+                    let udp_header = unsafe {
+                        std::ptr::read_unaligned(
+                            packet_data.as_ptr().add(ihl) as *const WindivertUdpHdr
+                        )
+                    };
                     let src_port = u16::from_be(udp_header.src_port);
                     let dst_port = u16::from_be(udp_header.dst_port);
+                    let udp_len = u16::from_be(udp_header.len) as usize;
+                    if udp_len < std::mem::size_of::<WindivertUdpHdr>() {
+                        return Ok(None);
+                    }
                     let payload_start = ihl + std::mem::size_of::<WindivertUdpHdr>();
-                    if len < payload_start {
+                    let payload_end = ihl + udp_len;
+                    if payload_end > total_len || payload_start > payload_end {
                         return Ok(None);
                     }
 
                     Ok(Some(Packet::new(
                         FiveTuple::new(src_ip, dst_ip, src_port, dst_port, Protocol::Udp),
                         direction,
-                        bytes::Bytes::copy_from_slice(&data[payload_start..len]),
+                        bytes::Bytes::copy_from_slice(&packet_data[payload_start..payload_end]),
                     )))
                 }
                 other => Ok(Some(Packet::new(
                     FiveTuple::new(src_ip, dst_ip, 0, 0, Protocol::Unknown(other)),
                     direction,
-                    bytes::Bytes::copy_from_slice(&data[ihl..len]),
+                    bytes::Bytes::copy_from_slice(&packet_data[ihl..total_len]),
                 ))),
             }
         }
@@ -161,23 +177,34 @@ pub mod windivert {
             direction: PacketDirection,
         ) -> Result<Option<Packet>> {
             const IPV6_HEADER_LEN: usize = 40;
+            let captured_len = len.min(data.len());
 
-            if len < IPV6_HEADER_LEN {
+            if captured_len < IPV6_HEADER_LEN {
                 return Ok(None);
             }
 
-            let ip_header = unsafe { &*(data.as_ptr() as *const WindivertIpv6Hdr) };
+            let ip_header =
+                unsafe { std::ptr::read_unaligned(data.as_ptr() as *const WindivertIpv6Hdr) };
+            let payload_len = u16::from_be(ip_header.plen) as usize;
+            let total_len = IPV6_HEADER_LEN + payload_len;
+            if total_len > captured_len {
+                return Ok(None);
+            }
+            let packet_data = &data[..total_len];
             let src_ip = std::net::IpAddr::V6(std::net::Ipv6Addr::from(ip_header.src_addr));
             let dst_ip = std::net::IpAddr::V6(std::net::Ipv6Addr::from(ip_header.dst_addr));
 
             match ip_header.nxt {
                 IPPROTO_TCP => {
-                    if len < IPV6_HEADER_LEN + std::mem::size_of::<WindivertTcpHdr>() {
+                    if total_len < IPV6_HEADER_LEN + std::mem::size_of::<WindivertTcpHdr>() {
                         return Ok(None);
                     }
 
-                    let tcp_header =
-                        unsafe { &*(data.as_ptr().add(IPV6_HEADER_LEN) as *const WindivertTcpHdr) };
+                    let tcp_header = unsafe {
+                        std::ptr::read_unaligned(
+                            packet_data.as_ptr().add(IPV6_HEADER_LEN) as *const WindivertTcpHdr
+                        )
+                    };
                     let src_port = u16::from_be(tcp_header.src_port);
                     let dst_port = u16::from_be(tcp_header.dst_port);
                     let tcp_header_len = ((tcp_header.flags0 >> 4) as usize) * 4;
@@ -186,7 +213,7 @@ pub mod windivert {
                         return Ok(None);
                     }
                     let payload_start = IPV6_HEADER_LEN + tcp_header_len;
-                    if len < payload_start {
+                    if total_len < payload_start {
                         return Ok(None);
                     }
 
@@ -196,35 +223,43 @@ pub mod windivert {
                         Packet::new(
                             FiveTuple::new(src_ip, dst_ip, src_port, dst_port, Protocol::Tcp),
                             direction,
-                            bytes::Bytes::copy_from_slice(&data[payload_start..len]),
+                            bytes::Bytes::copy_from_slice(&packet_data[payload_start..total_len]),
                         )
                         .with_tcp_flags(tcp_flags),
                     ))
                 }
                 IPPROTO_UDP => {
-                    if len < IPV6_HEADER_LEN + std::mem::size_of::<WindivertUdpHdr>() {
+                    if total_len < IPV6_HEADER_LEN + std::mem::size_of::<WindivertUdpHdr>() {
                         return Ok(None);
                     }
 
-                    let udp_header =
-                        unsafe { &*(data.as_ptr().add(IPV6_HEADER_LEN) as *const WindivertUdpHdr) };
+                    let udp_header = unsafe {
+                        std::ptr::read_unaligned(
+                            packet_data.as_ptr().add(IPV6_HEADER_LEN) as *const WindivertUdpHdr
+                        )
+                    };
                     let src_port = u16::from_be(udp_header.src_port);
                     let dst_port = u16::from_be(udp_header.dst_port);
+                    let udp_len = u16::from_be(udp_header.len) as usize;
+                    if udp_len < std::mem::size_of::<WindivertUdpHdr>() {
+                        return Ok(None);
+                    }
                     let payload_start = IPV6_HEADER_LEN + std::mem::size_of::<WindivertUdpHdr>();
-                    if len < payload_start {
+                    let payload_end = IPV6_HEADER_LEN + udp_len;
+                    if payload_end > total_len || payload_start > payload_end {
                         return Ok(None);
                     }
 
                     Ok(Some(Packet::new(
                         FiveTuple::new(src_ip, dst_ip, src_port, dst_port, Protocol::Udp),
                         direction,
-                        bytes::Bytes::copy_from_slice(&data[payload_start..len]),
+                        bytes::Bytes::copy_from_slice(&packet_data[payload_start..payload_end]),
                     )))
                 }
                 other => Ok(Some(Packet::new(
                     FiveTuple::new(src_ip, dst_ip, 0, 0, Protocol::Unknown(other)),
                     direction,
-                    bytes::Bytes::copy_from_slice(&data[IPV6_HEADER_LEN..len]),
+                    bytes::Bytes::copy_from_slice(&packet_data[IPV6_HEADER_LEN..total_len]),
                 ))),
             }
         }
@@ -377,7 +412,7 @@ pub mod windivert {
     }
 
     fn build_filter(config: &InterceptorConfig) -> String {
-        let mut clauses = vec!["ip".to_string()];
+        let mut clauses = vec!["(ip or ipv6)".to_string()];
 
         if let Some(iface) = &config.interface {
             let trimmed = iface.trim();
@@ -399,10 +434,8 @@ pub mod windivert {
                 0x45, 0x00, 0x00, 0x28, 0, 0, 0, 0, 64, 6, 0, 0, 192, 168, 1, 10, 93, 184, 216, 34,
                 0x1f, 0x90, 0x00, 0x50, 0, 0, 0, 0, 0, 0, 0, 0, 0x50, 0x02, 0x20, 0x00, 0, 0, 0, 0,
             ];
-            let addr = WindivertAddress {
-                direction: WINDIVERT_DIRECTION_OUT,
-                ..Default::default()
-            };
+            let mut addr = WindivertAddress::default();
+            addr.set_direction(WINDIVERT_DIRECTION_OUT);
 
             let packet = WinDivertInterceptor::parse_packet(&data, data.len(), &addr)
                 .unwrap()
@@ -420,10 +453,8 @@ pub mod windivert {
                 0x45, 0x00, 0x00, 0x20, 0, 0, 0, 0, 64, 17, 0, 0, 127, 0, 0, 1, 8, 8, 8, 8, 0x30,
                 0x39, 0x00, 0x35, 0x00, 0x0c, 0, 0, b't', b'e', b's', b't',
             ];
-            let addr = WindivertAddress {
-                direction: WINDIVERT_DIRECTION_IN,
-                ..Default::default()
-            };
+            let mut addr = WindivertAddress::default();
+            addr.set_direction(WINDIVERT_DIRECTION_IN);
 
             let packet = WinDivertInterceptor::parse_packet(&data, data.len(), &addr)
                 .unwrap()
@@ -437,6 +468,54 @@ pub mod windivert {
         }
 
         #[test]
+        fn ipv4_udp_payload_ignores_padding_after_declared_lengths() {
+            let mut data = vec![
+                0x45, 0x00, 0x00, 0x20, 0, 0, 0, 0, 64, 17, 0, 0, 127, 0, 0, 1, 8, 8, 8, 8, 0x30,
+                0x39, 0x00, 0x35, 0x00, 0x0c, 0, 0, b't', b'e', b's', b't',
+            ];
+            data.extend_from_slice(b"padding");
+            let addr = WindivertAddress::default();
+
+            let packet = WinDivertInterceptor::parse_packet(&data, data.len(), &addr)
+                .unwrap()
+                .unwrap();
+
+            assert_eq!(packet.payload.as_ref(), b"test");
+        }
+
+        #[test]
+        fn ipv4_udp_rejects_length_beyond_ip_payload() {
+            let data: [u8; 32] = [
+                0x45, 0x00, 0x00, 0x20, 0, 0, 0, 0, 64, 17, 0, 0, 127, 0, 0, 1, 8, 8, 8, 8, 0x30,
+                0x39, 0x00, 0x35, 0x00, 0x10, 0, 0, b't', b'e', b's', b't',
+            ];
+            let addr = WindivertAddress::default();
+
+            let packet = WinDivertInterceptor::parse_packet(&data, data.len(), &addr).unwrap();
+
+            assert!(packet.is_none());
+        }
+
+        #[test]
+        fn ipv6_udp_payload_ignores_padding_after_declared_lengths() {
+            let mut data = vec![0x60, 0, 0, 0, 0x00, 0x0c, IPPROTO_UDP, 64];
+            data.extend_from_slice(&[0u8; 16]);
+            data.extend_from_slice(&[0u8; 15]);
+            data.push(1);
+            data.extend_from_slice(&[
+                0x30, 0x39, 0x00, 0x35, 0x00, 0x0c, 0, 0, b't', b'e', b's', b't',
+            ]);
+            data.extend_from_slice(b"padding");
+            let addr = WindivertAddress::default();
+
+            let packet = WinDivertInterceptor::parse_packet(&data, data.len(), &addr)
+                .unwrap()
+                .unwrap();
+
+            assert_eq!(packet.payload.as_ref(), b"test");
+        }
+
+        #[test]
         fn build_filter_uses_interface_constraint_without_dummy_clause() {
             let config = InterceptorConfig {
                 mode: nettrap_core::config::InterceptionMode::WinDivert,
@@ -444,17 +523,17 @@ pub mod windivert {
                 ..Default::default()
             };
 
-            assert_eq!(build_filter(&config), "ip and ifIdx == 7");
+            assert_eq!(build_filter(&config), "(ip or ipv6) and ifIdx == 7");
         }
 
         #[test]
-        fn build_filter_defaults_to_ip_clause_for_windivert_mode() {
+        fn build_filter_defaults_to_ipv4_and_ipv6_clause_for_windivert_mode() {
             let config = InterceptorConfig {
                 mode: nettrap_core::config::InterceptionMode::WinDivert,
                 ..Default::default()
             };
 
-            assert_eq!(build_filter(&config), "ip");
+            assert_eq!(build_filter(&config), "(ip or ipv6)");
         }
 
         #[test]

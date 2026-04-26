@@ -119,7 +119,7 @@ hyper = { version = "1.6", features = ["full"] }
 hyper-util = "0.1"
 tokio-rustls = { version = "0.26", features = ["ring"] }
 rustls-pki-types = "1.14"
-rcgen = "0.13"
+rcgen = { version = "0.13", features = ["x509-parser"] }
 memchr = "2.7"
 nom = "8.0"
 pcap = "2.4"

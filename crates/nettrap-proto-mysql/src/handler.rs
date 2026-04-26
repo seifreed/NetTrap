@@ -74,18 +74,11 @@ impl MysqlHandler {
         // HandshakeResponse320 (older):
         //   capability_flags(2) + max_packet_size(3) = 5 bytes
         //   Then: username (null-terminated)
-        // Minimum packet size to parse: 5 bytes (flags + max_packet for protocol 320)
-        const MIN_PACKET_SIZE: usize = 5;
-
-        if data.len() < MIN_PACKET_SIZE {
-            return Self::build_ok_packet(seq + 1);
+        if data.len() < 4 {
+            return Vec::new();
         }
 
-        let cap_flags = if data.len() >= 4 {
-            u32::from_le_bytes([data[0], data[1], data[2], data[3]])
-        } else {
-            u16::from_le_bytes([data[0], data[1]]) as u32
-        };
+        let cap_flags = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
 
         if cap_flags & CLIENT_SSL != 0 {
             tracing::warn!("MySQL client requested SSL, but MySQL-over-TLS is not implemented");
@@ -100,22 +93,20 @@ impl MysqlHandler {
             if data.len() > 32 {
                 32
             } else {
-                // Packet too short for proper 4.1 handshake, but try to extract what we can
-                return Self::build_ok_packet(seq + 1);
+                return Self::build_error_packet(seq + 1, 1043, "Malformed handshake response");
             }
         } else {
             // Protocol 3.20: 2-byte flags + 3-byte max_packet
             if data.len() > 5 {
                 5
             } else {
-                // Packet too short even for 3.20
-                return Self::build_ok_packet(seq + 1);
+                return Self::build_error_packet(seq + 1, 1043, "Malformed handshake response");
             }
         };
 
         // Additional safety check (should never fail due to above logic)
         if username_start >= data.len() {
-            return Self::build_ok_packet(seq + 1);
+            return Self::build_error_packet(seq + 1, 1043, "Malformed handshake response");
         }
 
         // Extract username (null-terminated string)
@@ -263,5 +254,47 @@ mod tests {
         assert_eq!(response[3], 2);
         assert_eq!(response[4], 0xff);
         assert!(String::from_utf8_lossy(&response).contains("SSL is not supported"));
+    }
+
+    #[test]
+    fn short_malformed_login_is_not_accepted_as_ok() {
+        let handler = MysqlHandler::new();
+        let response = handler.handle(&wrap_client_packet(&[0x01, 0x00, 0x00], 1));
+
+        assert!(response.is_empty());
+    }
+
+    #[test]
+    fn four_byte_ssl_request_is_rejected_before_short_login_handling() {
+        let handler = MysqlHandler::new();
+        let response = handler.handle(&wrap_client_packet(&CLIENT_SSL.to_le_bytes(), 1));
+
+        assert_eq!(response[3], 2);
+        assert_eq!(response[4], 0xff);
+        assert!(String::from_utf8_lossy(&response).contains("SSL is not supported"));
+    }
+
+    #[test]
+    fn malformed_protocol_41_login_is_not_accepted_as_ok() {
+        let handler = MysqlHandler::new();
+        let response = handler.handle(&wrap_client_packet(&CLIENT_PROTOCOL_41.to_le_bytes(), 1));
+
+        assert_eq!(response[3], 2);
+        assert_eq!(response[4], 0xff);
+        assert!(String::from_utf8_lossy(&response).contains("Malformed handshake response"));
+    }
+
+    #[test]
+    fn valid_non_ssl_protocol_41_login_still_gets_ok() {
+        let handler = MysqlHandler::new();
+        let mut login = vec![0; 32];
+        let capabilities = CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION;
+        login[..4].copy_from_slice(&capabilities.to_le_bytes());
+        login.extend_from_slice(b"root\0");
+
+        let response = handler.handle(&wrap_client_packet(&login, 1));
+
+        assert_eq!(response[3], 2);
+        assert_eq!(response[4], 0x00);
     }
 }
