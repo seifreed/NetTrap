@@ -426,18 +426,33 @@ impl ProtocolTaste for SmbTaste {
 pub struct RdpTaste;
 impl ProtocolTaste for RdpTaste {
     fn taste(&self, data: &[u8], dst_port: u16) -> TasteScore {
-        if dst_port == 3389 {
-            return 90;
+        if looks_like_rdp_tpkt(data) {
+            return if dst_port == 3389 { 95 } else { 70 };
         }
-        // TPKT header: version 3
-        if data.len() >= 4 && data[0] == 0x03 && data[1] == 0x00 {
-            return 70;
+        if dst_port == 3389 {
+            return 40;
         }
         0
     }
     fn protocol_name(&self) -> &'static str {
         "rdp"
     }
+}
+
+fn looks_like_rdp_tpkt(data: &[u8]) -> bool {
+    if data.len() < 7 || data[0] != 0x03 || data[1] != 0x00 {
+        return false;
+    }
+    let tpkt_len = u16::from_be_bytes([data[2], data[3]]) as usize;
+    if tpkt_len < 7 || tpkt_len > data.len() {
+        return false;
+    }
+    let frame = &data[..tpkt_len];
+    let x224_len = frame[4] as usize;
+    if x224_len < 2 || 5 + x224_len > frame.len() {
+        return false;
+    }
+    matches!(frame[5] >> 4, 0x0E | 0x0F)
 }
 
 pub struct RedisTaste;
@@ -629,6 +644,9 @@ impl ProtocolTaste for MemcachedTaste {
                     | 0x15
                     | 0x16
                     | 0x17
+                    | 0x18
+                    | 0x19
+                    | 0x1a
                     | 0x1c
                     | 0x1d
             )
@@ -980,6 +998,36 @@ mod tests {
 
         assert_eq!(MemcachedTaste.taste(b"statsfoo\r\n", 0), 0);
         assert_eq!(MemcachedTaste.taste(b"stats\r\n", 0), 85);
+    }
+
+    #[test]
+    fn test_memcached_taste_recognizes_binary_quiet_opcodes() {
+        let taste = MemcachedTaste;
+        let mut request = [0u8; 24];
+        request[0] = 0x80;
+
+        for opcode in [0x18, 0x19, 0x1a] {
+            request[1] = opcode;
+            assert_eq!(taste.taste(&request, 0), 75);
+        }
+    }
+
+    #[test]
+    fn test_rdp_taste_requires_valid_tpkt_and_x224() {
+        let taste = RdpTaste;
+        let valid = [
+            0x03, 0x00, 0x00, 0x0b, 0x06, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        let truncated_x224 = [
+            0x03, 0x00, 0x00, 0x0b, 0x07, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        let garbage = b"not rdp";
+
+        assert_eq!(taste.taste(&valid, 3389), 95);
+        assert_eq!(taste.taste(&valid, 12345), 70);
+        assert_eq!(taste.taste(&truncated_x224, 3389), 40);
+        assert_eq!(taste.taste(garbage, 3389), 40);
+        assert_eq!(taste.taste(garbage, 12345), 0);
     }
 
     #[test]

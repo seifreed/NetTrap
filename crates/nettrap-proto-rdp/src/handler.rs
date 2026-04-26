@@ -18,12 +18,12 @@ impl RdpHandler {
             return Vec::new();
         }
         let tpkt_len = u16::from_be_bytes([data[2], data[3]]) as usize;
-        if tpkt_len < 7 || tpkt_len > data.len() {
+        if tpkt_len < 7 || tpkt_len != data.len() {
             return Vec::new();
         }
         let frame = &data[..tpkt_len];
         let x224_len = frame[4] as usize;
-        if x224_len < 2 || 4 + x224_len > frame.len() {
+        if x224_len < 2 || 5 + x224_len > frame.len() {
             return Vec::new();
         }
 
@@ -152,6 +152,26 @@ mod tests {
     fn rejects_invalid_x224_length() {
         let mut request = connection_request();
         request[4] = 0x20;
+
+        let response = RdpHandler::new().handle(&request);
+
+        assert!(response.is_empty());
+    }
+
+    #[test]
+    fn rejects_x224_length_off_by_one_truncation() {
+        let mut request = connection_request();
+        request[4] = 0x07;
+
+        let response = RdpHandler::new().handle(&request);
+
+        assert!(response.is_empty());
+    }
+
+    #[test]
+    fn rejects_trailing_bytes_after_declared_tpkt_length() {
+        let mut request = connection_request();
+        request.extend_from_slice(b"extra");
 
         let response = RdpHandler::new().handle(&request);
 

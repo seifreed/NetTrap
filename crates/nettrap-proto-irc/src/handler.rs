@@ -38,6 +38,8 @@ impl IrcHandler {
     }
 
     fn welcome_sequence(&self, nick: &str) -> IrcResponse {
+        let nick = safe_irc_token(nick, "*");
+        let nick = nick.as_str();
         let srv = &self.server_name;
         let mut resp = IrcResponse::new();
         resp.add(format!(
@@ -83,6 +85,9 @@ impl IrcHandlerTrait for IrcHandler {
     async fn handle(&self, command: &str, nick: &str) -> Result<IrcResponse> {
         let parts: Vec<&str> = command.splitn(2, ' ').collect();
         let cmd = parts[0].to_uppercase();
+        let safe_cmd = safe_irc_token(&cmd, "UNKNOWN");
+        let nick = safe_irc_token(nick, "*");
+        let nick = nick.as_str();
         let args = if parts.len() > 1 { parts[1].trim() } else { "" };
         let srv = &self.server_name;
 
@@ -102,6 +107,7 @@ impl IrcHandlerTrait for IrcHandler {
             }
             "PING" => {
                 let message = if let Some(token) = first_arg(args) {
+                    let token = safe_irc_token(token, "*");
                     format!(":{} PONG {} :{}\r\n", srv, srv, token)
                 } else {
                     format!(":{} 409 {} :No origin specified\r\n", srv, nick)
@@ -120,6 +126,7 @@ impl IrcHandlerTrait for IrcHandler {
                         srv, nick
                     )));
                 };
+                let channel = safe_irc_channel(channel);
                 let mut resp = IrcResponse::new();
                 resp.add(format!(":{}!user@host JOIN :{}\r\n", nick, channel));
                 resp.add(format!(
@@ -143,6 +150,7 @@ impl IrcHandlerTrait for IrcHandler {
                         srv, nick
                     )));
                 };
+                let channel = safe_irc_channel(channel);
                 Ok(IrcResponse::single(format!(
                     ":{}!user@host PART {}\r\n",
                     nick, channel
@@ -155,11 +163,10 @@ impl IrcHandlerTrait for IrcHandler {
             "NOTICE" => Ok(IrcResponse::new()),
             "MODE" => {
                 if args.starts_with('#') || args.starts_with('&') {
+                    let channel = safe_irc_channel(args.split(' ').next().unwrap_or(args));
                     Ok(IrcResponse::single(format!(
                         ":{} 324 {} {} +nt\r\n",
-                        srv,
-                        nick,
-                        args.split(' ').next().unwrap_or(args)
+                        srv, nick, channel
                     )))
                 } else {
                     Ok(IrcResponse::single(format!(":{} 221 {} +i\r\n", srv, nick)))
@@ -167,9 +174,9 @@ impl IrcHandlerTrait for IrcHandler {
             }
             "WHO" => {
                 let target = if args.is_empty() {
-                    "*"
+                    "*".to_string()
                 } else {
-                    args.split(' ').next().unwrap_or("*")
+                    safe_irc_token(args.split(' ').next().unwrap_or("*"), "*")
                 };
                 let mut resp = IrcResponse::new();
                 resp.add(format!(
@@ -189,6 +196,7 @@ impl IrcHandlerTrait for IrcHandler {
                         srv, nick
                     )));
                 };
+                let target = safe_irc_token(target, "*");
                 let mut resp = IrcResponse::new();
                 resp.add(format!(
                     ":{} 311 {} {} user host * :NetTrap User\r\n",
@@ -205,19 +213,23 @@ impl IrcHandlerTrait for IrcHandler {
                 Ok(resp)
             }
             "LIST" => {
+                let channel = safe_irc_channel(&self.channel);
                 let mut resp = IrcResponse::new();
                 resp.add(format!(":{} 321 {} Channel :Users  Name\r\n", srv, nick));
                 resp.add(format!(
                     ":{} 322 {} {} 2 :Welcome to NetTrap\r\n",
-                    srv, nick, self.channel
+                    srv, nick, channel
                 ));
                 resp.add(format!(":{} 323 {} :End of /LIST\r\n", srv, nick));
                 Ok(resp)
             }
-            "QUIT" => Ok(IrcResponse::single(format!(
-                ":{} ERROR :Closing Link: {} (Quit: {})\r\n",
-                srv, nick, args
-            ))),
+            "QUIT" => {
+                let reason = safe_irc_trailing(args, "Client quit");
+                Ok(IrcResponse::single(format!(
+                    ":{} ERROR :Closing Link: {} (Quit: {})\r\n",
+                    srv, nick, reason
+                )))
+            }
             "CAP" => {
                 // CAP negotiation - respond with empty capabilities
                 if is_cap_ls(args) {
@@ -228,7 +240,7 @@ impl IrcHandlerTrait for IrcHandler {
             }
             _ => Ok(IrcResponse::single(format!(
                 ":{} 421 {} {} :Unknown command\r\n",
-                srv, nick, cmd
+                srv, nick, safe_cmd
             ))),
         }
     }
@@ -251,6 +263,62 @@ fn first_arg(args: &str) -> Option<&str> {
 fn user_args_are_valid(args: &str) -> bool {
     let mut parts = args.split_whitespace();
     (0..4).all(|_| parts.next().is_some_and(|part| !part.is_empty()))
+}
+
+fn safe_irc_token(value: &str, fallback: &str) -> String {
+    let token = value.split_whitespace().next().unwrap_or_default();
+    let safe: String = token
+        .chars()
+        .filter(|&ch| is_irc_token_char(ch))
+        .take(64)
+        .collect();
+    if safe.is_empty() {
+        fallback.to_string()
+    } else {
+        safe
+    }
+}
+
+fn safe_irc_channel(value: &str) -> String {
+    let token = value.split_whitespace().next().unwrap_or_default();
+    let safe: String = token
+        .chars()
+        .filter(|&ch| is_irc_channel_char(ch))
+        .take(64)
+        .collect();
+    if safe.starts_with('#') || safe.starts_with('&') {
+        safe
+    } else {
+        "#nettrap".to_string()
+    }
+}
+
+fn safe_irc_trailing(value: &str, fallback: &str) -> String {
+    let safe: String = value
+        .chars()
+        .map(|ch| if ch.is_ascii_control() { ' ' } else { ch })
+        .take(128)
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if safe.is_empty() {
+        fallback.to_string()
+    } else {
+        safe
+    }
+}
+
+fn is_irc_token_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric()
+        || matches!(
+            ch,
+            '_' | '-' | '[' | ']' | '\\' | '`' | '^' | '{' | '}' | '|'
+        )
+}
+
+fn is_irc_channel_char(ch: char) -> bool {
+    ch.is_ascii_graphic() && !matches!(ch, ',' | ':' | '\r' | '\n')
 }
 
 #[cfg(test)]
@@ -341,5 +409,31 @@ mod tests {
             whois.to_bytes(),
             b":irc.nettrap.local 431 guest :No nickname given\r\n"
         );
+    }
+
+    #[test]
+    fn echoed_nick_and_targets_cannot_inject_response_lines() {
+        let handler = IrcHandler::new();
+
+        let join =
+            block_on(handler.handle("JOIN #safe\r\n:evil PRIVMSG #x :owned", "guest\r\n:evil"))
+                .expect("JOIN response");
+        let join = String::from_utf8(join.to_bytes()).expect("IRC response should be UTF-8");
+
+        assert!(!join.contains(":evil"));
+        assert!(join.contains("JOIN :#safe"));
+        assert_eq!(join.matches("\r\n").count(), 4);
+    }
+
+    #[test]
+    fn quit_reason_is_single_line() {
+        let handler = IrcHandler::new();
+
+        let quit = block_on(handler.handle("QUIT :bye\r\nERROR injected", "guest"))
+            .expect("QUIT response");
+        let quit = String::from_utf8(quit.to_bytes()).expect("IRC response should be UTF-8");
+
+        assert!(!quit.contains("ERROR injected\r\n"));
+        assert_eq!(quit.matches("\r\n").count(), 1);
     }
 }

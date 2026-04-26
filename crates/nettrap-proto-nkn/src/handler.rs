@@ -81,16 +81,26 @@ impl NknHandler {
         if object.get("jsonrpc")?.as_str()? != "2.0" {
             return None;
         }
-        let method = object.get("method")?.as_str()?.trim();
+        let method = object.get("method")?.as_str()?;
         if method.is_empty() {
             return None;
         }
         let id = object.get("id").cloned();
+        if id
+            .as_ref()
+            .is_some_and(|id| !Self::is_valid_json_rpc_id(id))
+        {
+            return None;
+        }
 
         Some(NknJsonRpcRequest {
             method: method.to_string(),
             id,
         })
+    }
+
+    fn is_valid_json_rpc_id(id: &serde_json::Value) -> bool {
+        id.is_null() || id.is_string() || id.is_number()
     }
 }
 
@@ -132,6 +142,9 @@ mod tests {
             br#"{"jsonrpc":"2.0","method":"unknown","id":1}"#
         ));
         assert!(!NknHandler::is_nkn_traffic(br#""jsonrpc" "getnodestate""#));
+        assert!(!NknHandler::is_nkn_traffic(
+            br#"{"jsonrpc":"2.0","method":" getnodestate ","id":1}"#
+        ));
     }
 
     #[test]
@@ -152,5 +165,27 @@ mod tests {
 
         let unknown = NknHandler::new().handle(br#"{"jsonrpc":"2.0","method":"unknown"}"#);
         assert!(unknown.is_empty());
+    }
+
+    #[test]
+    fn json_rpc_rejects_invalid_id_shapes() {
+        let object_id =
+            NknHandler::new().handle(br#"{"jsonrpc":"2.0","method":"getnodestate","id":{}}"#);
+        let array_id =
+            NknHandler::new().handle(br#"{"jsonrpc":"2.0","method":"getnodestate","id":[]}"#);
+
+        assert!(object_id.is_empty());
+        assert!(array_id.is_empty());
+    }
+
+    #[test]
+    fn json_rpc_method_names_are_exact() {
+        let response =
+            NknHandler::new().handle(br#"{"jsonrpc":"2.0","method":" getnodestate ","id":7}"#);
+
+        let response: serde_json::Value =
+            serde_json::from_slice(&response).expect("response should be JSON");
+        assert_eq!(response["id"], 7);
+        assert_eq!(response["error"]["code"], -32601);
     }
 }

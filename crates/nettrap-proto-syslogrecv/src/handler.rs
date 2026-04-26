@@ -31,7 +31,7 @@ impl SyslogRecvHandler {
     /// Parse a raw syslog packet. Returns the decoded message.
     pub fn handle(&self, data: &[u8]) -> Option<SyslogMessage> {
         let text = std::str::from_utf8(data).ok()?;
-        let text = text.trim();
+        let text = text.trim_end_matches(['\r', '\n']);
 
         // Parse PRI: <N>
         if !text.starts_with('<') {
@@ -42,7 +42,14 @@ impl SyslogRecvHandler {
         if end <= 1 {
             return None;
         }
-        let pri: u16 = text[1..end].parse().ok()?;
+        let pri_text = &text[1..end];
+        if pri_text.len() > 3
+            || !pri_text.bytes().all(|byte| byte.is_ascii_digit())
+            || (pri_text.len() > 1 && pri_text.starts_with('0'))
+        {
+            return None;
+        }
+        let pri: u16 = pri_text.parse().ok()?;
         if pri > 191 {
             return None;
         }
@@ -114,6 +121,9 @@ mod tests {
 
         assert!(handler.handle(b"<>message").is_none());
         assert!(handler.handle(b"<abc>message").is_none());
+        assert!(handler.handle(b"<013>message").is_none());
+        assert!(handler.handle(b"<000>message").is_none());
+        assert!(handler.handle(b"<0000>message").is_none());
     }
 
     #[test]
@@ -122,5 +132,14 @@ mod tests {
 
         assert!(handler.handle(b"plain message").is_none());
         assert!(handler.handle(b"<13 message").is_none());
+    }
+
+    #[test]
+    fn preserves_message_spaces_but_strips_datagram_newline() {
+        let message = SyslogRecvHandler::new()
+            .handle(b"<13>  Jan  1 host app: message  \r\n")
+            .expect("valid syslog message");
+
+        assert_eq!(message.message, "  Jan  1 host app: message  ");
     }
 }
