@@ -49,7 +49,7 @@ impl SnmpHandler {
 
         let mut msg_pos = 0;
         let version = Self::read_tlv(message, &mut msg_pos, message.len(), 0x02)?;
-        if version.is_empty() {
+        if !Self::is_supported_version(version) {
             return None;
         }
 
@@ -143,6 +143,10 @@ impl SnmpHandler {
             // Return (length_value, bytes_consumed)
             (l, 1 + n)
         }
+    }
+
+    fn is_supported_version(version: &[u8]) -> bool {
+        matches!(version, [0] | [1])
     }
 
     /// Encode BER length in short or long form
@@ -254,6 +258,16 @@ mod tests {
     fn rejects_request_id_that_corrupts_following_fields() {
         let mut request = valid_get_request();
         request[16] = 0x02;
+
+        let response = SnmpHandler::new().handle(&request);
+
+        assert!(response.is_empty());
+    }
+
+    #[test]
+    fn rejects_unsupported_snmp_version() {
+        let mut request = valid_get_request();
+        request[4] = 0x03;
 
         let response = SnmpHandler::new().handle(&request);
 

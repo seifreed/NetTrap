@@ -13,23 +13,32 @@ impl RdpHandler {
         }
 
         // TPKT header: version(1) + reserved(1) + length(2)
-        if data[0] != 0x03 {
+        if data[0] != 0x03 || data[1] != 0x00 {
             // Not TPKT
+            return Vec::new();
+        }
+        let tpkt_len = u16::from_be_bytes([data[2], data[3]]) as usize;
+        if tpkt_len < 7 || tpkt_len > data.len() {
+            return Vec::new();
+        }
+        let frame = &data[..tpkt_len];
+        let x224_len = frame[4] as usize;
+        if x224_len < 2 || 4 + x224_len > frame.len() {
             return Vec::new();
         }
 
         // X.224: length(1) + type(1)
-        let x224_type = data[5] >> 4;
+        let x224_type = frame[5] >> 4;
 
         match x224_type {
             0x0E => {
                 // Connection Request (CR)
                 tracing::info!("RDP Connection Request received");
                 // Extract cookie/username if present
-                if let Some(cookie) = Self::extract_cookie(data) {
+                if let Some(cookie) = Self::extract_cookie(frame) {
                     tracing::warn!("RDP login cookie: {}", cookie);
                 }
-                self.build_connection_confirm(data)
+                self.build_connection_confirm(frame)
             }
             _ => {
                 tracing::info!("RDP X.224 type: 0x{:x}", x224_type);
@@ -106,5 +115,44 @@ impl RdpHandler {
 impl Default for RdpHandler {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn connection_request() -> Vec<u8> {
+        vec![
+            0x03, 0x00, 0x00, 0x0b, 0x06, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ]
+    }
+
+    #[test]
+    fn connection_request_gets_confirm() {
+        let response = RdpHandler::new().handle(&connection_request());
+
+        assert!(!response.is_empty());
+        assert_eq!(response[0], 0x03);
+    }
+
+    #[test]
+    fn rejects_truncated_tpkt_length() {
+        let mut request = connection_request();
+        request[3] = 0x0c;
+
+        let response = RdpHandler::new().handle(&request);
+
+        assert!(response.is_empty());
+    }
+
+    #[test]
+    fn rejects_invalid_x224_length() {
+        let mut request = connection_request();
+        request[4] = 0x20;
+
+        let response = RdpHandler::new().handle(&request);
+
+        assert!(response.is_empty());
     }
 }

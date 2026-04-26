@@ -2390,6 +2390,7 @@ dependencies = [
  "chrono",
  "nettrap-core",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tracing",
 ]
@@ -2702,6 +2703,7 @@ dependencies = [
  "nettrap-core",
  "parking_lot",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

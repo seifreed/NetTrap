@@ -173,6 +173,28 @@ mod tests {
     }
 
     #[test]
+    fn parse_rejects_header_without_colon() {
+        let request = b"GET / HTTP/1.1\r\nHost: example.test\r\nBroken-Header\r\n\r\n";
+
+        assert!(HttpRequest::parse(request).is_none());
+    }
+
+    #[test]
+    fn parse_rejects_conflicting_duplicate_content_length() {
+        let request = b"POST /upload HTTP/1.1\r\nHost: example.test\r\nContent-Length: 5\r\nContent-Length: 4\r\n\r\nhello";
+
+        assert!(HttpRequest::parse(request).is_none());
+    }
+
+    #[test]
+    fn parse_accepts_matching_duplicate_content_length() {
+        let request = b"POST /upload HTTP/1.1\r\nHost: example.test\r\nContent-Length: 5\r\nContent-Length: 5\r\n\r\nhello";
+        let parsed = HttpRequest::parse(request).expect("matching content-length should parse");
+
+        assert_eq!(parsed.body.as_deref(), Some(&b"hello"[..]));
+    }
+
+    #[test]
     fn parse_rejects_truncated_chunked_body() {
         let request =
             b"POST /upload HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\n\r\n4\r\ntes";

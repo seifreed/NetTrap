@@ -53,6 +53,122 @@ pub trait ProtocolTaste: Send + Sync {
     fn protocol_name(&self) -> &'static str;
 }
 
+fn first_ascii_token(data: &[u8]) -> Option<&str> {
+    let text = std::str::from_utf8(data).ok()?;
+    let line = text.lines().next()?.trim_end_matches('\r');
+    line.split_ascii_whitespace().next()
+}
+
+fn command_token_matches(data: &[u8], commands: &[&str]) -> bool {
+    let Some(token) = first_ascii_token(data) else {
+        return false;
+    };
+    commands
+        .iter()
+        .any(|command| token.eq_ignore_ascii_case(command))
+}
+
+fn first_text_line(data: &[u8]) -> Option<&str> {
+    let text = std::str::from_utf8(data).ok()?;
+    text.lines().next().map(|line| line.trim_end_matches('\r'))
+}
+
+fn looks_like_http_start_line(data: &[u8]) -> bool {
+    let Some(line) = first_text_line(data) else {
+        return false;
+    };
+    let mut parts = line.split(' ');
+    let Some(first) = parts.next() else {
+        return false;
+    };
+    let Some(second) = parts.next() else {
+        return false;
+    };
+    let Some(third) = parts.next() else {
+        return false;
+    };
+    if parts.next().is_some() || second.is_empty() || third.is_empty() {
+        return false;
+    }
+
+    let request = matches!(
+        first,
+        "GET" | "POST" | "PUT" | "HEAD" | "DELETE" | "OPTIONS" | "PATCH" | "CONNECT"
+    ) && matches!(third, "HTTP/1.0" | "HTTP/1.1")
+        && second
+            .bytes()
+            .all(|byte| !byte.is_ascii_control() && !byte.is_ascii_whitespace());
+
+    let response = matches!(first, "HTTP/1.0" | "HTTP/1.1")
+        && second.len() == 3
+        && second.bytes().all(|byte| byte.is_ascii_digit());
+
+    request || response
+}
+
+fn looks_like_sip_request_line(data: &[u8]) -> bool {
+    let Some(line) = first_text_line(data) else {
+        return false;
+    };
+    let mut parts = line.split(' ');
+    let Some(method) = parts.next() else {
+        return false;
+    };
+    let Some(target) = parts.next() else {
+        return false;
+    };
+    let Some(version) = parts.next() else {
+        return false;
+    };
+    parts.next().is_none()
+        && !target.is_empty()
+        && version == "SIP/2.0"
+        && matches!(
+            method,
+            "REGISTER"
+                | "INVITE"
+                | "OPTIONS"
+                | "ACK"
+                | "BYE"
+                | "CANCEL"
+                | "MESSAGE"
+                | "SUBSCRIBE"
+                | "NOTIFY"
+                | "INFO"
+                | "PRACK"
+                | "UPDATE"
+                | "REFER"
+        )
+}
+
+fn mqtt_remaining_length_end(data: &[u8]) -> Option<usize> {
+    let mut pos = 1usize;
+    while pos < data.len() && pos <= 4 {
+        let byte = data[pos];
+        pos += 1;
+        if byte & 0x80 == 0 {
+            return Some(pos);
+        }
+    }
+    None
+}
+
+fn looks_like_nkn_json_rpc(data: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(data) else {
+        return false;
+    };
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    if object.get("jsonrpc").and_then(|value| value.as_str()) != Some("2.0") {
+        return false;
+    }
+    matches!(
+        object.get("method").and_then(|value| value.as_str()),
+        Some("getnodestate" | "getlatestblockheight" | "getwsaddr")
+    )
+}
+
 // Built-in taste implementations for known protocols
 
 pub struct DnsTaste;
@@ -79,25 +195,8 @@ impl ProtocolTaste for DnsTaste {
 pub struct HttpTaste;
 impl ProtocolTaste for HttpTaste {
     fn taste(&self, data: &[u8], dst_port: u16) -> TasteScore {
-        if data.len() >= 4 {
-            let methods = [
-                b"GET " as &[u8],
-                b"POST ",
-                b"PUT ",
-                b"HEAD ",
-                b"DELETE ",
-                b"OPTIONS ",
-                b"PATCH ",
-                b"CONNECT ",
-            ];
-            for method in &methods {
-                if data.starts_with(method) {
-                    return 95;
-                }
-            }
-            if data.windows(4).any(|w| w == b"HTTP") {
-                return 80;
-            }
+        if looks_like_http_start_line(data) {
+            return 95;
         }
         if dst_port == 80 || dst_port == 8080 || dst_port == 8443 {
             return 30;
@@ -112,7 +211,12 @@ impl ProtocolTaste for HttpTaste {
 pub struct TlsTaste;
 impl ProtocolTaste for TlsTaste {
     fn taste(&self, data: &[u8], dst_port: u16) -> TasteScore {
-        if data.len() >= 3 && data[0] == 0x16 && data[1] == 0x03 && data[2] <= 0x04 {
+        if data.len() >= 5
+            && data[0] == 0x16
+            && data[1] == 0x03
+            && (0x01..=0x04).contains(&data[2])
+            && u16::from_be_bytes([data[3], data[4]]) > 0
+        {
             return 95;
         }
         // SSLv2
@@ -135,17 +239,13 @@ impl ProtocolTaste for SmtpTaste {
         if dst_port == 25 || dst_port == 587 || dst_port == 465 {
             return 85;
         }
-        if data.len() >= 4 {
-            let upper: Vec<u8> = data[..4.min(data.len())]
-                .iter()
-                .map(|b| b.to_ascii_uppercase())
-                .collect();
-            if upper.starts_with(b"EHLO")
-                || upper.starts_with(b"HELO")
-                || upper.starts_with(b"MAIL")
-            {
-                return 90;
-            }
+        if command_token_matches(
+            data,
+            &[
+                "EHLO", "HELO", "MAIL", "RCPT", "DATA", "QUIT", "AUTH", "VRFY", "EXPN",
+            ],
+        ) {
+            return 90;
         }
         0
     }
@@ -160,17 +260,14 @@ impl ProtocolTaste for FtpTaste {
         if dst_port == 21 {
             return 85;
         }
-        if data.len() >= 4 {
-            let upper: Vec<u8> = data[..4.min(data.len())]
-                .iter()
-                .map(|b| b.to_ascii_uppercase())
-                .collect();
-            if upper.starts_with(b"USER")
-                || upper.starts_with(b"PASS")
-                || upper.starts_with(b"LIST")
-            {
-                return 80;
-            }
+        if command_token_matches(
+            data,
+            &[
+                "USER", "PASS", "LIST", "NLST", "RETR", "STOR", "QUIT", "PASV", "EPSV", "PWD",
+                "CWD",
+            ],
+        ) {
+            return 80;
         }
         0
     }
@@ -185,28 +282,17 @@ impl ProtocolTaste for Pop3Taste {
         if dst_port == 110 || dst_port == 995 {
             return 85;
         }
-        if data.len() >= 4 {
-            let upper: Vec<u8> = data[..4.min(data.len())]
-                .iter()
-                .map(|b| b.to_ascii_uppercase())
-                .collect();
-            // POP3-unique commands at higher score
-            if upper.starts_with(b"STAT")
-                || upper.starts_with(b"RETR")
-                || upper.starts_with(b"DELE")
-                || upper.starts_with(b"TOP ")
-                || upper.starts_with(b"UIDL")
-            {
-                return 80;
-            }
-            // Ambiguous commands shared with FTP — lower score so FTP wins on tie
-            if upper.starts_with(b"USER")
-                || upper.starts_with(b"PASS")
-                || upper.starts_with(b"LIST")
-                || upper.starts_with(b"QUIT")
-            {
-                return 65;
-            }
+        if command_token_matches(
+            data,
+            &[
+                "STAT", "RETR", "DELE", "TOP", "UIDL", "CAPA", "AUTH", "STLS",
+            ],
+        ) {
+            return 80;
+        }
+        // Ambiguous commands shared with FTP: lower score so FTP wins on tie.
+        if command_token_matches(data, &["USER", "PASS", "LIST", "QUIT"]) {
+            return 65;
         }
         0
     }
@@ -431,18 +517,14 @@ impl ProtocolTaste for MqttTaste {
             return 90;
         }
         // MQTT CONNECT packet: fixed header type 1, then variable-length remaining length (1-4 bytes)
-        if data.len() >= 7 && (data[0] >> 4) == 1 {
-            // Decode variable-length remaining length to find where payload starts
-            let mut remaining_start = 1;
-            while remaining_start < 5 && remaining_start < data.len() {
-                let has_continuation = data[remaining_start] & 0x80 != 0;
-                remaining_start += 1;
-                if !has_continuation {
-                    break;
-                }
-            }
+        if data.len() >= 7 && data[0] == 0x10 {
+            let Some(remaining_start) = mqtt_remaining_length_end(data) else {
+                return 0;
+            };
             // After remaining length: protocol name length (2 bytes) + "MQTT"
             if remaining_start + 6 <= data.len()
+                && data[remaining_start] == 0
+                && data[remaining_start + 1] == 4
                 && &data[remaining_start + 2..remaining_start + 6] == b"MQTT"
             {
                 return 95;
@@ -493,17 +575,58 @@ impl ProtocolTaste for MemcachedTaste {
         if dst_port == 11211 {
             return 90;
         }
-        let text = String::from_utf8_lossy(data);
-        if text.starts_with("get ")
-            || text.starts_with("set ")
-            || text.starts_with("stats")
-            || text.starts_with("version")
-        {
+        if command_token_matches(
+            data,
+            &[
+                "get",
+                "gets",
+                "set",
+                "add",
+                "replace",
+                "append",
+                "prepend",
+                "cas",
+                "stats",
+                "version",
+                "flush_all",
+                "quit",
+            ],
+        ) {
             return 85;
         }
-        if data.len() >= 24 && data[0] == 0x80 {
+        if data.len() >= 24
+            && data[0] == 0x80
+            && matches!(
+                data[1],
+                0x00 | 0x01
+                    | 0x02
+                    | 0x03
+                    | 0x04
+                    | 0x05
+                    | 0x06
+                    | 0x07
+                    | 0x08
+                    | 0x09
+                    | 0x0a
+                    | 0x0b
+                    | 0x0c
+                    | 0x0d
+                    | 0x0e
+                    | 0x0f
+                    | 0x10
+                    | 0x11
+                    | 0x12
+                    | 0x13
+                    | 0x14
+                    | 0x15
+                    | 0x16
+                    | 0x17
+                    | 0x1c
+                    | 0x1d
+            )
+        {
             return 75;
-        } // binary protocol
+        }
         0
     }
     fn protocol_name(&self) -> &'static str {
@@ -527,15 +650,12 @@ impl ProtocolTaste for PostgresTaste {
 pub struct SipTaste;
 impl ProtocolTaste for SipTaste {
     fn taste(&self, data: &[u8], dst_port: u16) -> TasteScore {
-        if dst_port == 5060 || dst_port == 5061 {
-            return 85;
-        }
-        if data.starts_with(b"SIP/")
-            || data.starts_with(b"REGISTER")
-            || data.starts_with(b"INVITE")
-            || data.starts_with(b"OPTIONS")
-        {
-            return 90;
+        if looks_like_sip_request_line(data) {
+            return if dst_port == 5060 || dst_port == 5061 {
+                90
+            } else {
+                85
+            };
         }
         0
     }
@@ -550,7 +670,7 @@ impl ProtocolTaste for UpnpTaste {
         if dst_port == 1900 {
             return 85;
         }
-        if data.starts_with(b"M-SEARCH") || data.starts_with(b"NOTIFY") {
+        if command_token_matches(data, &["M-SEARCH", "NOTIFY"]) {
             return 90;
         }
         0
@@ -618,10 +738,7 @@ impl ProtocolTaste for NknTaste {
         if (30001..=30003).contains(&dst_port) {
             return 85;
         }
-        let text = String::from_utf8_lossy(data);
-        if text.contains("\"jsonrpc\"")
-            && (text.contains("getnodestate") || text.contains("getlatestblockheight"))
-        {
+        if looks_like_nkn_json_rpc(data) {
             return 90;
         }
         0
@@ -782,15 +899,18 @@ mod tests {
     fn test_http_taste_methods() {
         let taste = HttpTaste;
         assert_eq!(taste.taste(b"GET / HTTP/1.1", 80), 95);
-        assert_eq!(taste.taste(b"POST /api", 8080), 95);
+        assert_eq!(taste.taste(b"POST /api HTTP/1.1", 8080), 95);
+        assert_eq!(taste.taste(b"HTTP/1.1 200 OK", 0), 95);
+        assert_eq!(taste.taste(b"garbage HTTP inside", 0), 0);
         assert_eq!(taste.taste(b"INVALID", 80), 30);
     }
 
     #[test]
     fn test_tls_taste() {
         let taste = TlsTaste;
-        assert_eq!(taste.taste(&[0x16, 0x03, 0x01], 443), 95);
-        assert_eq!(taste.taste(&[0x16, 0x03, 0x03], 0), 95);
+        assert_eq!(taste.taste(&[0x16, 0x03, 0x01, 0x00, 0x20], 443), 95);
+        assert_eq!(taste.taste(&[0x16, 0x03, 0x03, 0x00, 0x20], 0), 95);
+        assert_eq!(taste.taste(&[0x16, 0x03, 0x00, 0x00, 0x20], 0), 0);
         assert_eq!(taste.taste(&[], 443), 40);
     }
 
@@ -838,6 +958,62 @@ mod tests {
         // SMTP commands on non-standard port still detected
         assert_eq!(taste.taste(b"HELO example.com", 8080), 90);
         assert_eq!(taste.taste(b"EHLO test", 0), 90);
+        assert_eq!(taste.taste(b"EHLOXYZ example.com", 0), 0);
+    }
+
+    #[test]
+    fn test_command_tastes_reject_prefixed_verbs() {
+        assert_eq!(FtpTaste.taste(b"LISTEN\r\n", 0), 0);
+        assert_eq!(FtpTaste.taste(b"RETRIEVE file\r\n", 0), 0);
+        assert_eq!(FtpTaste.taste(b"LIST\r\n", 0), 80);
+
+        assert_eq!(Pop3Taste.taste(b"RETRIEVE 1\r\n", 0), 0);
+        assert_eq!(Pop3Taste.taste(b"RETR 1\r\n", 0), 80);
+
+        assert_eq!(MemcachedTaste.taste(b"statsfoo\r\n", 0), 0);
+        assert_eq!(MemcachedTaste.taste(b"stats\r\n", 0), 85);
+    }
+
+    #[test]
+    fn test_sip_taste_requires_request_line() {
+        let taste = SipTaste;
+
+        assert_eq!(taste.taste(b"SIP/2.0 200 OK\r\n", 5060), 0);
+        assert_eq!(
+            taste.taste(b"INVITE sip:user@example.test SIP/2.0\r\n", 5060),
+            90
+        );
+        assert_eq!(
+            taste.taste(b"INVITEX sip:user@example.test SIP/2.0\r\n", 5060),
+            0
+        );
+    }
+
+    #[test]
+    fn test_mqtt_taste_requires_complete_valid_connect_header() {
+        let taste = MqttTaste;
+        let valid_connect = [
+            0x10, 0x0c, 0x00, 0x04, b'M', b'Q', b'T', b'T', 0x04, 0x02, 0x00, 0x00, 0x00, 0x00,
+        ];
+
+        assert_eq!(taste.taste(&valid_connect, 0), 95);
+        assert_eq!(
+            taste.taste(&[0x10, 0xff, 0xff, 0xff, 0xff, 0x00, 0x04], 0),
+            0
+        );
+        assert_eq!(
+            taste.taste(&[0x11, 0x0c, 0x00, 0x04, b'M', b'Q', b'T', b'T'], 0),
+            0
+        );
+    }
+
+    #[test]
+    fn test_nkn_taste_requires_json_rpc() {
+        let taste = NknTaste;
+        let valid = br#"{"jsonrpc":"2.0","method":"getlatestblockheight","params":[],"id":1}"#;
+
+        assert_eq!(taste.taste(valid, 0), 90);
+        assert_eq!(taste.taste(b"noise \"jsonrpc\" getlatestblockheight", 0), 0);
     }
 
     #[test]

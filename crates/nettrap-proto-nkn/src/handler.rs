@@ -1,5 +1,11 @@
 pub struct NknHandler;
 
+#[derive(Debug)]
+struct NknJsonRpcRequest {
+    method: String,
+    id: serde_json::Value,
+}
+
 impl NknHandler {
     pub fn new() -> Self {
         Self
@@ -7,30 +13,25 @@ impl NknHandler {
 
     pub fn handle(&self, data: &[u8]) -> Vec<u8> {
         // NKN uses a JSON-RPC like protocol over WebSocket/TCP
-        let text = String::from_utf8_lossy(data);
-
-        if text.contains("\"jsonrpc\"") || text.contains("\"method\"") {
+        if let Some(request) = Self::parse_json_rpc(data) {
+            let text = String::from_utf8_lossy(data);
             tracing::warn!(
                 "NKN JSON-RPC request detected: {}",
                 text.chars().take(200).collect::<String>()
             );
-
-            // Extract method if present
-            if let Some(method_start) = text.find("\"method\"") {
-                let rest = &text[method_start..];
-                if let Some(colon) = rest.find(':') {
-                    let after_colon = rest[colon + 1..].trim();
-                    if let Some(start) = after_colon.find('"') {
-                        let inner = &after_colon[start + 1..];
-                        let end = inner.find('"').unwrap_or(inner.len());
-                        tracing::warn!("NKN method: {}", &inner[..end]);
-                    }
-                }
-            }
+            tracing::warn!("NKN method: {}", request.method);
 
             // Return a valid JSON-RPC response
-            let response = r#"{"jsonrpc":"2.0","result":{"id":"nettrap-node-id","version":"2.2.0","height":1000000},"id":1}"#;
-            return response.as_bytes().to_vec();
+            let response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "result": {
+                    "id": "nettrap-node-id",
+                    "version": "2.2.0",
+                    "height": 1000000,
+                },
+                "id": request.id,
+            });
+            return response.to_string().into_bytes();
         }
 
         // NKN also uses a binary protocol for P2P
@@ -48,16 +49,71 @@ impl NknHandler {
 
     /// Detect NKN/NKAbuse traffic patterns
     pub fn is_nkn_traffic(data: &[u8]) -> bool {
-        let text = String::from_utf8_lossy(data);
-        text.contains("\"jsonrpc\"")
-            && (text.contains("getlatestblockheight")
-                || text.contains("getnodestate")
-                || text.contains("getwsaddr"))
+        let Some(request) = Self::parse_json_rpc(data) else {
+            return false;
+        };
+        matches!(
+            request.method.as_str(),
+            "getlatestblockheight" | "getnodestate" | "getwsaddr"
+        )
+    }
+
+    fn parse_json_rpc(data: &[u8]) -> Option<NknJsonRpcRequest> {
+        let value: serde_json::Value = serde_json::from_slice(data).ok()?;
+        let object = value.as_object()?;
+        if object.get("jsonrpc")?.as_str()? != "2.0" {
+            return None;
+        }
+        let method = object.get("method")?.as_str()?.trim();
+        if method.is_empty() {
+            return None;
+        }
+        let id = object.get("id").cloned().unwrap_or(serde_json::Value::Null);
+
+        Some(NknJsonRpcRequest {
+            method: method.to_string(),
+            id,
+        })
     }
 }
 
 impl Default for NknHandler {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_rpc_request_gets_response() {
+        let response =
+            NknHandler::new().handle(br#"{"jsonrpc":"2.0","method":"getnodestate","id":7}"#);
+
+        assert!(!response.is_empty());
+        let response: serde_json::Value =
+            serde_json::from_slice(&response).expect("response should be JSON");
+        assert_eq!(response["id"], 7);
+        assert_eq!(response["jsonrpc"], "2.0");
+    }
+
+    #[test]
+    fn text_with_method_substring_is_not_json_rpc() {
+        let response = NknHandler::new().handle(br#"prefix "method": "getnodestate""#);
+
+        assert!(response.is_empty());
+    }
+
+    #[test]
+    fn traffic_detection_requires_valid_json_rpc_method() {
+        assert!(NknHandler::is_nkn_traffic(
+            br#"{"jsonrpc":"2.0","method":"getlatestblockheight","id":1}"#
+        ));
+        assert!(!NknHandler::is_nkn_traffic(
+            br#"{"jsonrpc":"2.0","method":"unknown","id":1}"#
+        ));
+        assert!(!NknHandler::is_nkn_traffic(br#""jsonrpc" "getnodestate""#));
     }
 }

@@ -796,7 +796,7 @@ pub fn resolve_banner(input: &str) -> String {
             resolve_banner(presets[idx])
         }
         other => {
-            if other.starts_with("!hostname") || other.starts_with("!gethostname") {
+            if matches!(other, "!hostname" | "!gethostname") {
                 let hostname = hostname::get()
                     .map(|h| h.to_string_lossy().to_string())
                     .unwrap_or_else(|_| "nettrap".to_string());
@@ -812,6 +812,14 @@ pub fn resolve_banner(input: &str) -> String {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn hostname_banner_macro_requires_exact_name() {
+        assert_eq!(
+            resolve_banner("!hostnamebackup"),
+            "220 !hostnamebackup".to_string()
+        );
+    }
 
     #[test]
     fn retr_rejects_files_over_response_limit() {

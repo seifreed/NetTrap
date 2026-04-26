@@ -25,14 +25,10 @@ impl SocksHandler {
         let port = u16::from_be_bytes([data[2], data[3]]);
         let ip = format!("{}.{}.{}.{}", data[4], data[5], data[6], data[7]);
 
-        // Find null terminator for username, with bounds validation
-        // SOCKS4 username starts at byte 8 and is null-terminated
         let user_data = &data[8..];
-        let user_end = user_data
-            .iter()
-            .position(|&b| b == 0)
-            .unwrap_or(user_data.len()) // Use remaining bytes if no null found
-            .min(user_data.len()); // Clamp to valid range
+        let Some(user_end) = user_data.iter().position(|&b| b == 0) else {
+            return Vec::new();
+        };
         let user = String::from_utf8_lossy(&user_data[..user_end]);
 
         tracing::warn!(
@@ -69,7 +65,7 @@ impl SocksHandler {
         }
 
         // This might be a connect request
-        if data.len() >= 7 && data[1] == 0x01 {
+        if data.len() >= 7 && data[1] == 0x01 && data[2] == 0x00 {
             // CONNECT
             let atyp = data[3];
             let (dest, port_offset) = match atyp {
@@ -86,7 +82,7 @@ impl SocksHandler {
                 0x03 => {
                     // Domain
                     let dlen = data[4] as usize;
-                    if data.len() < 5 + dlen + 2 {
+                    if dlen == 0 || data.len() < 5 + dlen + 2 {
                         return Vec::new();
                     }
                     (
@@ -120,5 +116,61 @@ impl SocksHandler {
 impl Default for SocksHandler {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SocksHandler;
+
+    #[test]
+    fn socks4_requires_null_terminated_user() {
+        let handler = SocksHandler::new();
+        let unterminated = [0x04, 0x01, 0x00, 0x50, 127, 0, 0, 1, b'u', b's', b'e', b'r'];
+
+        assert!(handler.handle(&unterminated).is_empty());
+    }
+
+    #[test]
+    fn socks4_accepts_null_terminated_user() {
+        let handler = SocksHandler::new();
+        let request = [
+            0x04, 0x01, 0x00, 0x50, 127, 0, 0, 1, b'u', b's', b'e', b'r', 0x00,
+        ];
+
+        assert_eq!(
+            handler.handle(&request),
+            vec![0x00, 0x5A, 0x00, 0x50, 127, 0, 0, 1]
+        );
+    }
+
+    #[test]
+    fn socks5_connect_rejects_nonzero_reserved_byte() {
+        let handler = SocksHandler::new();
+        let request = [0x05, 0x01, 0x01, 0x01, 127, 0, 0, 1, 0x00, 0x50];
+
+        assert!(handler.handle(&request).is_empty());
+    }
+
+    #[test]
+    fn socks5_connect_accepts_complete_domain_request() {
+        let handler = SocksHandler::new();
+        let request = [
+            0x05, 0x01, 0x00, 0x03, 0x0b, b'e', b'x', b'a', b'm', b'p', b'l', b'e', b'.', b't',
+            b'e', b's', b't', 0x00, 0x50,
+        ];
+
+        assert_eq!(
+            handler.handle(&request),
+            vec![0x05, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+        );
+    }
+
+    #[test]
+    fn socks5_connect_rejects_empty_domain() {
+        let handler = SocksHandler::new();
+        let request = [0x05, 0x01, 0x00, 0x03, 0x00, 0x00, 0x50];
+
+        assert!(handler.handle(&request).is_empty());
     }
 }

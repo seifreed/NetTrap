@@ -24,9 +24,12 @@ impl TftpPacket {
         match opcode {
             TFTP_OPCODE_RRQ | TFTP_OPCODE_WRQ => {
                 let payload = &data[2..];
+                if !payload.ends_with(&[0]) {
+                    return None;
+                }
                 // Find null-terminated strings
                 let parts: Vec<&[u8]> = payload.split(|&b| b == 0).collect();
-                if parts.len() < 2 || parts[0].is_empty() {
+                if parts.len() < 3 || parts[0].is_empty() || parts[1].is_empty() {
                     return None;
                 }
                 let filename = String::from_utf8_lossy(parts[0]).to_string();
@@ -35,6 +38,12 @@ impl TftpPacket {
                     return None;
                 }
                 let mode = String::from_utf8_lossy(parts[1]).to_string();
+                if !matches!(
+                    mode.to_ascii_lowercase().as_str(),
+                    "netascii" | "octet" | "mail"
+                ) {
+                    return None;
+                }
                 if opcode == TFTP_OPCODE_RRQ {
                     Some(TftpPacket::ReadRequest { filename, mode })
                 } else {
@@ -100,6 +109,47 @@ impl TftpPacket {
                 buf
             }
             _ => Vec::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rrq(filename: &[u8], mode: &[u8], final_nul: bool) -> Vec<u8> {
+        let mut packet = Vec::new();
+        packet.extend_from_slice(&TFTP_OPCODE_RRQ.to_be_bytes());
+        packet.extend_from_slice(filename);
+        packet.push(0);
+        packet.extend_from_slice(mode);
+        if final_nul {
+            packet.push(0);
+        }
+        packet
+    }
+
+    #[test]
+    fn rrq_requires_final_nul_and_non_empty_mode() {
+        assert!(TftpPacket::parse(&rrq(b"firmware.bin", b"octet", false)).is_none());
+        assert!(TftpPacket::parse(&rrq(b"firmware.bin", b"", true)).is_none());
+    }
+
+    #[test]
+    fn rrq_rejects_unknown_modes() {
+        assert!(TftpPacket::parse(&rrq(b"firmware.bin", b"binary", true)).is_none());
+    }
+
+    #[test]
+    fn rrq_accepts_valid_request() {
+        let parsed = TftpPacket::parse(&rrq(b"firmware.bin", b"octet", true));
+
+        match parsed {
+            Some(TftpPacket::ReadRequest { filename, mode }) => {
+                assert_eq!(filename, "firmware.bin");
+                assert_eq!(mode, "octet");
+            }
+            _ => panic!("expected RRQ"),
         }
     }
 }

@@ -38,10 +38,14 @@ pub(crate) fn parse_http_request_bytes(data: &[u8]) -> Result<Option<ParsedHttpR
     let mut headers = Vec::new();
     for line in lines {
         let Some(colon_pos) = line.find(':') else {
-            continue;
+            return Ok(None);
         };
         let key = line[..colon_pos].trim().to_string();
         let value = line[colon_pos + 1..].trim().to_string();
+
+        if key.is_empty() {
+            return Ok(None);
+        }
 
         if key.contains('\r') || key.contains('\n') || value.contains('\r') || value.contains('\n')
         {
@@ -50,6 +54,10 @@ pub(crate) fn parse_http_request_bytes(data: &[u8]) -> Result<Option<ParsedHttpR
         }
 
         headers.push((key, value));
+    }
+
+    if has_conflicting_content_length(&headers) {
+        return Ok(None);
     }
 
     let body_start = header_end + 4;
@@ -158,6 +166,21 @@ fn find_header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<
         .iter()
         .find(|(key, _)| key.eq_ignore_ascii_case(name))
         .map(|(_, value)| value.as_str())
+}
+
+fn has_conflicting_content_length(headers: &[(String, String)]) -> bool {
+    let mut seen = None;
+    for (_, value) in headers
+        .iter()
+        .filter(|(key, _)| key.eq_ignore_ascii_case("Content-Length"))
+    {
+        match seen {
+            Some(previous) if previous != value => return true,
+            None => seen = Some(value),
+            _ => {}
+        }
+    }
+    false
 }
 
 fn decode_chunked_body(data: &[u8]) -> Option<(usize, Vec<u8>)> {
