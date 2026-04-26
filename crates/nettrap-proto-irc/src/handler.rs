@@ -200,7 +200,7 @@ impl IrcHandlerTrait for IrcHandler {
             ))),
             "CAP" => {
                 // CAP negotiation - respond with empty capabilities
-                if args.to_uppercase().starts_with("LS") {
+                if is_cap_ls(args) {
                     Ok(IrcResponse::single(format!(":{} CAP * LS :\r\n", srv)))
                 } else {
                     Ok(IrcResponse::new())
@@ -215,5 +215,24 @@ impl IrcHandlerTrait for IrcHandler {
 
     fn name(&self) -> &'static str {
         "irc"
+    }
+}
+
+fn is_cap_ls(args: &str) -> bool {
+    args.split_whitespace()
+        .next()
+        .is_some_and(|subcommand| subcommand.eq_ignore_ascii_case("LS"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_cap_ls;
+
+    #[test]
+    fn cap_ls_requires_exact_subcommand() {
+        assert!(is_cap_ls("LS"));
+        assert!(is_cap_ls("ls 302"));
+        assert!(!is_cap_ls("LSXYZ"));
+        assert!(!is_cap_ls(""));
     }
 }

@@ -39,9 +39,15 @@ impl SyslogRecvHandler {
             return None;
         }
         let end = text.find('>')?;
-        let pri: u8 = text[1..end].parse().ok()?;
-        let facility = pri >> 3;
-        let severity = pri & 0x07;
+        if end <= 1 {
+            return None;
+        }
+        let pri: u16 = text[1..end].parse().ok()?;
+        if pri > 191 {
+            return None;
+        }
+        let facility = (pri >> 3) as u8;
+        let severity = (pri & 0x07) as u8;
 
         let fac_name = FACILITY_NAMES
             .get(facility as usize)
@@ -75,5 +81,46 @@ impl SyslogRecvHandler {
 impl Default for SyslogRecvHandler {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SyslogRecvHandler;
+
+    #[test]
+    fn parses_valid_pri() {
+        let message = SyslogRecvHandler::new()
+            .handle(b"<13>Jan  1 00:00:00 host app: message")
+            .expect("valid syslog message");
+
+        assert_eq!(message.facility, 1);
+        assert_eq!(message.severity, 5);
+        assert_eq!(message.facility_name, "user");
+        assert_eq!(message.severity_name, "notice");
+    }
+
+    #[test]
+    fn rejects_pri_outside_rfc3164_range() {
+        let handler = SyslogRecvHandler::new();
+
+        assert!(handler.handle(b"<192>message").is_none());
+        assert!(handler.handle(b"<255>message").is_none());
+    }
+
+    #[test]
+    fn rejects_empty_or_non_numeric_pri() {
+        let handler = SyslogRecvHandler::new();
+
+        assert!(handler.handle(b"<>message").is_none());
+        assert!(handler.handle(b"<abc>message").is_none());
+    }
+
+    #[test]
+    fn rejects_messages_without_pri() {
+        let handler = SyslogRecvHandler::new();
+
+        assert!(handler.handle(b"plain message").is_none());
+        assert!(handler.handle(b"<13 message").is_none());
     }
 }

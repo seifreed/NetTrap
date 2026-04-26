@@ -21,7 +21,7 @@ impl UpnpHandler {
     pub fn handle_ssdp(&self, data: &[u8]) -> Vec<u8> {
         let text = String::from_utf8_lossy(data);
 
-        if is_ssdp_m_search(&text) {
+        if headers_are_well_formed(&text) && is_ssdp_m_search(&text) {
             tracing::warn!("SSDP M-SEARCH discovery attempt");
             self.ssdp_discovery_response()
         } else {
@@ -31,6 +31,9 @@ impl UpnpHandler {
 
     pub fn handle_http(&self, data: &[u8]) -> Vec<u8> {
         let text = String::from_utf8_lossy(data);
+        if !headers_are_well_formed(&text) {
+            return Vec::new();
+        }
         let Some((method, path)) = request_line(&text) else {
             return Vec::new();
         };
@@ -52,13 +55,13 @@ impl UpnpHandler {
             return Vec::new();
         };
 
-        if action_contains(action, "DeletePortMapping") {
+        if action_matches(action, "DeletePortMapping") {
             tracing::warn!(
                 "UPnP delete port mapping attempt: {}",
                 text.lines().take(3).collect::<Vec<_>>().join(" | ")
             );
             http_xml_response(delete_port_mapping_response())
-        } else if action_contains(action, "AddPortMapping") {
+        } else if action_matches(action, "AddPortMapping") {
             tracing::warn!(
                 "UPnP add port mapping attempt: {}",
                 text.lines().take(3).collect::<Vec<_>>().join(" | ")
@@ -93,11 +96,15 @@ impl Default for UpnpHandler {
 
 fn request_line(text: &str) -> Option<(&str, &str)> {
     let line = text.lines().next()?.trim_end_matches('\r');
-    let mut parts = line.split_whitespace();
+    let mut parts = line.split(' ');
     let method = parts.next()?;
     let path = parts.next()?;
     let version = parts.next()?;
-    if parts.next().is_some() || !version.starts_with("HTTP/") {
+    if parts.next().is_some()
+        || method.is_empty()
+        || path.is_empty()
+        || !matches!(version, "HTTP/1.0" | "HTTP/1.1")
+    {
         return None;
     }
     Some((method, path))
@@ -130,8 +137,28 @@ fn header_value<'a>(text: &'a str, name: &str) -> Option<&'a str> {
     None
 }
 
-fn action_contains(action: &str, operation: &str) -> bool {
-    action.contains("urn:schemas-upnp-org:service:WANIPConnection:1#") && action.contains(operation)
+fn headers_are_well_formed(text: &str) -> bool {
+    for line in text.lines().skip(1) {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            return true;
+        }
+        let Some((key, _)) = line.split_once(':') else {
+            return false;
+        };
+        if key.trim().is_empty() {
+            return false;
+        }
+    }
+    true
+}
+
+fn action_matches(action: &str, operation: &str) -> bool {
+    let action = action.trim().trim_matches('"');
+    let Some((service, action_name)) = action.rsplit_once('#') else {
+        return false;
+    };
+    service == "urn:schemas-upnp-org:service:WANIPConnection:1" && action_name == operation
 }
 
 fn http_xml_response(body: &str) -> Vec<u8> {
@@ -198,6 +225,32 @@ mod tests {
 
         assert!(response.starts_with(b"HTTP/1.1 200 OK"));
         assert!(String::from_utf8_lossy(&response).contains("AddPortMappingResponse"));
+    }
+
+    #[test]
+    fn http_post_rejects_action_prefix_match() {
+        let request = b"POST /upnp/control/WANIPConn1 HTTP/1.1\r\nHost: router\r\nSOAPAction: \"urn:schemas-upnp-org:service:WANIPConnection:1#NotAddPortMapping\"\r\nContent-Length: 17\r\n\r\nNotAddPortMapping";
+
+        let response = UpnpHandler::new().handle_http(request);
+
+        assert!(response.is_empty());
+    }
+
+    #[test]
+    fn http_rejects_unsupported_http_version() {
+        let response = UpnpHandler::new()
+            .handle_http(b"GET /desc.xml HTTP/2.0\r\nHost: 10.0.0.1:49152\r\n\r\n");
+
+        assert!(response.is_empty());
+    }
+
+    #[test]
+    fn http_rejects_malformed_headers() {
+        let request = b"POST /upnp/control/WANIPConn1 HTTP/1.1\r\nHost: router\r\nBroken-Header\r\nSOAPAction: \"urn:schemas-upnp-org:service:WANIPConnection:1#AddPortMapping\"\r\n\r\n";
+
+        let response = UpnpHandler::new().handle_http(request);
+
+        assert!(response.is_empty());
     }
 
     #[test]
