@@ -1,5 +1,6 @@
 use parking_lot::RwLock;
 use std::fs::File;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 
 use crate::prelude::*;
@@ -90,9 +91,9 @@ impl PcapWriter {
         if let Some(ref mut f) = *file {
             let ts_sec = packet.timestamp.timestamp() as u32;
             let ts_usec = packet.timestamp.timestamp_subsec_micros();
-            let data = &packet.payload;
+            let data = encode_raw_ip_packet(packet)?;
             let incl_len = data.len() as u32;
-            let orig_len = packet.length as u32;
+            let orig_len = incl_len;
 
             // Packet record header (16 bytes)
             f.write_all(&ts_sec.to_le_bytes())?;
@@ -100,7 +101,7 @@ impl PcapWriter {
             f.write_all(&incl_len.to_le_bytes())?;
             f.write_all(&orig_len.to_le_bytes())?;
             // Packet data
-            f.write_all(data)?;
+            f.write_all(&data)?;
         }
 
         Ok(())
@@ -145,6 +146,219 @@ impl PcapWriter {
         }
         Ok(())
     }
+}
+
+fn encode_raw_ip_packet(packet: &Packet) -> Result<Vec<u8>> {
+    let transport = encode_transport_segment(packet)?;
+    match (packet.five_tuple.src_ip, packet.five_tuple.dst_ip) {
+        (IpAddr::V4(src), IpAddr::V4(dst)) => encode_ipv4_packet(packet, src, dst, &transport),
+        (IpAddr::V6(src), IpAddr::V6(dst)) => encode_ipv6_packet(packet, src, dst, &transport),
+        _ => Err(Error::Packet(
+            "Cannot encode PCAP packet with mixed IPv4/IPv6 endpoints".into(),
+        )),
+    }
+}
+
+fn encode_transport_segment(packet: &Packet) -> Result<Vec<u8>> {
+    match packet.five_tuple.protocol {
+        Protocol::Tcp => encode_tcp_segment(packet),
+        Protocol::Udp => encode_udp_segment(packet),
+        Protocol::Icmp | Protocol::Igmp | Protocol::Unknown(_) => Ok(packet.payload.to_vec()),
+    }
+}
+
+fn encode_tcp_segment(packet: &Packet) -> Result<Vec<u8>> {
+    let payload = packet.payload.as_ref();
+    let segment_len = 20usize
+        .checked_add(payload.len())
+        .ok_or_else(|| Error::Packet("TCP segment length overflow".into()))?;
+    if segment_len > u16::MAX as usize {
+        return Err(Error::Packet(format!(
+            "TCP segment too large for PCAP raw IP encoding: {} bytes",
+            segment_len
+        )));
+    }
+
+    let mut segment = Vec::with_capacity(segment_len);
+    segment.extend_from_slice(&packet.five_tuple.src_port.to_be_bytes());
+    segment.extend_from_slice(&packet.five_tuple.dst_port.to_be_bytes());
+    segment.extend_from_slice(&0u32.to_be_bytes()); // sequence number
+    segment.extend_from_slice(&0u32.to_be_bytes()); // acknowledgement number
+    segment.push(5u8 << 4); // data offset, no options
+    let flags = packet
+        .tcp_flags
+        .unwrap_or_else(|| {
+            if payload.is_empty() {
+                TcpFlags::ACK
+            } else {
+                TcpFlags::PSH | TcpFlags::ACK
+            }
+        })
+        .bits();
+    segment.push(flags);
+    segment.extend_from_slice(&64240u16.to_be_bytes());
+    segment.extend_from_slice(&0u16.to_be_bytes()); // checksum placeholder
+    segment.extend_from_slice(&0u16.to_be_bytes()); // urgent pointer
+    segment.extend_from_slice(payload);
+
+    let checksum = transport_checksum(packet, 6, &segment)?;
+    segment[16..18].copy_from_slice(&checksum.to_be_bytes());
+
+    Ok(segment)
+}
+
+fn encode_udp_segment(packet: &Packet) -> Result<Vec<u8>> {
+    let payload = packet.payload.as_ref();
+    let udp_len = 8usize
+        .checked_add(payload.len())
+        .ok_or_else(|| Error::Packet("UDP segment length overflow".into()))?;
+    if udp_len > u16::MAX as usize {
+        return Err(Error::Packet(format!(
+            "UDP segment too large for PCAP raw IP encoding: {} bytes",
+            udp_len
+        )));
+    }
+
+    let mut segment = Vec::with_capacity(udp_len);
+    segment.extend_from_slice(&packet.five_tuple.src_port.to_be_bytes());
+    segment.extend_from_slice(&packet.five_tuple.dst_port.to_be_bytes());
+    segment.extend_from_slice(&(udp_len as u16).to_be_bytes());
+    segment.extend_from_slice(&0u16.to_be_bytes()); // checksum placeholder
+    segment.extend_from_slice(payload);
+
+    let checksum = transport_checksum(packet, 17, &segment)?;
+    segment[6..8].copy_from_slice(&checksum.to_be_bytes());
+
+    Ok(segment)
+}
+
+fn encode_ipv4_packet(
+    packet: &Packet,
+    src: Ipv4Addr,
+    dst: Ipv4Addr,
+    transport: &[u8],
+) -> Result<Vec<u8>> {
+    let total_len = 20usize
+        .checked_add(transport.len())
+        .ok_or_else(|| Error::Packet("IPv4 packet length overflow".into()))?;
+    if total_len > u16::MAX as usize {
+        return Err(Error::Packet(format!(
+            "IPv4 packet too large for PCAP raw IP encoding: {} bytes",
+            total_len
+        )));
+    }
+
+    let mut data = Vec::with_capacity(total_len);
+    data.push(0x45);
+    data.push(0);
+    data.extend_from_slice(&(total_len as u16).to_be_bytes());
+    data.extend_from_slice(&0u16.to_be_bytes()); // identification
+    data.extend_from_slice(&0u16.to_be_bytes()); // flags and fragment offset
+    data.push(64);
+    data.push(packet.five_tuple.protocol.to_ip_protocol());
+    data.extend_from_slice(&0u16.to_be_bytes()); // checksum placeholder
+    data.extend_from_slice(&src.octets());
+    data.extend_from_slice(&dst.octets());
+    let checksum = internet_checksum(&data[..20]);
+    data[10..12].copy_from_slice(&checksum.to_be_bytes());
+    data.extend_from_slice(transport);
+
+    Ok(data)
+}
+
+fn encode_ipv6_packet(
+    packet: &Packet,
+    src: Ipv6Addr,
+    dst: Ipv6Addr,
+    transport: &[u8],
+) -> Result<Vec<u8>> {
+    if transport.len() > u16::MAX as usize {
+        return Err(Error::Packet(format!(
+            "IPv6 payload too large for PCAP raw IP encoding: {} bytes",
+            transport.len()
+        )));
+    }
+
+    let mut data = Vec::with_capacity(40 + transport.len());
+    data.extend_from_slice(&[0x60, 0, 0, 0]);
+    data.extend_from_slice(&(transport.len() as u16).to_be_bytes());
+    data.push(packet.five_tuple.protocol.to_ip_protocol());
+    data.push(64);
+    data.extend_from_slice(&src.octets());
+    data.extend_from_slice(&dst.octets());
+    data.extend_from_slice(transport);
+
+    Ok(data)
+}
+
+fn transport_checksum(packet: &Packet, protocol: u8, segment: &[u8]) -> Result<u16> {
+    let checksum = match (packet.five_tuple.src_ip, packet.five_tuple.dst_ip) {
+        (IpAddr::V4(src), IpAddr::V4(dst)) => checksum_ipv4_pseudo(src, dst, protocol, segment)?,
+        (IpAddr::V6(src), IpAddr::V6(dst)) => checksum_ipv6_pseudo(src, dst, protocol, segment)?,
+        _ => {
+            return Err(Error::Packet(
+                "Cannot checksum transport segment with mixed IPv4/IPv6 endpoints".into(),
+            ));
+        }
+    };
+
+    Ok(if checksum == 0 { 0xffff } else { checksum })
+}
+
+fn checksum_ipv4_pseudo(src: Ipv4Addr, dst: Ipv4Addr, protocol: u8, segment: &[u8]) -> Result<u16> {
+    if segment.len() > u16::MAX as usize {
+        return Err(Error::Packet(format!(
+            "Transport segment too large for IPv4 pseudo-header: {} bytes",
+            segment.len()
+        )));
+    }
+
+    let mut bytes = Vec::with_capacity(12 + segment.len() + 1);
+    bytes.extend_from_slice(&src.octets());
+    bytes.extend_from_slice(&dst.octets());
+    bytes.push(0);
+    bytes.push(protocol);
+    bytes.extend_from_slice(&(segment.len() as u16).to_be_bytes());
+    bytes.extend_from_slice(segment);
+
+    Ok(internet_checksum(&bytes))
+}
+
+fn checksum_ipv6_pseudo(src: Ipv6Addr, dst: Ipv6Addr, protocol: u8, segment: &[u8]) -> Result<u16> {
+    if segment.len() > u32::MAX as usize {
+        return Err(Error::Packet(format!(
+            "Transport segment too large for IPv6 pseudo-header: {} bytes",
+            segment.len()
+        )));
+    }
+
+    let mut bytes = Vec::with_capacity(40 + segment.len() + 1);
+    bytes.extend_from_slice(&src.octets());
+    bytes.extend_from_slice(&dst.octets());
+    bytes.extend_from_slice(&(segment.len() as u32).to_be_bytes());
+    bytes.extend_from_slice(&[0, 0, 0]);
+    bytes.push(protocol);
+    bytes.extend_from_slice(segment);
+
+    Ok(internet_checksum(&bytes))
+}
+
+fn internet_checksum(data: &[u8]) -> u16 {
+    let mut sum: u32 = 0;
+    for chunk in data.chunks(2) {
+        let word = if chunk.len() == 2 {
+            u16::from_be_bytes([chunk[0], chunk[1]]) as u32
+        } else {
+            (chunk[0] as u32) << 8
+        };
+        sum = sum.wrapping_add(word);
+    }
+
+    while (sum >> 16) != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+
+    !(sum as u16)
 }
 
 pub struct PcapReader {
@@ -602,5 +816,48 @@ mod tests {
 
         assert!(packet.is_udp());
         assert_eq!(packet.payload.as_ref(), b"test");
+    }
+
+    #[test]
+    fn writer_encodes_payload_as_raw_ipv4_udp_packet() {
+        let path = std::env::temp_dir().join(format!(
+            "nettrap-pcap-write-{}-{}.pcap",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let writer = PcapWriter::new(path.display().to_string());
+        writer.open().expect("pcap writer should open");
+
+        let packet = Packet::new(
+            FiveTuple::new(
+                IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+                IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+                12345,
+                53,
+                Protocol::Udp,
+            ),
+            PacketDirection::Outbound,
+            bytes::Bytes::from_static(b"test"),
+        );
+        writer
+            .write_packet(&packet)
+            .expect("packet should be encoded");
+        writer.close();
+
+        let bytes = std::fs::read(&path).expect("pcap should be readable");
+        let record = &bytes[24 + 16..];
+        assert_eq!(record[0] >> 4, 4);
+        assert_eq!(record[9], 17);
+        assert_eq!(u16::from_be_bytes([record[20], record[21]]), 12345);
+        assert_eq!(u16::from_be_bytes([record[22], record[23]]), 53);
+        assert_eq!(&record[28..], b"test");
+
+        let packets = PcapReader::new(path.display().to_string())
+            .read_file()
+            .expect("writer output should parse");
+        assert_eq!(packets.len(), 1);
+        assert_eq!(packets[0].payload.as_ref(), b"test");
+
+        let _ = std::fs::remove_file(path);
     }
 }

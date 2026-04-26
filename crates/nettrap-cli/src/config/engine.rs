@@ -313,6 +313,7 @@ impl EngineConfig {
             "distributed.metrics_bind",
             self.distributed.metrics_bind.as_deref(),
         )?;
+        validate_output_format_setting(&self.output_format)?;
 
         Ok(())
     }
@@ -382,6 +383,7 @@ impl EngineConfig {
     }
 
     pub(crate) fn finalize_after_cli_overrides(&mut self) -> crate::Result<()> {
+        self.validate_global_settings()?;
         self.finalize_listener_names()?;
         Ok(())
     }
@@ -710,6 +712,13 @@ fn parse_bind_address(bind_address: &str) -> crate::Result<IpAddr> {
 
 fn validate_socket_addr_setting(setting_name: &str, value: Option<&str>) -> crate::Result<()> {
     parse_optional_socket_addr(setting_name, value).map(|_| ())
+}
+
+fn validate_output_format_setting(value: &str) -> crate::Result<()> {
+    value
+        .parse::<crate::output::OutputFormat>()
+        .map(|_| ())
+        .map_err(|err| crate::Error::Config(err.to_string()))
 }
 
 fn parse_optional_socket_addr(

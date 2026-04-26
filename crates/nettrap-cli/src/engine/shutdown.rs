@@ -109,10 +109,13 @@ fn export_nbi_formats(
             return;
         }
 
-        let format = config
-            .output_format
-            .parse::<crate::output::OutputFormat>()
-            .unwrap_or(crate::output::OutputFormat::Jsonl);
+        let format = match config.output_format.parse::<crate::output::OutputFormat>() {
+            Ok(format) => format,
+            Err(err) => {
+                tracing::warn!("Skipping NBI export: {}", err);
+                return;
+            }
+        };
 
         if format != crate::output::OutputFormat::Jsonl {
             let export_path = base_path.with_extension(format.extension());

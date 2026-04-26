@@ -334,8 +334,8 @@ nettrap tls status              # Show mkcert/TLS status
 nettrap tls install-mkcert      # Download & install mkcert
 nettrap tls install             # Install CA in system trust store
 nettrap tls generate <hosts>    # Generate certificate for hostnames
-nettrap pcap -i <file>          # Process PCAP file
-nettrap report -i <file>        # Generate report
+nettrap pcap -i <file>          # Offline PCAP processing is not implemented yet
+nettrap report -i <file>        # Export NBI report from JSON/JSONL input
 nettrap status [--json]         # Show engine status
 ```
 

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::net::{TcpListener, UdpSocket};
@@ -420,13 +420,117 @@ fn check_config_paths(paths: &[std::path::PathBuf]) -> crate::Result<()> {
 }
 
 fn handle_pcap(args: &crate::cli::PcapArgs, _verbose: bool) -> crate::Result<()> {
-    println!("Processing PCAP file: {}", args.input.display());
-    Ok(())
+    Err(crate::Error::Other(format!(
+        "Offline PCAP processing is not implemented yet for '{}'; use `nettrap run --pcap` to capture PCAP output",
+        args.input.display()
+    )))
 }
 
 fn handle_report(args: &crate::cli::ReportArgs) -> crate::Result<()> {
-    println!("Generating report from: {}", args.input.display());
+    let mut events = load_report_events(&args.input)?;
+    events.sort_by(|left, right| left.timestamp.cmp(&right.timestamp));
+
+    let format = match args.format.as_deref() {
+        Some(raw) => raw
+            .parse::<crate::output::OutputFormat>()
+            .map_err(|err| crate::Error::Config(err.to_string()))?,
+        None => args
+            .output
+            .as_deref()
+            .and_then(infer_report_format_from_path)
+            .unwrap_or(crate::output::OutputFormat::Json),
+    };
+
+    let output_path = args
+        .output
+        .clone()
+        .unwrap_or_else(|| args.input.with_extension(format.extension()));
+    crate::output::export_nbis(&events, format, &output_path)?;
+
+    println!(
+        "Report written to {} ({} event(s), {})",
+        output_path.display(),
+        events.len(),
+        format.extension()
+    );
     Ok(())
+}
+
+fn load_report_events(path: &Path) -> crate::Result<Vec<crate::nbi::NetworkBehaviorIndicator>> {
+    let content = std::fs::read_to_string(path)?;
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let parse_as_json_document = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+        || trimmed.starts_with('[')
+        || (trimmed.starts_with('{') && !trimmed.contains('\n'));
+
+    if parse_as_json_document {
+        let mut events = parse_report_json_document(trimmed).map_err(|err| {
+            crate::Error::Other(format!(
+                "Failed to parse report input '{}': {}",
+                path.display(),
+                err
+            ))
+        })?;
+        normalize_report_event_ids(&mut events);
+        return Ok(events);
+    }
+
+    let loaded = crate::output::load_nbis_from_jsonl_detailed(path);
+    if let Some(err) = loaded.read_error {
+        return Err(crate::Error::Other(format!(
+            "Failed to read report input '{}': {}",
+            path.display(),
+            err
+        )));
+    }
+    if loaded.invalid_lines > 0 {
+        return Err(crate::Error::Other(format!(
+            "Report input '{}' contains {} invalid JSONL line(s)",
+            path.display(),
+            loaded.invalid_lines
+        )));
+    }
+
+    Ok(loaded.events)
+}
+
+fn parse_report_json_document(
+    content: &str,
+) -> Result<Vec<crate::nbi::NetworkBehaviorIndicator>, serde_json::Error> {
+    if content.starts_with('[') {
+        serde_json::from_str(content)
+    } else {
+        serde_json::from_str(content).map(|event| vec![event])
+    }
+}
+
+fn normalize_report_event_ids(events: &mut [crate::nbi::NetworkBehaviorIndicator]) {
+    for event in events {
+        event.event_id = event.normalized_event_id();
+    }
+}
+
+fn infer_report_format_from_path(path: &Path) -> Option<crate::output::OutputFormat> {
+    let file_name = path.file_name()?.to_str()?.to_ascii_lowercase();
+    if file_name.ends_with(".sarif.json") {
+        return Some(crate::output::OutputFormat::Sarif);
+    }
+
+    match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+        "json" => Some(crate::output::OutputFormat::Json),
+        "jsonl" | "ndjson" => Some(crate::output::OutputFormat::Jsonl),
+        "sarif" => Some(crate::output::OutputFormat::Sarif),
+        "toon" => Some(crate::output::OutputFormat::Toon),
+        "csv" => Some(crate::output::OutputFormat::Csv),
+        _ => None,
+    }
 }
 
 fn handle_status(args: &crate::cli::StatusArgs) -> crate::Result<()> {
@@ -1126,6 +1230,62 @@ mod tests {
         apply_cli_overrides(&mut config, &args).expect("CLI overrides should apply");
 
         assert!(config.attribution_enabled);
+    }
+
+    #[test]
+    fn handle_pcap_returns_explicit_not_implemented_error() {
+        let args = crate::cli::PcapArgs {
+            input: PathBuf::from("capture.pcap"),
+            output: None,
+            live: false,
+        };
+
+        let err = handle_pcap(&args, false).expect_err("pcap command should fail explicitly");
+
+        assert!(err.to_string().contains("not implemented yet"));
+    }
+
+    #[test]
+    fn handle_report_exports_jsonl_input() {
+        let dir = std::env::temp_dir();
+        let input = dir.join(format!(
+            "nettrap-report-input-{}.jsonl",
+            uuid::Uuid::new_v4()
+        ));
+        let output = dir.join(format!(
+            "nettrap-report-output-{}.csv",
+            uuid::Uuid::new_v4()
+        ));
+        let destination = crate::session::SessionDestination::unknown(8080);
+        let event = crate::nbi::raw_nbi("raw", "127.0.0.1", 12345, &destination, 4, "74657374");
+        fs::write(&input, format!("{}\n", event.to_json())).expect("write JSONL input");
+
+        let args = crate::cli::ReportArgs {
+            input: input.clone(),
+            output: Some(output.clone()),
+            format: None,
+        };
+
+        handle_report(&args).expect("report export should succeed");
+
+        let csv = fs::read_to_string(&output).expect("report output should be readable");
+        assert!(csv.contains("RAW"));
+        assert!(csv.contains("127.0.0.1"));
+
+        let _ = fs::remove_file(input);
+        let _ = fs::remove_file(output);
+    }
+
+    #[test]
+    fn finalize_after_cli_overrides_rejects_invalid_output_format() {
+        let mut config = EngineConfig::default();
+        config.output_format = "xml".to_string();
+
+        let err = config
+            .finalize_after_cli_overrides()
+            .expect_err("invalid output format should be rejected");
+
+        assert!(err.to_string().contains("unsupported output format 'xml'"));
     }
 
     #[test]

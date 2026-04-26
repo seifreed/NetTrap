@@ -264,6 +264,57 @@ fn is_grease(value: u16) -> bool {
     (value & 0x0f0f) == 0x0a0a
 }
 
+fn extract_sni_from_extension(ext_data: &[u8]) -> Option<String> {
+    if ext_data.len() < 5 {
+        return None;
+    }
+
+    let list_len = u16::from_be_bytes([ext_data[0], ext_data[1]]) as usize;
+    let list_end = 2usize.checked_add(list_len)?;
+    if list_end > ext_data.len() {
+        return None;
+    }
+
+    let name_type = ext_data[2];
+    if name_type != 0 {
+        return None;
+    }
+
+    let name_len = u16::from_be_bytes([ext_data[3], ext_data[4]]) as usize;
+    let name_start = 5usize;
+    let name_end = name_start.checked_add(name_len)?;
+    if name_len == 0 || name_end > list_end {
+        return None;
+    }
+
+    std::str::from_utf8(&ext_data[name_start..name_end])
+        .ok()
+        .map(str::to_string)
+}
+
+fn extract_alpn_from_extension(ext_data: &[u8]) -> Option<String> {
+    if ext_data.len() < 3 {
+        return None;
+    }
+
+    let list_len = u16::from_be_bytes([ext_data[0], ext_data[1]]) as usize;
+    let list_end = 2usize.checked_add(list_len)?;
+    if list_end > ext_data.len() {
+        return None;
+    }
+
+    let proto_len = ext_data[2] as usize;
+    let proto_start = 3usize;
+    let proto_end = proto_start.checked_add(proto_len)?;
+    if proto_len == 0 || proto_end > list_end {
+        return None;
+    }
+
+    std::str::from_utf8(&ext_data[proto_start..proto_end])
+        .ok()
+        .map(str::to_string)
+}
+
 /// Calculate JA4 from raw ClientHello bytes
 pub fn ja4_from_handshake(data: &[u8]) -> Option<String> {
     if data.len() < 11 || data[0] != 0x16 || data[5] != 0x01 {
@@ -338,19 +389,13 @@ pub fn ja4_from_handshake(data: &[u8]) -> Option<String> {
         let ext_data = &data[ext_data_start..ext_data_end];
 
         // Extract SNI (type 0x0000)
-        if ext_type == 0x0000 && ext_data.len() >= 5 {
-            let name_len = u16::from_be_bytes([ext_data[3], ext_data[4]]) as usize;
-            if 5 + name_len <= ext_data.len() {
-                sni = String::from_utf8(ext_data[5..5 + name_len].to_vec()).ok();
-            }
+        if ext_type == 0x0000 {
+            sni = extract_sni_from_extension(ext_data);
         }
 
         // Extract ALPN (type 0x0010)
-        if ext_type == 0x0010 && ext_data.len() >= 3 {
-            let proto_len = ext_data[2] as usize;
-            if 3 + proto_len <= ext_data.len() {
-                alpn = String::from_utf8(ext_data[3..3 + proto_len].to_vec()).ok();
-            }
+        if ext_type == 0x0010 {
+            alpn = extract_alpn_from_extension(ext_data);
         }
 
         // Extract supported_versions (type 0x002b) for actual TLS version
@@ -376,4 +421,104 @@ pub fn ja4_from_handshake(data: &[u8]) -> Option<String> {
         alpn.as_deref(),
         false, // TCP, not QUIC
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn extension(ext_type: u16, data: &[u8]) -> Vec<u8> {
+        let mut ext = Vec::new();
+        ext.extend_from_slice(&ext_type.to_be_bytes());
+        ext.extend_from_slice(&(data.len() as u16).to_be_bytes());
+        ext.extend_from_slice(data);
+        ext
+    }
+
+    fn sni_extension(hostname: &str) -> Vec<u8> {
+        let host = hostname.as_bytes();
+        let list_len = 1 + 2 + host.len();
+        let mut data = Vec::new();
+        data.extend_from_slice(&(list_len as u16).to_be_bytes());
+        data.push(0);
+        data.extend_from_slice(&(host.len() as u16).to_be_bytes());
+        data.extend_from_slice(host);
+        extension(0x0000, &data)
+    }
+
+    fn alpn_extension(protocol: &str) -> Vec<u8> {
+        let protocol = protocol.as_bytes();
+        let list_len = 1 + protocol.len();
+        let mut data = Vec::new();
+        data.extend_from_slice(&(list_len as u16).to_be_bytes());
+        data.push(protocol.len() as u8);
+        data.extend_from_slice(protocol);
+        extension(0x0010, &data)
+    }
+
+    fn client_hello(extensions: &[Vec<u8>]) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&0x0303u16.to_be_bytes());
+        body.extend_from_slice(&[0u8; 32]);
+        body.push(0); // empty session id
+        body.extend_from_slice(&2u16.to_be_bytes());
+        body.extend_from_slice(&0x1301u16.to_be_bytes());
+        body.push(1);
+        body.push(0);
+
+        let ext_len: usize = extensions.iter().map(Vec::len).sum();
+        body.extend_from_slice(&(ext_len as u16).to_be_bytes());
+        for ext in extensions {
+            body.extend_from_slice(ext);
+        }
+
+        let handshake_len = body.len();
+        let record_len = handshake_len + 4;
+        let mut record = Vec::new();
+        record.push(0x16);
+        record.extend_from_slice(&0x0303u16.to_be_bytes());
+        record.extend_from_slice(&(record_len as u16).to_be_bytes());
+        record.push(0x01);
+        record.push(((handshake_len >> 16) & 0xff) as u8);
+        record.push(((handshake_len >> 8) & 0xff) as u8);
+        record.push((handshake_len & 0xff) as u8);
+        record.extend_from_slice(&body);
+        record
+    }
+
+    #[test]
+    fn ja4_extracts_valid_sni_and_alpn() {
+        let hello = client_hello(&[sni_extension("example.test"), alpn_extension("h2")]);
+        let ja4 = ja4_from_handshake(&hello).expect("valid ClientHello should fingerprint");
+
+        assert!(ja4.starts_with("t12d0102h2_"));
+    }
+
+    #[test]
+    fn ja4_rejects_sni_outside_declared_server_name_list() {
+        let host = b"example.test";
+        let mut data = Vec::new();
+        data.extend_from_slice(&3u16.to_be_bytes());
+        data.push(0);
+        data.extend_from_slice(&(host.len() as u16).to_be_bytes());
+        data.extend_from_slice(host);
+
+        let hello = client_hello(&[extension(0x0000, &data)]);
+        let ja4 = ja4_from_handshake(&hello).expect("malformed SNI should not abort JA4");
+
+        assert!(ja4.starts_with("t12i010100_"));
+    }
+
+    #[test]
+    fn ja4_rejects_alpn_outside_declared_protocol_list() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&1u16.to_be_bytes());
+        data.push(2);
+        data.extend_from_slice(b"h2");
+
+        let hello = client_hello(&[sni_extension("example.test"), extension(0x0010, &data)]);
+        let ja4 = ja4_from_handshake(&hello).expect("malformed ALPN should not abort JA4");
+
+        assert!(ja4.starts_with("t12d010200_"));
+    }
 }

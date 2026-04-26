@@ -1,5 +1,6 @@
 use crate::nbi::NetworkBehaviorIndicator;
 use serde::Serialize;
+use std::fmt;
 use std::path::Path;
 
 /// Supported output formats
@@ -24,17 +25,47 @@ impl OutputFormat {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputFormatParseError {
+    value: String,
+}
+
+impl OutputFormatParseError {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self {
+            value: value.into(),
+        }
+    }
+}
+
+impl fmt::Display for OutputFormatParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "unsupported output format '{}'; expected one of: {}",
+            self.value,
+            supported_output_formats()
+        )
+    }
+}
+
+impl std::error::Error for OutputFormatParseError {}
+
+pub fn supported_output_formats() -> &'static str {
+    "json, jsonl, ndjson, sarif, toon, csv"
+}
+
 impl std::str::FromStr for OutputFormat {
-    type Err = std::convert::Infallible;
+    type Err = OutputFormatParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let format = match s.to_lowercase().as_str() {
+        let format = match s.trim().to_lowercase().as_str() {
             "json" => Self::Json,
             "jsonl" | "ndjson" => Self::Jsonl,
             "sarif" => Self::Sarif,
             "toon" => Self::Toon,
             "csv" => Self::Csv,
-            _ => Self::Jsonl,
+            _ => return Err(OutputFormatParseError::new(s)),
         };
         Ok(format)
     }
@@ -552,6 +583,18 @@ mod tests {
     use super::*;
     use crate::nbi::raw_nbi;
     use crate::session::SessionDestination;
+
+    #[test]
+    fn output_format_rejects_unknown_values() {
+        assert_eq!("json".parse::<OutputFormat>().unwrap(), OutputFormat::Json);
+        assert_eq!(
+            "ndjson".parse::<OutputFormat>().unwrap(),
+            OutputFormat::Jsonl
+        );
+
+        let err = "xml".parse::<OutputFormat>().unwrap_err();
+        assert!(err.to_string().contains("unsupported output format 'xml'"));
+    }
 
     #[test]
     fn detailed_jsonl_loader_reports_invalid_lines() {

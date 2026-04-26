@@ -6,6 +6,8 @@ use rcgen::{
 };
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use x509_parser::pem::parse_x509_pem;
+use x509_parser::prelude::parse_x509_certificate;
 
 #[allow(unused_imports)]
 use std::sync::Arc;
@@ -122,6 +124,7 @@ impl CertificateAuthority {
 
         let key_pair = KeyPair::from_pem(&key_pem)
             .map_err(|e| Error::Tls(format!("Failed to load CA key: {}", e)))?;
+        validate_ca_key_matches_cert(&cert_pem, &key_pair)?;
 
         let params = CertificateParams::from_ca_cert_pem(&cert_pem)
             .map_err(|e| Error::Tls(format!("Failed to parse CA certificate: {}", e)))?;
@@ -252,13 +255,29 @@ impl CertificateAuthority {
     }
 }
 
+fn validate_ca_key_matches_cert(cert_pem: &str, key_pair: &KeyPair) -> Result<()> {
+    let (_, pem) = parse_x509_pem(cert_pem.as_bytes())
+        .map_err(|e| Error::Tls(format!("Failed to parse CA certificate PEM: {}", e)))?;
+    let (_, cert) = parse_x509_certificate(&pem.contents)
+        .map_err(|e| Error::Tls(format!("Failed to parse CA certificate DER: {}", e)))?;
+
+    let cert_public_key = cert.public_key().raw;
+    let key_public_key = key_pair.public_key_der();
+    if cert_public_key != key_public_key.as_slice() {
+        return Err(Error::Tls(
+            "CA certificate public key does not match CA private key".into(),
+        ));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rcgen::{BasicConstraints, DnType, IsCa};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use x509_parser::pem::parse_x509_pem;
-    use x509_parser::prelude::*;
 
     static TEST_DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -330,5 +349,25 @@ mod tests {
         assert_eq!(common_name(&leaf_pem, false), "example.test");
 
         let _ = std::fs::remove_dir_all(cert_path.parent().expect("temp path should have parent"));
+    }
+
+    #[test]
+    fn from_pem_files_rejects_mismatched_ca_key() {
+        let (cert_path, _key_path, _original_pem) = write_test_ca("Trusted Test CA");
+        let (_other_cert_path, other_key_path, _other_pem) = write_test_ca("Other Test CA");
+
+        let err = match CertificateAuthority::from_pem_files(&cert_path, &other_key_path) {
+            Ok(_) => panic!("mismatched CA key should be rejected"),
+            Err(err) => err,
+        };
+
+        assert!(err.to_string().contains("does not match CA private key"));
+
+        let _ = std::fs::remove_dir_all(cert_path.parent().expect("temp path should have parent"));
+        let _ = std::fs::remove_dir_all(
+            other_key_path
+                .parent()
+                .expect("temp path should have parent"),
+        );
     }
 }
