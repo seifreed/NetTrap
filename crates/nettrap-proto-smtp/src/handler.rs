@@ -71,22 +71,24 @@ impl SmtpHandler {
         let decoded = BASE64.decode(data.trim()).ok()?;
         // PLAIN format: \0authzid\0authcid\0passwd  or  authzid\0authcid\0passwd
         let parts: Vec<&[u8]> = decoded.split(|&b| b == 0).collect();
-        if parts.len() >= 3 {
-            let user = String::from_utf8_lossy(parts[1]).to_string();
-            let pass = String::from_utf8_lossy(parts[2]).to_string();
-            Some((user, pass))
+        let (user, pass) = if parts.len() >= 3 {
+            (parts[1], parts[2])
         } else if parts.len() == 2 {
-            let user = String::from_utf8_lossy(parts[0]).to_string();
-            let pass = String::from_utf8_lossy(parts[1]).to_string();
-            Some((user, pass))
+            (parts[0], parts[1])
         } else {
-            None
-        }
+            return None;
+        };
+        let user = String::from_utf8_lossy(user).to_string();
+        let pass = String::from_utf8_lossy(pass).to_string();
+        (!user.is_empty() && !pass.is_empty()).then_some((user, pass))
     }
 
     /// Decode AUTH LOGIN credentials (base64 encoded username or password)
     fn decode_auth_login(data: &str) -> Option<String> {
         let decoded = BASE64.decode(data.trim()).ok()?;
+        if decoded.is_empty() {
+            return None;
+        }
         Some(String::from_utf8_lossy(&decoded).to_string())
     }
 
@@ -95,8 +97,13 @@ impl SmtpHandler {
         let decoded = BASE64.decode(data.trim()).ok()?;
         let text = String::from_utf8_lossy(&decoded);
         let mut parts = text.splitn(2, ' ');
-        let user = parts.next()?.to_string();
-        let digest = parts.next().unwrap_or("").to_string();
+        let user = parts.next()?.trim();
+        let digest = parts.next()?.trim();
+        if user.is_empty() || digest.is_empty() {
+            return None;
+        }
+        let user = user.to_string();
+        let digest = digest.to_string();
         Some((user, digest))
     }
 
@@ -113,13 +120,19 @@ impl SmtpHandler {
         verb.to_ascii_uppercase()
     }
 
-    fn rest_starts_with_keyword(rest: &str, keyword: &str) -> bool {
-        let first = rest
-            .trim_start()
-            .split(|ch: char| ch == ':' || ch.is_whitespace())
-            .next()
-            .unwrap_or_default();
-        first.eq_ignore_ascii_case(keyword)
+    fn has_strict_path_argument(rest: &str, keyword: &str) -> bool {
+        let Some((head, path)) = rest.split_once(':') else {
+            return false;
+        };
+        if !head.eq_ignore_ascii_case(keyword) || !path.starts_with('<') || !path.ends_with('>') {
+            return false;
+        }
+        let address = &path[1..path.len() - 1];
+        !address.trim().is_empty()
+    }
+
+    fn invalid_auth_response() -> SmtpResponse {
+        SmtpResponse::new(535, "5.7.8 Authentication credentials invalid")
     }
 
     fn is_known_smtp_command(command: &str) -> bool {
@@ -191,13 +204,14 @@ impl SmtpHandler {
                             user
                         );
                     }
+                    (
+                        SmtpResponse::new(235, "2.7.0 Authentication successful"),
+                        SmtpAuthState::None,
+                    )
                 } else {
                     tracing::info!("SMTP AUTH PLAIN captured (decode failed): {}", trimmed);
+                    (Self::invalid_auth_response(), SmtpAuthState::None)
                 }
-                (
-                    SmtpResponse::new(235, "2.7.0 Authentication successful"),
-                    SmtpAuthState::None,
-                )
             }
             SmtpAuthState::LoginUsername => {
                 if is_smtp_command {
@@ -208,8 +222,9 @@ impl SmtpHandler {
                     );
                 }
                 // Client sending base64-encoded username
-                let username =
-                    Self::decode_auth_login(trimmed).unwrap_or_else(|| trimmed.to_string());
+                let Some(username) = Self::decode_auth_login(trimmed) else {
+                    return (Self::invalid_auth_response(), SmtpAuthState::None);
+                };
                 tracing::info!("SMTP AUTH LOGIN username: {}", username);
                 (
                     SmtpResponse::new(334, "UGFzc3dvcmQ6"),
@@ -225,8 +240,9 @@ impl SmtpHandler {
                     );
                 }
                 // Client sending base64-encoded password
-                let password =
-                    Self::decode_auth_login(trimmed).unwrap_or_else(|| trimmed.to_string());
+                let Some(password) = Self::decode_auth_login(trimmed) else {
+                    return (Self::invalid_auth_response(), SmtpAuthState::None);
+                };
                 if self.log_credentials {
                     tracing::info!(
                         "SMTP AUTH LOGIN captured — user: {} pass: {}",
@@ -260,17 +276,18 @@ impl SmtpHandler {
                         user,
                         digest
                     );
+                    (
+                        SmtpResponse::new(235, "2.7.0 Authentication successful"),
+                        SmtpAuthState::None,
+                    )
                 } else {
                     tracing::info!(
                         "SMTP AUTH {} response captured (raw): {}",
                         mechanism,
                         trimmed
                     );
+                    (Self::invalid_auth_response(), SmtpAuthState::None)
                 }
-                (
-                    SmtpResponse::new(235, "2.7.0 Authentication successful"),
-                    SmtpAuthState::None,
-                )
             }
             SmtpAuthState::None => {
                 // No pending state, handle as normal command
@@ -300,13 +317,35 @@ impl SmtpHandler {
                 SmtpResponse::ok()
             };
             (resp, SmtpAuthState::None)
-        } else if (verb == "MAIL" && Self::rest_starts_with_keyword(rest, "FROM"))
-            || (verb == "RCPT" && Self::rest_starts_with_keyword(rest, "TO"))
-            || verb == "RSET"
-            || verb == "NOOP"
-            || verb == "VRFY"
-        {
+        } else if verb == "MAIL" {
+            if Self::has_strict_path_argument(rest, "FROM") {
+                (SmtpResponse::ok(), SmtpAuthState::None)
+            } else {
+                (
+                    SmtpResponse::new(501, "5.5.4 Syntax error in parameters"),
+                    SmtpAuthState::None,
+                )
+            }
+        } else if verb == "RCPT" {
+            if Self::has_strict_path_argument(rest, "TO") {
+                (SmtpResponse::ok(), SmtpAuthState::None)
+            } else {
+                (
+                    SmtpResponse::new(501, "5.5.4 Syntax error in parameters"),
+                    SmtpAuthState::None,
+                )
+            }
+        } else if verb == "RSET" || verb == "NOOP" {
             (SmtpResponse::ok(), SmtpAuthState::None)
+        } else if verb == "VRFY" {
+            if rest.is_empty() {
+                (
+                    SmtpResponse::new(501, "5.5.4 Syntax error in parameters"),
+                    SmtpAuthState::None,
+                )
+            } else {
+                (SmtpResponse::ok(), SmtpAuthState::None)
+            }
         } else if verb == "DATA" {
             if !rest.is_empty() {
                 return (
@@ -529,11 +568,83 @@ mod tests {
     }
 
     #[test]
+    fn mail_and_rcpt_require_strict_path_syntax() {
+        let handler = SmtpHandler::new();
+
+        let (response, state) =
+            handler.handle_with_state("MAIL FROM:<a@example.test>", SmtpAuthState::None);
+        assert!(matches!(state, SmtpAuthState::None));
+        assert_eq!(response.to_bytes(), b"250 OK\r\n");
+
+        for command in [
+            "MAIL FROM",
+            "MAIL FROM:",
+            "MAIL FROM <a@example.test>",
+            "RCPT TO",
+            "RCPT TO:",
+            "RCPT TO <b@example.test>",
+        ] {
+            let (response, state) = handler.handle_with_state(command, SmtpAuthState::None);
+            assert!(matches!(state, SmtpAuthState::None));
+            assert_eq!(
+                response.to_bytes(),
+                b"501 5.5.4 Syntax error in parameters\r\n",
+                "{command}"
+            );
+        }
+
+        let (response, state) =
+            handler.handle_with_state("RCPT TO:<b@example.test>", SmtpAuthState::None);
+        assert!(matches!(state, SmtpAuthState::None));
+        assert_eq!(response.to_bytes(), b"250 OK\r\n");
+    }
+
+    #[test]
+    fn vrfy_requires_argument() {
+        let handler = SmtpHandler::new();
+
+        let (response, state) = handler.handle_with_state("VRFY", SmtpAuthState::None);
+        assert!(matches!(state, SmtpAuthState::None));
+        assert_eq!(
+            response.to_bytes(),
+            b"501 5.5.4 Syntax error in parameters\r\n"
+        );
+
+        let (response, state) = handler.handle_with_state("VRFY root", SmtpAuthState::None);
+        assert!(matches!(state, SmtpAuthState::None));
+        assert_eq!(response.to_bytes(), b"250 OK\r\n");
+    }
+
+    #[test]
     fn auth_plain_invalid_base64_does_not_authenticate() {
         let handler = SmtpHandler::new();
 
         let (response, state) = handler.handle_with_state("AUTH PLAIN !!!", SmtpAuthState::None);
 
+        assert!(matches!(state, SmtpAuthState::None));
+        assert_eq!(
+            response.to_bytes(),
+            b"535 5.7.8 Authentication credentials invalid\r\n"
+        );
+    }
+
+    #[test]
+    fn auth_plain_continuation_rejects_invalid_or_incomplete_credentials() {
+        let handler = SmtpHandler::new();
+
+        let (response, state) = handler.handle_with_state("AUTH PLAIN", SmtpAuthState::None);
+        assert_eq!(response.to_bytes(), b"334 \r\n");
+        assert!(matches!(state, SmtpAuthState::PlainContinuation));
+
+        let (response, state) = handler.handle_with_state("!!!", state);
+        assert!(matches!(state, SmtpAuthState::None));
+        assert_eq!(
+            response.to_bytes(),
+            b"535 5.7.8 Authentication credentials invalid\r\n"
+        );
+
+        let (_, state) = handler.handle_with_state("AUTH PLAIN", SmtpAuthState::None);
+        let (response, state) = handler.handle_with_state("dXNlcg==", state);
         assert!(matches!(state, SmtpAuthState::None));
         assert_eq!(
             response.to_bytes(),
@@ -550,5 +661,60 @@ mod tests {
 
         assert_eq!(response.to_bytes(), b"334 UGFzc3dvcmQ6\r\n");
         assert!(matches!(state, SmtpAuthState::LoginPassword(username) if username == "user"));
+    }
+
+    #[test]
+    fn auth_login_continuation_rejects_invalid_base64() {
+        let handler = SmtpHandler::new();
+
+        let (response, state) = handler.handle_with_state("AUTH LOGIN", SmtpAuthState::None);
+        assert_eq!(response.to_bytes(), b"334 VXNlcm5hbWU6\r\n");
+        assert!(matches!(state, SmtpAuthState::LoginUsername));
+
+        let (response, state) = handler.handle_with_state("!!!", state);
+        assert!(matches!(state, SmtpAuthState::None));
+        assert_eq!(
+            response.to_bytes(),
+            b"535 5.7.8 Authentication credentials invalid\r\n"
+        );
+
+        let (response, state) =
+            handler.handle_with_state("AUTH LOGIN dXNlcg==", SmtpAuthState::None);
+        assert_eq!(response.to_bytes(), b"334 UGFzc3dvcmQ6\r\n");
+        assert!(matches!(state, SmtpAuthState::LoginPassword(ref username) if username == "user"));
+
+        let (response, state) = handler.handle_with_state("!!!", state);
+        assert!(matches!(state, SmtpAuthState::None));
+        assert_eq!(
+            response.to_bytes(),
+            b"535 5.7.8 Authentication credentials invalid\r\n"
+        );
+    }
+
+    #[test]
+    fn cram_auth_requires_user_and_digest_response() {
+        let handler = SmtpHandler::new();
+
+        let (response, state) = handler.handle_with_state("AUTH CRAM-MD5", SmtpAuthState::None);
+        assert_eq!(response.code, 334);
+        assert!(
+            matches!(state, SmtpAuthState::CramResponse(ref mechanism) if mechanism == "CRAM-MD5")
+        );
+
+        let (response, state) = handler.handle_with_state("dXNlcg==", state);
+        assert!(matches!(state, SmtpAuthState::None));
+        assert_eq!(
+            response.to_bytes(),
+            b"535 5.7.8 Authentication credentials invalid\r\n"
+        );
+
+        let valid = BASE64.encode(b"user abcdef");
+        let (_, state) = handler.handle_with_state("AUTH CRAM-SHA1", SmtpAuthState::None);
+        let (response, state) = handler.handle_with_state(&valid, state);
+        assert!(matches!(state, SmtpAuthState::None));
+        assert_eq!(
+            response.to_bytes(),
+            b"235 2.7.0 Authentication successful\r\n"
+        );
     }
 }

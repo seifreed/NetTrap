@@ -465,9 +465,17 @@ impl FtpHandler {
         let verb = command_verb(command);
 
         if verb == "USER" {
-            FtpResponse::new(331, "Username OK, need password")
+            if command_arg(command).is_empty() {
+                FtpResponse::new(501, "Missing argument")
+            } else {
+                FtpResponse::new(331, "Username OK, need password")
+            }
         } else if verb == "PASS" {
-            FtpResponse::new(230, "User logged in")
+            if command_arg(command).is_empty() {
+                FtpResponse::new(501, "Missing argument")
+            } else {
+                FtpResponse::new(230, "User logged in")
+            }
         } else if verb == "PWD" {
             FtpResponse::new(257, "/")
         } else if verb == "TYPE" {
@@ -563,7 +571,7 @@ impl FtpHandler {
         } else if verb == "QUIT" {
             FtpResponse::new(221, "Goodbye")
         } else {
-            FtpResponse::new(200, "OK")
+            FtpResponse::new(502, "Command not implemented")
         }
     }
 
@@ -902,6 +910,27 @@ mod tests {
 
         let response = handler.handle("PASVXYZ");
         assert_ne!(response.code, 227);
+    }
+
+    #[test]
+    fn unknown_commands_are_not_successful() {
+        let response = FtpHandler::new().handle("INVALID");
+
+        assert_eq!(response.code, 502);
+        assert_eq!(response.message, "Command not implemented");
+    }
+
+    #[test]
+    fn user_and_pass_require_arguments() {
+        let handler = FtpHandler::new();
+
+        let user = handler.handle("USER");
+        assert_eq!(user.code, 501);
+        assert_eq!(user.message, "Missing argument");
+
+        let pass = handler.handle("PASS");
+        assert_eq!(pass.code, 501);
+        assert_eq!(pass.message, "Missing argument");
     }
 
     #[cfg(unix)]

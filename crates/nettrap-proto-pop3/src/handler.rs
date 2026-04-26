@@ -122,7 +122,9 @@ impl Pop3Handler {
             Pop3Response::ok(format!("{} {}", self.emails.len(), total_size))
         } else if verb == "LIST" {
             if parts.len() > 1 {
-                if let Ok(idx) = parts[1].parse::<usize>() {
+                if parts.len() > 2 {
+                    Pop3Response::err("Invalid argument")
+                } else if let Ok(idx) = parts[1].parse::<usize>() {
                     if idx > 0 && idx <= self.emails.len() {
                         Pop3Response::ok(format!("{} {}", idx, self.emails[idx - 1].size))
                     } else {
@@ -142,7 +144,9 @@ impl Pop3Handler {
         } else if verb == "RETR" {
             tracing::info!("POP3 RETR command received (stateless handler)");
             if parts.len() > 1 {
-                if let Ok(idx) = parts[1].parse::<usize>() {
+                if parts.len() > 2 {
+                    Pop3Response::err("Invalid argument")
+                } else if let Ok(idx) = parts[1].parse::<usize>() {
                     if idx > 0 && idx <= self.emails.len() {
                         let email = &self.emails[idx - 1];
                         let mut response = format!("+OK {} octets\r\n", email.size);
@@ -193,7 +197,9 @@ impl Pop3Handler {
             }
         } else if verb == "UIDL" {
             if parts.len() > 1 {
-                if let Ok(idx) = parts[1].parse::<usize>() {
+                if parts.len() > 2 {
+                    Pop3Response::err("Invalid argument")
+                } else if let Ok(idx) = parts[1].parse::<usize>() {
                     if idx > 0 && idx <= self.emails.len() {
                         Pop3Response::ok(format!("{} nettrap-msg-{}", idx, idx))
                     } else {
@@ -213,6 +219,9 @@ impl Pop3Handler {
         } else if verb == "AUTH" {
             return self.handle_auth_command(&parts);
         } else if verb == "APOP" {
+            if parts.len() > 3 {
+                return Ok((Pop3Response::err("Invalid argument"), Pop3AuthState::None));
+            }
             let Some(user) = parts.get(1).filter(|value| !value.is_empty()) else {
                 return Ok((Pop3Response::err("Missing argument"), Pop3AuthState::None));
             };
@@ -520,6 +529,23 @@ mod tests {
         let missing_digest =
             block_on(handler.handle("APOP user")).expect("missing digest response");
         assert_eq!(missing_digest.to_bytes(), b"-ERR Missing argument\r\n");
+    }
+
+    #[test]
+    fn message_commands_and_apop_reject_extra_arguments() {
+        let handler = Pop3Handler::new();
+
+        let list = block_on(handler.handle("LIST 1 extra")).expect("LIST extra response");
+        assert_eq!(list.to_bytes(), b"-ERR Invalid argument\r\n");
+
+        let uidl = block_on(handler.handle("UIDL 1 extra")).expect("UIDL extra response");
+        assert_eq!(uidl.to_bytes(), b"-ERR Invalid argument\r\n");
+
+        let retr = block_on(handler.handle("RETR 1 extra")).expect("RETR extra response");
+        assert_eq!(retr.to_bytes(), b"-ERR Invalid argument\r\n");
+
+        let apop = block_on(handler.handle("APOP user digest extra")).expect("APOP extra response");
+        assert_eq!(apop.to_bytes(), b"-ERR Invalid argument\r\n");
     }
 
     #[test]

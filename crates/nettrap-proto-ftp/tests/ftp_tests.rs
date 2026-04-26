@@ -78,7 +78,7 @@ mod tests {
     fn test_ftp_unknown_command() {
         let handler = FtpHandler::new();
         let response = handler.handle("INVALID");
-        assert_eq!(response.code, 200);
+        assert_eq!(response.code, 502);
     }
 
     #[test]

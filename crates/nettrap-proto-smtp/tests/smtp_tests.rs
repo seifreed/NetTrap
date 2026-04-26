@@ -29,7 +29,7 @@ mod tests {
     #[tokio::test]
     async fn test_smtp_mail_from() {
         let handler = SmtpHandler::new();
-        let result = handler.handle("MAIL FROM: <test@example.com>").await;
+        let result = handler.handle("MAIL FROM:<test@example.com>").await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().code, 250);
     }
@@ -37,7 +37,7 @@ mod tests {
     #[tokio::test]
     async fn test_smtp_rcpt_to() {
         let handler = SmtpHandler::new();
-        let result = handler.handle("RCPT TO: <user@example.com>").await;
+        let result = handler.handle("RCPT TO:<user@example.com>").await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().code, 250);
     }
