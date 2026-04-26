@@ -91,6 +91,9 @@ impl SocksHandler {
             let Some((dest, port_offset, reply_atyp)) = Self::parse_socks5_address(data) else {
                 return Vec::new();
             };
+            if port_offset.checked_add(2) != Some(data.len()) {
+                return Vec::new();
+            }
             let port = u16::from_be_bytes([data[port_offset], data[port_offset + 1]]);
 
             match cmd {
@@ -258,7 +261,7 @@ mod tests {
     fn socks5_connect_accepts_complete_domain_request() {
         let handler = SocksHandler::new();
         let request = [
-            0x05, 0x01, 0x00, 0x03, 0x0b, b'e', b'x', b'a', b'm', b'p', b'l', b'e', b'.', b't',
+            0x05, 0x01, 0x00, 0x03, 0x0c, b'e', b'x', b'a', b'm', b'p', b'l', b'e', b'.', b't',
             b'e', b's', b't', 0x00, 0x50,
         ];
 
@@ -266,6 +269,17 @@ mod tests {
             handler.handle(&request),
             vec![0x05, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
         );
+    }
+
+    #[test]
+    fn socks5_connect_rejects_trailing_bytes_after_declared_address() {
+        let handler = SocksHandler::new();
+        let request = [
+            0x05, 0x01, 0x00, 0x03, 0x0c, b'e', b'x', b'a', b'm', b'p', b'l', b'e', b'.', b't',
+            b'e', b's', b't', 0x00, 0x50, 0x05,
+        ];
+
+        assert!(handler.handle(&request).is_empty());
     }
 
     #[test]

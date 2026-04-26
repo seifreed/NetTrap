@@ -267,6 +267,24 @@ mod tests {
     }
 
     #[test]
+    fn parse_rejects_transfer_encoding_with_content_length() {
+        let request = b"POST /upload HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\nContent-Length: 14\r\n\r\n4\r\ntest\r\n0\r\n\r\n";
+
+        let parsed = HttpRequest::parse(request).expect("parser should not error");
+
+        assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn parse_rejects_chunked_when_not_final_transfer_coding() {
+        let request = b"POST /upload HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: chunked, gzip\r\n\r\n4\r\ntest\r\n0\r\n\r\n";
+
+        let parsed = HttpRequest::parse(request).expect("parser should not error");
+
+        assert!(parsed.is_none());
+    }
+
+    #[test]
     fn parse_does_not_absorb_coalesced_request_as_body_without_framing() {
         let request =
             b"GET /a HTTP/1.1\r\nHost: example.test\r\n\r\nGET /b HTTP/1.1\r\nHost: example.test\r\n\r\n";

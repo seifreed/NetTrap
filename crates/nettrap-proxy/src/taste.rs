@@ -91,19 +91,89 @@ fn looks_like_http_start_line(data: &[u8]) -> bool {
         return false;
     }
 
-    let request = matches!(
+    matches!(
         first,
         "GET" | "POST" | "PUT" | "HEAD" | "DELETE" | "OPTIONS" | "PATCH" | "CONNECT"
     ) && matches!(third, "HTTP/1.0" | "HTTP/1.1")
         && second
             .bytes()
-            .all(|byte| !byte.is_ascii_control() && !byte.is_ascii_whitespace());
+            .all(|byte| !byte.is_ascii_control() && !byte.is_ascii_whitespace())
+}
 
-    let response = matches!(first, "HTTP/1.0" | "HTTP/1.1")
-        && second.len() == 3
-        && second.bytes().all(|byte| byte.is_ascii_digit());
+fn looks_like_dns_query(data: &[u8]) -> bool {
+    if data.len() < 12 || data[0].is_ascii_alphabetic() {
+        return false;
+    }
 
-    request || response
+    let flags = u16::from_be_bytes([data[2], data[3]]);
+    let is_query = (flags & 0x8000) == 0;
+    let opcode = (flags >> 11) & 0x0f;
+    let qdcount = u16::from_be_bytes([data[4], data[5]]);
+    let ancount = u16::from_be_bytes([data[6], data[7]]);
+
+    is_query
+        && opcode <= 2
+        && (1..=10).contains(&qdcount)
+        && ancount == 0
+        && dns_questions_fit(data, qdcount)
+}
+
+fn dns_questions_fit(data: &[u8], qdcount: u16) -> bool {
+    let mut pos = 12usize;
+
+    for _ in 0..qdcount {
+        loop {
+            let Some(&label_len) = data.get(pos) else {
+                return false;
+            };
+
+            match label_len & 0xc0 {
+                0x00 => {
+                    pos += 1;
+                    if label_len == 0 {
+                        break;
+                    }
+                    if label_len > 63 {
+                        return false;
+                    }
+                    pos = match pos.checked_add(label_len as usize) {
+                        Some(next) if next <= data.len() => next,
+                        _ => return false,
+                    };
+                }
+                0xc0 => {
+                    let Some(&pointer_low) = data.get(pos + 1) else {
+                        return false;
+                    };
+                    let pointer = (((label_len & 0x3f) as usize) << 8) | pointer_low as usize;
+                    if pointer >= data.len() {
+                        return false;
+                    }
+                    pos += 2;
+                    break;
+                }
+                _ => return false,
+            }
+        }
+
+        pos = match pos.checked_add(4) {
+            Some(next) if next <= data.len() => next,
+            _ => return false,
+        };
+    }
+
+    true
+}
+
+fn looks_like_complete_tls_record(data: &[u8]) -> bool {
+    if data.len() < 5 || data[0] != 0x16 || data[1] != 0x03 || !(0x01..=0x04).contains(&data[2]) {
+        return false;
+    }
+    let record_len = u16::from_be_bytes([data[3], data[4]]) as usize;
+    record_len > 0
+        && 5usize
+            .checked_add(record_len)
+            .is_some_and(|record_end| record_end <= data.len())
 }
 
 fn looks_like_sip_request_line(data: &[u8]) -> bool {
@@ -174,16 +244,11 @@ fn looks_like_nkn_json_rpc(data: &[u8]) -> bool {
 pub struct DnsTaste;
 impl ProtocolTaste for DnsTaste {
     fn taste(&self, data: &[u8], dst_port: u16) -> TasteScore {
-        if dst_port == 53 {
-            return 90;
-        }
-        // DNS has a specific header structure: ID(2) + flags(2) + counts(8) = min 12 bytes
-        if data.len() >= 12 {
-            let qdcount = u16::from_be_bytes([data[4], data[5]]);
-            let ancount = u16::from_be_bytes([data[6], data[7]]);
-            if (1..=10).contains(&qdcount) && ancount <= 100 {
-                return 70;
+        if looks_like_dns_query(data) {
+            if dst_port == 53 {
+                return 90;
             }
+            return 70;
         }
         0
     }
@@ -211,12 +276,7 @@ impl ProtocolTaste for HttpTaste {
 pub struct TlsTaste;
 impl ProtocolTaste for TlsTaste {
     fn taste(&self, data: &[u8], dst_port: u16) -> TasteScore {
-        if data.len() >= 5
-            && data[0] == 0x16
-            && data[1] == 0x03
-            && (0x01..=0x04).contains(&data[2])
-            && u16::from_be_bytes([data[3], data[4]]) > 0
-        {
+        if looks_like_complete_tls_record(data) {
             return 95;
         }
         // SSLv2
@@ -328,20 +388,35 @@ impl ProtocolTaste for IrcTaste {
 pub struct TftpTaste;
 impl ProtocolTaste for TftpTaste {
     fn taste(&self, data: &[u8], dst_port: u16) -> TasteScore {
-        if dst_port == 69 {
-            return 90;
-        }
-        if data.len() >= 4 {
-            let opcode = u16::from_be_bytes([data[0], data[1]]);
-            if (1..=5).contains(&opcode) {
-                return 75;
-            }
+        if looks_like_tftp_request(data) {
+            return if dst_port == 69 { 90 } else { 75 };
         }
         0
     }
     fn protocol_name(&self) -> &'static str {
         "tftp"
     }
+}
+
+fn looks_like_tftp_request(data: &[u8]) -> bool {
+    if data.len() < 6 || !data.ends_with(&[0]) {
+        return false;
+    }
+    let opcode = u16::from_be_bytes([data[0], data[1]]);
+    if !matches!(opcode, 1 | 2) {
+        return false;
+    }
+
+    let mut parts: Vec<&[u8]> = data[2..].split(|&byte| byte == 0).collect();
+    if matches!(parts.last(), Some(part) if part.is_empty()) {
+        parts.pop();
+    }
+    if parts.len() < 2 || parts[0].is_empty() || parts[1].is_empty() || parts.len() % 2 != 0 {
+        return false;
+    }
+
+    let mode = String::from_utf8_lossy(parts[1]).to_ascii_lowercase();
+    matches!(mode.as_str(), "netascii" | "octet" | "mail")
 }
 
 pub struct QuicTaste;
@@ -503,34 +578,57 @@ impl ProtocolTaste for LdapTaste {
         if dst_port == 389 || dst_port == 636 {
             return 90;
         }
-        // LDAP: SEQUENCE(0x30) + length + INTEGER(0x02) for message ID
-        // This distinguishes from SNMP which has SEQUENCE + length + INTEGER(version)
-        // followed by OCTET STRING (0x04), while LDAP has INTEGER followed by APPLICATION tag (0x60-0x7F)
-        if data.len() >= 7 && data[0] == 0x30 {
-            // Skip SEQUENCE length (1 or 2 bytes)
-            let (_, len_bytes) = if data[1] & 0x80 == 0 {
-                (data[1] as usize, 1)
-            } else {
-                (0, 1 + (data[1] & 0x7F) as usize)
-            };
-            let msg_id_pos = 1 + len_bytes;
-            if msg_id_pos < data.len() && data[msg_id_pos] == 0x02 {
-                // After message ID INTEGER, check for LDAP APPLICATION tags (0x60-0x7F)
-                let id_len_pos = msg_id_pos + 1;
-                if id_len_pos < data.len() {
-                    let id_len = data[id_len_pos] as usize;
-                    let app_tag_pos = id_len_pos + 1 + id_len;
-                    if app_tag_pos < data.len() && (data[app_tag_pos] & 0xE0) == 0x60 {
-                        return 55; // LDAP APPLICATION tag found
-                    }
-                }
-            }
+        if ldap_app_tag_offset(data).is_some() {
+            return 55;
         }
         0
     }
     fn protocol_name(&self) -> &'static str {
         "ldap"
     }
+}
+
+fn ldap_app_tag_offset(data: &[u8]) -> Option<usize> {
+    if data.len() < 7 || data[0] != 0x30 {
+        return None;
+    }
+
+    let (seq_len, seq_len_bytes) = ber_length(&data[1..])?;
+    let msg_id_pos = 1usize.checked_add(seq_len_bytes)?;
+    let seq_end = msg_id_pos.checked_add(seq_len)?;
+    if seq_end > data.len() || msg_id_pos >= seq_end || data[msg_id_pos] != 0x02 {
+        return None;
+    }
+
+    let id_len_pos = msg_id_pos + 1;
+    let (id_len, id_len_bytes) = ber_length(&data[id_len_pos..seq_end])?;
+    if id_len == 0 || id_len > 4 {
+        return None;
+    }
+    let id_start = id_len_pos.checked_add(id_len_bytes)?;
+    let app_tag_pos = id_start.checked_add(id_len)?;
+    if app_tag_pos >= seq_end || (data[app_tag_pos] & 0xe0) != 0x60 {
+        return None;
+    }
+
+    Some(app_tag_pos)
+}
+
+fn ber_length(data: &[u8]) -> Option<(usize, usize)> {
+    let first = *data.first()?;
+    if first & 0x80 == 0 {
+        return Some((first as usize, 1));
+    }
+
+    let len_bytes = (first & 0x7f) as usize;
+    if len_bytes == 0 || len_bytes > 4 || data.len() < 1 + len_bytes {
+        return None;
+    }
+    let mut len = 0usize;
+    for byte in &data[1..1 + len_bytes] {
+        len = (len << 8) | *byte as usize;
+    }
+    Some((len, 1 + len_bytes))
 }
 
 pub struct MqttTaste;
@@ -989,17 +1087,25 @@ mod tests {
     #[test]
     fn test_dns_taste_port() {
         let taste = DnsTaste;
-        assert_eq!(taste.taste(&[], 53), 90);
+        assert_eq!(taste.taste(&[], 53), 0);
+        assert_eq!(taste.taste(b"not dns", 53), 0);
         assert_eq!(taste.taste(&[], 80), 0);
     }
 
     #[test]
     fn test_dns_taste_data() {
         let taste = DnsTaste;
-        let mut dns_query = vec![0u8; 12];
-        dns_query[4] = 0;
-        dns_query[5] = 1;
+        let dns_query = [
+            0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 7, b'e', b'x', b'a', b'm', b'p',
+            b'l', b'e', 4, b't', b'e', b's', b't', 0, 0, 1, 0, 1,
+        ];
         assert_eq!(taste.taste(&dns_query, 0), 70);
+        assert_eq!(taste.taste(&dns_query, 53), 90);
+
+        let truncated = [
+            0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 7, b'e',
+        ];
+        assert_eq!(taste.taste(&truncated, 53), 0);
     }
 
     #[test]
@@ -1007,7 +1113,7 @@ mod tests {
         let taste = HttpTaste;
         assert_eq!(taste.taste(b"GET / HTTP/1.1", 80), 95);
         assert_eq!(taste.taste(b"POST /api HTTP/1.1", 8080), 95);
-        assert_eq!(taste.taste(b"HTTP/1.1 200 OK", 0), 95);
+        assert_eq!(taste.taste(b"HTTP/1.1 200 OK", 0), 0);
         assert_eq!(taste.taste(b"garbage HTTP inside", 0), 0);
         assert_eq!(taste.taste(b"INVALID", 80), 30);
     }
@@ -1015,10 +1121,40 @@ mod tests {
     #[test]
     fn test_tls_taste() {
         let taste = TlsTaste;
-        assert_eq!(taste.taste(&[0x16, 0x03, 0x01, 0x00, 0x20], 443), 95);
-        assert_eq!(taste.taste(&[0x16, 0x03, 0x03, 0x00, 0x20], 0), 95);
+        let mut tls = vec![0x16, 0x03, 0x01, 0x00, 0x03];
+        tls.extend_from_slice(&[0x01, 0x02, 0x03]);
+        assert_eq!(taste.taste(&tls, 443), 95);
+        let mut tls = vec![0x16, 0x03, 0x03, 0x00, 0x03];
+        tls.extend_from_slice(&[0x01, 0x02, 0x03]);
+        assert_eq!(taste.taste(&tls, 0), 95);
+        assert_eq!(taste.taste(&[0x16, 0x03, 0x03, 0x00, 0x20], 0), 0);
+        assert_eq!(taste.taste(&[0x16, 0x03, 0x03, 0x00, 0x20], 443), 40);
         assert_eq!(taste.taste(&[0x16, 0x03, 0x00, 0x00, 0x20], 0), 0);
         assert_eq!(taste.taste(&[], 443), 40);
+    }
+
+    #[test]
+    fn test_tftp_taste_requires_new_request_shape() {
+        let taste = TftpTaste;
+        let rrq = b"\x00\x01firmware.bin\x00octet\x00";
+        let ack = b"\x00\x04\x00\x01";
+        let data = b"\x00\x03\x00\x01payload";
+
+        assert_eq!(taste.taste(rrq, 69), 90);
+        assert_eq!(taste.taste(rrq, 1069), 75);
+        assert_eq!(taste.taste(ack, 69), 0);
+        assert_eq!(taste.taste(data, 69), 0);
+        assert_eq!(taste.taste(b"\x00\x01file\x00badmode\x00", 69), 0);
+    }
+
+    #[test]
+    fn test_ldap_taste_rejects_incomplete_long_form_lengths() {
+        let taste = LdapTaste;
+        let bind = [0x30, 0x05, 0x02, 0x01, 0x01, 0x60, 0x00];
+        let incomplete_long_form = [0x30, 0x82, 0x00];
+
+        assert_eq!(taste.taste(&bind, 1389), 55);
+        assert_eq!(taste.taste(&incomplete_long_form, 1389), 0);
     }
 
     #[test]

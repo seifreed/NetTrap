@@ -112,10 +112,12 @@ impl MemcachedHandler {
             body_len
         );
 
-        let status = if Self::supported_binary_opcode(opcode) {
+        let status = if !Self::supported_binary_opcode(opcode) {
+            0x0081
+        } else if Self::binary_request_shape_is_valid(opcode, extras_len, key_len, body_len) {
             0x0000
         } else {
-            0x0081
+            0x0004
         };
         if status == 0 && Self::is_quiet_binary_opcode(opcode) {
             Vec::new()
@@ -126,6 +128,40 @@ impl MemcachedHandler {
 
     fn supported_binary_opcode(opcode: u8) -> bool {
         matches!(opcode, 0x00..=0x1a | 0x1c | 0x1d)
+    }
+
+    fn binary_request_shape_is_valid(
+        opcode: u8,
+        extras_len: usize,
+        key_len: usize,
+        body_len: usize,
+    ) -> bool {
+        let value_len = match extras_len.checked_add(key_len) {
+            Some(metadata_len) if metadata_len <= body_len => body_len - metadata_len,
+            _ => return false,
+        };
+
+        match opcode {
+            // Get/GetQ/GetK/GetKQ/Delete/DeleteQ.
+            0x00 | 0x04 | 0x09 | 0x0c | 0x0d | 0x14 => {
+                extras_len == 0 && key_len > 0 && value_len == 0
+            }
+            // Set/Add/Replace and quiet variants: flags + expiry, key, value.
+            0x01 | 0x02 | 0x03 | 0x11 | 0x12 | 0x13 => extras_len == 8 && key_len > 0,
+            // Increment/Decrement and quiet variants.
+            0x05 | 0x06 | 0x15 | 0x16 => extras_len == 20 && key_len > 0 && value_len == 0,
+            // Quit/Noop/Version/QuitQ.
+            0x07 | 0x0a | 0x0b | 0x17 => extras_len == 0 && key_len == 0 && value_len == 0,
+            // Flush/FlushQ: optional expiry extras only.
+            0x08 | 0x18 => matches!(extras_len, 0 | 4) && key_len == 0 && value_len == 0,
+            // Append/Prepend and quiet variants.
+            0x0e | 0x0f | 0x19 | 0x1a => extras_len == 0 && key_len > 0,
+            // Stat: optional key, no extras/value.
+            0x10 => extras_len == 0 && value_len == 0,
+            // Touch/GAT/GATQ: expiry extras + key.
+            0x1c | 0x1d => extras_len == 4 && key_len > 0 && value_len == 0,
+            _ => false,
+        }
     }
 
     fn is_quiet_binary_opcode(opcode: u8) -> bool {
@@ -283,10 +319,27 @@ mod tests {
     use super::*;
 
     fn binary_request(opcode: u8) -> Vec<u8> {
-        let mut request = vec![0x80, opcode, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
-        request.extend_from_slice(&0u32.to_be_bytes());
+        binary_request_with_parts(opcode, &[], &[], &[])
+    }
+
+    fn binary_request_with_parts(opcode: u8, extras: &[u8], key: &[u8], value: &[u8]) -> Vec<u8> {
+        let body_len = extras.len() + key.len() + value.len();
+        let mut request = vec![
+            0x80,
+            opcode,
+            ((key.len() >> 8) & 0xff) as u8,
+            (key.len() & 0xff) as u8,
+            extras.len() as u8,
+            0x00,
+            0x00,
+            0x00,
+        ];
+        request.extend_from_slice(&(body_len as u32).to_be_bytes());
         request.extend_from_slice(&0x01020304u32.to_be_bytes());
         request.extend_from_slice(&0u64.to_be_bytes());
+        request.extend_from_slice(extras);
+        request.extend_from_slice(key);
+        request.extend_from_slice(value);
         request
     }
 
@@ -389,12 +442,27 @@ mod tests {
     #[test]
     fn binary_quiet_successes_do_not_send_responses() {
         let handler = MemcachedHandler::new();
+        let storage_extras = [0u8; 8];
+        let counter_extras = [0u8; 20];
 
-        for opcode in [
-            0x09, 0x0d, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a,
+        for (opcode, extras, key, value) in [
+            (0x09, &b""[..], &b"k"[..], &b""[..]),
+            (0x0d, &b""[..], &b"k"[..], &b""[..]),
+            (0x11, &storage_extras[..], &b"k"[..], &b"v"[..]),
+            (0x12, &storage_extras[..], &b"k"[..], &b"v"[..]),
+            (0x13, &storage_extras[..], &b"k"[..], &b"v"[..]),
+            (0x14, &b""[..], &b"k"[..], &b""[..]),
+            (0x15, &counter_extras[..], &b"k"[..], &b""[..]),
+            (0x16, &counter_extras[..], &b"k"[..], &b""[..]),
+            (0x17, &b""[..], &b""[..], &b""[..]),
+            (0x18, &b""[..], &b""[..], &b""[..]),
+            (0x19, &b""[..], &b"k"[..], &b"v"[..]),
+            (0x1a, &b""[..], &b"k"[..], &b"v"[..]),
         ] {
             assert!(
-                handler.handle(&binary_request(opcode)).is_empty(),
+                handler
+                    .handle(&binary_request_with_parts(opcode, extras, key, value))
+                    .is_empty(),
                 "opcode 0x{opcode:02x} should be quiet on success"
             );
         }
@@ -430,6 +498,23 @@ mod tests {
         assert_eq!(response[0], 0x81);
         assert_eq!(binary_status(&response), 0x0004);
         assert_eq!(&response[12..16], &0x12345678u32.to_be_bytes());
+    }
+
+    #[test]
+    fn binary_packets_validate_opcode_specific_layouts() {
+        let handler = MemcachedHandler::new();
+
+        let get_with_extras = handler.handle(&binary_request_with_parts(0x00, &[0; 4], b"k", b""));
+        assert_eq!(get_with_extras[0], 0x81);
+        assert_eq!(binary_status(&get_with_extras), 0x0004);
+
+        let set_without_extras = handler.handle(&binary_request_with_parts(0x01, &[], b"k", b"v"));
+        assert_eq!(set_without_extras[0], 0x81);
+        assert_eq!(binary_status(&set_without_extras), 0x0004);
+
+        let valid_set = handler.handle(&binary_request_with_parts(0x01, &[0; 8], b"k", b"v"));
+        assert_eq!(valid_set[0], 0x81);
+        assert_eq!(binary_status(&valid_set), 0x0000);
     }
 
     #[test]

@@ -19,8 +19,7 @@ impl ProtocolDetector {
         if let Ok(s) = std::str::from_utf8(data) {
             let first_line = s.lines().next().unwrap_or("").trim_end_matches('\r');
 
-            if looks_like_http_request_line(first_line) || looks_like_http_response_line(first_line)
-            {
+            if looks_like_http_request_line(first_line) {
                 return Some(ApplicationProtocol::Http);
             }
             if first_line.starts_with("SSH-") {
@@ -71,20 +70,6 @@ fn looks_like_http_request_line(line: &str) -> bool {
         && matches!(version, "HTTP/1.0" | "HTTP/1.1")
 }
 
-fn looks_like_http_response_line(line: &str) -> bool {
-    let mut parts = line.splitn(3, ' ');
-    let Some(version) = parts.next() else {
-        return false;
-    };
-    let Some(status) = parts.next() else {
-        return false;
-    };
-
-    matches!(version, "HTTP/1.0" | "HTTP/1.1")
-        && status.len() == 3
-        && status.bytes().all(|byte| byte.is_ascii_digit())
-}
-
 fn looks_like_smtp_banner(line: &str) -> bool {
     line.starts_with("220 ") && line.to_ascii_uppercase().contains("SMTP")
 }
@@ -128,10 +113,7 @@ mod tests {
             detector.detect(b"GET / HTTP/1.1\r\nHost: example.test\r\n\r\n"),
             Some(ApplicationProtocol::Http)
         );
-        assert_eq!(
-            detector.detect(b"HTTP/1.1 200 OK\r\n\r\n"),
-            Some(ApplicationProtocol::Http)
-        );
+        assert_eq!(detector.detect(b"HTTP/1.1 200 OK\r\n\r\n"), None);
         assert_eq!(
             detector.detect(b"EHLO example.test\r\n"),
             Some(ApplicationProtocol::Smtp)

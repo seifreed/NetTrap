@@ -4039,6 +4039,22 @@ mod tests {
     }
 
     #[test]
+    fn socks5_coalesced_greeting_leaves_connect_frame_buffered() {
+        let mut buffer = b"\x05\x01\x00\x05\x01\x00\x03\x0Cexample.test\x00P".to_vec();
+
+        let greeting_frame = expect_complete(extract_socks_frame(&mut buffer));
+        assert_eq!(greeting_frame, vec![0x05, 0x01, 0x00]);
+        assert_eq!(buffer, b"\x05\x01\x00\x03\x0Cexample.test\x00P");
+
+        let request_frame = expect_complete(extract_socks_frame(&mut buffer));
+        assert_eq!(
+            request_frame,
+            b"\x05\x01\x00\x03\x0Cexample.test\x00P".to_vec()
+        );
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
     fn socks4_frame_rejects_oversized_missing_nul() {
         let mut buffer = vec![0x04; MAX_SOCKS4_FRAME_SIZE + 1];
 

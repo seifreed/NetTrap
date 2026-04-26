@@ -203,7 +203,7 @@ pub fn detect_protocol(data: &[u8]) -> Option<ApplicationProtocol> {
 
     if let Ok(text) = std::str::from_utf8(data) {
         let first_line = text.lines().next().unwrap_or("").trim_end_matches('\r');
-        if looks_like_http_request_line(first_line) || looks_like_http_response_line(first_line) {
+        if looks_like_http_request_line(first_line) {
             return Some(ApplicationProtocol::Http);
         }
     }
@@ -303,20 +303,6 @@ fn looks_like_http_request_line(line: &str) -> bool {
         && matches!(version, "HTTP/1.0" | "HTTP/1.1")
 }
 
-fn looks_like_http_response_line(line: &str) -> bool {
-    let mut parts = line.splitn(3, ' ');
-    let Some(version) = parts.next() else {
-        return false;
-    };
-    let Some(status) = parts.next() else {
-        return false;
-    };
-
-    matches!(version, "HTTP/1.0" | "HTTP/1.1")
-        && status.len() == 3
-        && status.bytes().all(|byte| byte.is_ascii_digit())
-}
-
 fn nom_error(input: &[u8], kind: ErrorKind) -> NomErr<NomError<&[u8]>> {
     NomErr::Error(NomError::new(input, kind))
 }
@@ -412,9 +398,6 @@ mod tests {
             detect_protocol(b"GET / HTTP/1.1\r\nHost: example.test\r\n\r\n"),
             Some(ApplicationProtocol::Http)
         );
-        assert_eq!(
-            detect_protocol(b"HTTP/1.1 200 OK\r\n\r\n"),
-            Some(ApplicationProtocol::Http)
-        );
+        assert_eq!(detect_protocol(b"HTTP/1.1 200 OK\r\n\r\n"), None);
     }
 }

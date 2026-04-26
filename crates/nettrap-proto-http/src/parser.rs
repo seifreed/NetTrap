@@ -61,11 +61,8 @@ pub(crate) fn parse_http_request_bytes(data: &[u8]) -> Result<Option<ParsedHttpR
     }
 
     let body_start = header_end + 4;
-    let body = if let Some(transfer_encoding) = find_header_value(&headers, "Transfer-Encoding") {
-        if !transfer_encoding
-            .split(',')
-            .any(|value| value.trim().eq_ignore_ascii_case("chunked"))
-        {
+    let body = if has_header(&headers, "Transfer-Encoding") {
+        if has_header(&headers, "Content-Length") || !transfer_encoding_is_supported(&headers) {
             return Ok(None);
         }
 
@@ -166,6 +163,35 @@ fn find_header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<
         .iter()
         .find(|(key, _)| key.eq_ignore_ascii_case(name))
         .map(|(_, value)| value.as_str())
+}
+
+fn has_header(headers: &[(String, String)], name: &str) -> bool {
+    headers
+        .iter()
+        .any(|(key, _)| key.eq_ignore_ascii_case(name))
+}
+
+fn transfer_encoding_is_supported(headers: &[(String, String)]) -> bool {
+    let mut codings = Vec::new();
+    for (_, value) in headers
+        .iter()
+        .filter(|(key, _)| key.eq_ignore_ascii_case("Transfer-Encoding"))
+    {
+        for coding in value.split(',').map(str::trim) {
+            if coding.is_empty() {
+                return false;
+            }
+            codings.push(coding);
+        }
+    }
+
+    let Some((last, previous)) = codings.split_last() else {
+        return false;
+    };
+    last.eq_ignore_ascii_case("chunked")
+        && !previous
+            .iter()
+            .any(|coding| coding.eq_ignore_ascii_case("chunked"))
 }
 
 fn has_conflicting_content_length(headers: &[(String, String)]) -> bool {
