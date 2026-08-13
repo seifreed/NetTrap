@@ -1,0 +1,21 @@
+[package]
+name = "nettrap-proto-http"
+description = "HTTP protocol handler for NetTrap"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+nettrap-core.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+criterion = "0.8.2"
+
+[[bench]]
+name = "http_parser"
+harness = false

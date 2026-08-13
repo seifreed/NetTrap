@@ -1,0 +1,31 @@
+[package]
+name = "nettrap-windivert"
+description = "WinDivert-based packet interception for NetTrap on Windows"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lib]
+test = false
+
+[dependencies]
+nettrap-core.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+libloading = "0.9"
+bitflags.workspace = true
+parking_lot.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+# Only needed for the Windows re-injection path (IP packet reconstruction).
+nettrap-pcap.workspace = true
+
+[target.'cfg(windows)'.build-dependencies]
+
+[features]
+default = []
+bundled = []

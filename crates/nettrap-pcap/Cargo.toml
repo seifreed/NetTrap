@@ -1,0 +1,18 @@
+[package]
+name = "nettrap-pcap"
+description = "PCAP handling for NetTrap"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+nettrap-core.workspace = true
+nettrap-flow.workspace = true
+nettrap-fsutil.workspace = true
+serde_json.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true

@@ -1,0 +1,16 @@
+[package]
+name = "nettrap-engine"
+description = "Use-case policies for the NetTrap runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+nettrap-core.workspace = true
+parking_lot.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

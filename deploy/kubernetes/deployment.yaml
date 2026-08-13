@@ -1,0 +1,85 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nettrap
+  labels:
+    app: nettrap
+    component: honeypot
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nettrap
+  template:
+    metadata:
+      labels:
+        app: nettrap
+        component: honeypot
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+      - name: nettrap
+        image: nettrap:latest
+        ports:
+        - containerPort: 5353
+          protocol: UDP
+          name: dns
+        - containerPort: 8080
+          protocol: TCP
+          name: http
+        - containerPort: 8443
+          protocol: TCP
+          name: https
+        - containerPort: 2525
+          protocol: TCP
+          name: smtp
+        - containerPort: 2121
+          protocol: TCP
+          name: ftp
+        - containerPort: 2222
+          protocol: TCP
+          name: ssh
+        - containerPort: 2323
+          protocol: TCP
+          name: telnet
+        - containerPort: 9090
+          protocol: TCP
+          name: metrics
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 9090
+          initialDelaySeconds: 10
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 9090
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+        volumeMounts:
+        - name: config
+          mountPath: /etc/nettrap
+        - name: pcap-storage
+          mountPath: /var/lib/nettrap/pcap
+        securityContext:
+          capabilities:
+            add:
+            - NET_ADMIN
+            - NET_RAW
+      volumes:
+      - name: config
+        configMap:
+          name: nettrap-config
+      - name: pcap-storage
+        emptyDir: {}

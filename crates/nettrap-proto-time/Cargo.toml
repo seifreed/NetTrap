@@ -1,0 +1,12 @@
+[package]
+name = "nettrap-proto-time"
+description = "Time protocol handler for NetTrap (RFC 868)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+chrono.workspace = true
+tracing.workspace = true

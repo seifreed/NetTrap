@@ -1,0 +1,163 @@
+[package]
+name = "nettrap-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.12"
+nettrap-proto-http = { path = "../crates/nettrap-proto-http" }
+nettrap-proto-smb = { path = "../crates/nettrap-proto-smb" }
+nettrap-proto-rdp = { path = "../crates/nettrap-proto-rdp" }
+nettrap-proto-mysql = { path = "../crates/nettrap-proto-mysql" }
+nettrap-proto-ldap = { path = "../crates/nettrap-proto-ldap" }
+nettrap-proto-snmp = { path = "../crates/nettrap-proto-snmp" }
+nettrap-proto-mqtt = { path = "../crates/nettrap-proto-mqtt" }
+nettrap-proto-socks = { path = "../crates/nettrap-proto-socks" }
+nettrap-proto-postgres = { path = "../crates/nettrap-proto-postgres" }
+nettrap-proto-ntp = { path = "../crates/nettrap-proto-ntp" }
+nettrap-proto-coap = { path = "../crates/nettrap-proto-coap" }
+nettrap-proto-tftp = { path = "../crates/nettrap-proto-tftp" }
+nettrap-proto-redis = { path = "../crates/nettrap-proto-redis" }
+nettrap-proto-memcached = { path = "../crates/nettrap-proto-memcached" }
+nettrap-proto-upnp = { path = "../crates/nettrap-proto-upnp" }
+nettrap-proto-sip = { path = "../crates/nettrap-proto-sip" }
+nettrap-proto-dns = { path = "../crates/nettrap-proto-dns" }
+nettrap-proto-tls = { path = "../crates/nettrap-proto-tls" }
+nettrap-proto-nkn = { path = "../crates/nettrap-proto-nkn" }
+
+[[bin]]
+name = "http_request_parse"
+path = "fuzz_targets/http_request_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "smb_handle"
+path = "fuzz_targets/smb_handle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ldap_handle"
+path = "fuzz_targets/ldap_handle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "snmp_handle"
+path = "fuzz_targets/snmp_handle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mqtt_handle"
+path = "fuzz_targets/mqtt_handle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dns_parse"
+path = "fuzz_targets/dns_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tls_sni"
+path = "fuzz_targets/tls_sni.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rdp_handle"
+path = "fuzz_targets/rdp_handle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mysql_handle"
+path = "fuzz_targets/mysql_handle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "postgres_handle"
+path = "fuzz_targets/postgres_handle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "socks_handle"
+path = "fuzz_targets/socks_handle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "redis_handle"
+path = "fuzz_targets/redis_handle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "memcached_handle"
+path = "fuzz_targets/memcached_handle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "upnp_handle"
+path = "fuzz_targets/upnp_handle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sip_handle"
+path = "fuzz_targets/sip_handle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ntp_handle"
+path = "fuzz_targets/ntp_handle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "coap_handle"
+path = "fuzz_targets/coap_handle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tftp_parse"
+path = "fuzz_targets/tftp_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nkn_handle"
+path = "fuzz_targets/nkn_handle.rs"
+test = false
+doc = false
+bench = false

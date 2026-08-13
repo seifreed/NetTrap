@@ -1,0 +1,13 @@
+[package]
+name = "nettrap-fsutil"
+description = "Secure filesystem access primitives for NetTrap"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

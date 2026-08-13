@@ -1,0 +1,14 @@
+[package]
+name = "nettrap-proto-redis"
+description = "Redis protocol handler for NetTrap"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+nettrap-core.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+async-trait.workspace = true

@@ -1,0 +1,15 @@
+[package]
+name = "nettrap-ioc"
+description = "IOC extraction for NetTrap"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+nettrap-core.workspace = true
+thiserror.workspace = true
+regex.workspace = true
+once_cell.workspace = true
+tracing.workspace = true

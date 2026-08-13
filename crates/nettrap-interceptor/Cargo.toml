@@ -1,0 +1,29 @@
+[package]
+name = "nettrap-interceptor"
+description = "Network interception for NetTrap"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+nettrap-core.workspace = true
+bytes.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+pcap.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.31.3", features = ["net", "socket", "ioctl", "user"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+nettrap-windivert = { path = "../nettrap-windivert" }
+
+[features]
+default = ["userspace"]
+userspace = []
+ebpf = []
+native-capture-tests = []

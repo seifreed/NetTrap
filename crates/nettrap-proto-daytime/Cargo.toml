@@ -1,0 +1,12 @@
+[package]
+name = "nettrap-proto-daytime"
+description = "Daytime protocol handler for NetTrap (RFC 867)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+tracing.workspace = true
+chrono.workspace = true

@@ -1,0 +1,80 @@
+version: '3.8'
+
+services:
+  collector:
+    image: debian:bookworm-slim
+    container_name: nettrap-collector
+    command: >
+      bash -c "apt-get update -qq && apt-get install -y -qq ncat > /dev/null 2>&1 &&
+      echo 'Collector listening on port 5044...' &&
+      ncat -lk 5044 | tee /var/log/collected_events.jsonl"
+    ports:
+      - "5044:5044"
+    volumes:
+      - collector-data:/var/log
+    networks:
+      - nettrap-test
+
+  nettrap-node1:
+    build: .
+    container_name: nettrap-node1
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    ports:
+      - "15353:5353/udp"
+      - "18080:8080"
+      - "12222:2222"
+      - "12323:2323"
+      - "9091:9090"
+    volumes:
+      - ./config/node1.toml:/etc/nettrap/config.toml:ro
+    depends_on:
+      - collector
+    networks:
+      - nettrap-test
+
+  nettrap-node2:
+    build: .
+    container_name: nettrap-node2
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    ports:
+      - "15354:5353/udp"
+      - "18081:8080"
+      - "12223:2222"
+      - "12324:2323"
+      - "9092:9090"
+    volumes:
+      - ./config/node2.toml:/etc/nettrap/config.toml:ro
+    depends_on:
+      - collector
+    networks:
+      - nettrap-test
+
+  nettrap-node3:
+    build: .
+    container_name: nettrap-node3
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    ports:
+      - "15355:5353/udp"
+      - "18082:8080"
+      - "16379:6379"
+      - "13306:3306"
+      - "9093:9090"
+    volumes:
+      - ./config/node3.toml:/etc/nettrap/config.toml:ro
+    depends_on:
+      - collector
+    networks:
+      - nettrap-test
+
+volumes:
+  collector-data:
+
+networks:
+  nettrap-test:
+    driver: bridge

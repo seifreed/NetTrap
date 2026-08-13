@@ -1,0 +1,16 @@
+[package]
+name = "nettrap-proto-ftp"
+description = "FTP protocol handler for NetTrap"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+nettrap-core.workspace = true
+nettrap-fsutil.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+hostname.workspace = true
+rand.workspace = true

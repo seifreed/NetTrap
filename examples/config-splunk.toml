@@ -1,0 +1,54 @@
+attribution_enabled = false
+attribution_timeout_ms = 5000
+default_decision = "intercept"
+pcap_enabled = false
+output_format = "jsonl"
+output_path = "/var/log/nettrap/events.jsonl"
+
+[[listeners]]
+name = "dns"
+protocol = "udp"
+port = 5353
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+response_delay_ms = 0
+
+[[listeners]]
+name = "http"
+protocol = "tcp"
+port = 8080
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+response_delay_ms = 0
+
+[[listeners]]
+name = "ssh"
+protocol = "tcp"
+port = 2222
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+response_delay_ms = 0
+
+[[listeners]]
+name = "telnet"
+protocol = "tcp"
+port = 2323
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+response_delay_ms = 0
+
+[distributed]
+enabled = true
+node_region = "splunk-demo"
+node_tags = ["demo", "splunk"]
+health_bind = "0.0.0.0:9090"
+
+[[distributed.event_sinks]]
+type = "http"
+target = "https://splunk:8088/services/collector/event"
+auth = "Splunk nettrap-hec-token"
+batch_size = 10

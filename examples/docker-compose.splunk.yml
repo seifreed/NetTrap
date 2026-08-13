@@ -1,0 +1,51 @@
+
+services:
+  splunk:
+    image: splunk/splunk:9.1.2
+    container_name: nettrap-splunk
+    environment:
+      - SPLUNK_START_ARGS=--accept-license
+      - SPLUNK_PASSWORD=changeme123
+      - SPLUNK_HEC_TOKEN=nettrap-hec-token
+    ports:
+      - "8000:8000"
+      - "8088:8088"
+    volumes:
+      - splunk-data:/opt/splunk/var
+    networks:
+      - nettrap
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000"]
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 120s
+
+  nettrap:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: nettrap-splunk-node
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    ports:
+      - "15353:5353/udp"
+      - "18080:8080"
+      - "12222:2222"
+      - "12323:2323"
+      - "9091:9090"
+    volumes:
+      - ./config-splunk.toml:/etc/nettrap/config.toml:ro
+    depends_on:
+      splunk:
+        condition: service_healthy
+    networks:
+      - nettrap
+
+volumes:
+  splunk-data:
+
+networks:
+  nettrap:
+    driver: bridge

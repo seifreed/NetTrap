@@ -1,0 +1,29 @@
+[package]
+name = "nettrap-storage"
+description = "Storage backends for NetTrap"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+nettrap-core.workspace = true
+nettrap-flow.workspace = true
+nettrap-events.workspace = true
+nettrap-fsutil.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+parking_lot.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+rusqlite.workspace = true
+sqlx.workspace = true
+
+[dev-dependencies]
+uuid.workspace = true
+
+[features]
+default = ["jsonl"]
+jsonl = []

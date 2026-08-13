@@ -1,0 +1,187 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/nettrap-core",
+    "crates/nettrap-fsutil",
+    "crates/nettrap-flow",
+    "crates/nettrap-events",
+    "crates/nettrap-engine",
+    "crates/nettrap-attribution",
+    "crates/nettrap-interceptor",
+    "crates/nettrap-protocols",
+    "crates/nettrap-proto-dns",
+    "crates/nettrap-proto-http",
+    "crates/nettrap-proto-tls",
+    "crates/nettrap-proto-raw",
+    "crates/nettrap-proto-smtp",
+    "crates/nettrap-proto-ftp",
+    "crates/nettrap-proto-quic",
+    "crates/nettrap-ioc",
+    "crates/nettrap-pcap",
+    "crates/nettrap-storage",
+    "crates/nettrap-distributed",
+    "crates/nettrap-cli",
+    "crates/nettrap-api",
+    "crates/nettrap-windivert",
+    "crates/nettrap-tls-mitm",
+    "crates/nettrap-proxy",
+    "crates/nettrap-proto-pop3",
+    "crates/nettrap-proto-irc",
+    "crates/nettrap-proto-tftp",
+    "crates/nettrap-proto-telnet",
+    "crates/nettrap-proto-ssh",
+    "crates/nettrap-proto-redis",
+    "crates/nettrap-proto-mqtt",
+    "crates/nettrap-proto-smb",
+    "crates/nettrap-proto-rdp",
+    "crates/nettrap-proto-mysql",
+    "crates/nettrap-proto-ldap",
+    "crates/nettrap-proto-snmp",
+    "crates/nettrap-proto-socks",
+    "crates/nettrap-proto-memcached",
+    "crates/nettrap-proto-nkn",
+    "crates/nettrap-proto-postgres",
+    "crates/nettrap-proto-sip",
+    "crates/nettrap-proto-upnp",
+    "crates/nettrap-proto-ntp",
+    "crates/nettrap-proto-coap",
+    "crates/nettrap-proto-finger",
+    "crates/nettrap-proto-ident",
+    "crates/nettrap-proto-daytime",
+    "crates/nettrap-proto-time",
+    "crates/nettrap-proto-chargen",
+    "crates/nettrap-proto-quotd",
+    "crates/nettrap-proto-syslogrecv",
+    "crates/nettrap-proto-dummy",
+]
+exclude = ["fuzz"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+authors = ["NetTrap Team"]
+license = "MIT"
+repository = "https://github.com/seifreed/NetTrap"
+description = "Network Interception, Emulation & Deception Engine"
+keywords = ["network", "security", "honeypot", " interception", "malware"]
+categories = ["network-programming", "security"]
+readme = "README.md"
+
+[workspace.dependencies]
+tokio = { version = "1.52", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+bytes = { version = "1.10", features = ["serde"] }
+uuid = { version = "1.15", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+ipnet = "2.11"
+socket2 = "0.6"
+libc = "0.2"
+parking_lot = "0.12"
+dashmap = "6.1"
+crossbeam = "0.8"
+async-trait = "0.1"
+pin-project-lite = "0.2"
+hashbrown = "0.16"
+smallvec = "1.15"
+bitflags = { version = "2.13.1", features = ["serde"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+config = "0.15"
+toml = "0.8"
+directories = "6.0"
+which = "7.0"
+once_cell = "1.21"
+regex = "1.11"
+base64 = "0.22"
+hex = "0.4"
+sha2 = "0.10"
+sha1 = "0.10"
+md-5 = "0.10"
+hmac = "0.12"
+rand = "0.9"
+idna = "1.1"
+hickory-proto = "0.26.1"
+http = "1.3"
+http-body-util = "0.1"
+hyper = { version = "1.6", features = ["full"] }
+hyper-util = "0.1"
+tokio-rustls = { version = "0.26", features = ["ring"] }
+rustls-pki-types = "1.14"
+rcgen = { version = "0.13", features = ["x509-parser"] }
+x509-parser = "0.18.1"
+memchr = "2.7"
+nom = "8.0"
+pcap = "2.4"
+hostname = "0.4"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+rusqlite = { version = "0.39", features = ["bundled"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres"], default-features = false }
+
+nettrap-core = { path = "crates/nettrap-core" }
+nettrap-fsutil = { path = "crates/nettrap-fsutil" }
+nettrap-flow = { path = "crates/nettrap-flow" }
+nettrap-events = { path = "crates/nettrap-events" }
+nettrap-engine = { path = "crates/nettrap-engine" }
+nettrap-attribution = { path = "crates/nettrap-attribution" }
+nettrap-interceptor = { path = "crates/nettrap-interceptor" }
+nettrap-proto-dns = { path = "crates/nettrap-proto-dns" }
+nettrap-proto-http = { path = "crates/nettrap-proto-http" }
+nettrap-proto-tls = { path = "crates/nettrap-proto-tls" }
+nettrap-proto-raw = { path = "crates/nettrap-proto-raw" }
+nettrap-proto-smtp = { path = "crates/nettrap-proto-smtp" }
+nettrap-proto-ftp = { path = "crates/nettrap-proto-ftp" }
+nettrap-proto-quic = { path = "crates/nettrap-proto-quic" }
+nettrap-ioc = { path = "crates/nettrap-ioc" }
+nettrap-pcap = { path = "crates/nettrap-pcap" }
+nettrap-storage = { path = "crates/nettrap-storage" }
+nettrap-distributed = { path = "crates/nettrap-distributed" }
+nettrap-api = { path = "crates/nettrap-api" }
+nettrap-windivert = { path = "crates/nettrap-windivert" }
+nettrap-tls-mitm = { path = "crates/nettrap-tls-mitm" }
+nettrap-proxy = { path = "crates/nettrap-proxy" }
+nettrap-proto-pop3 = { path = "crates/nettrap-proto-pop3" }
+nettrap-proto-irc = { path = "crates/nettrap-proto-irc" }
+nettrap-proto-tftp = { path = "crates/nettrap-proto-tftp" }
+nettrap-proto-telnet = { path = "crates/nettrap-proto-telnet" }
+nettrap-proto-ssh = { path = "crates/nettrap-proto-ssh" }
+nettrap-proto-redis = { path = "crates/nettrap-proto-redis" }
+nettrap-proto-mqtt = { path = "crates/nettrap-proto-mqtt" }
+nettrap-proto-smb = { path = "crates/nettrap-proto-smb" }
+nettrap-proto-rdp = { path = "crates/nettrap-proto-rdp" }
+nettrap-proto-mysql = { path = "crates/nettrap-proto-mysql" }
+nettrap-proto-ldap = { path = "crates/nettrap-proto-ldap" }
+nettrap-proto-snmp = { path = "crates/nettrap-proto-snmp" }
+nettrap-proto-socks = { path = "crates/nettrap-proto-socks" }
+nettrap-proto-memcached = { path = "crates/nettrap-proto-memcached" }
+nettrap-proto-nkn = { path = "crates/nettrap-proto-nkn" }
+nettrap-proto-postgres = { path = "crates/nettrap-proto-postgres" }
+nettrap-proto-sip = { path = "crates/nettrap-proto-sip" }
+nettrap-proto-upnp = { path = "crates/nettrap-proto-upnp" }
+nettrap-proto-ntp = { path = "crates/nettrap-proto-ntp" }
+nettrap-proto-coap = { path = "crates/nettrap-proto-coap" }
+nettrap-proto-finger = { path = "crates/nettrap-proto-finger" }
+nettrap-proto-ident = { path = "crates/nettrap-proto-ident" }
+nettrap-proto-daytime = { path = "crates/nettrap-proto-daytime" }
+nettrap-proto-time = { path = "crates/nettrap-proto-time" }
+nettrap-proto-chargen = { path = "crates/nettrap-proto-chargen" }
+nettrap-proto-quotd = { path = "crates/nettrap-proto-quotd" }
+nettrap-proto-syslogrecv = { path = "crates/nettrap-proto-syslogrecv" }
+nettrap-proto-dummy = { path = "crates/nettrap-proto-dummy" }
+nettrap-protocols = { path = "crates/nettrap-protocols" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+strip = true
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
