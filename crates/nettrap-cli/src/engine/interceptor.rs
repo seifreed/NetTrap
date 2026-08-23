@@ -317,12 +317,10 @@ fn build_linux_interceptor(
         _ => NetworkMode::SingleHost,
     };
 
-    let flush_on_start = config.has_debug_flag("FLUSH_IPTABLES");
     let mut interceptor =
         NfqueueInterceptor::new(nettrap_interceptor::InterceptorConfig::default())?
             .with_mode(mode)
-            .with_port_redirects(redirect_rules)
-            .with_flush_on_start(flush_on_start);
+            .with_port_redirects(redirect_rules);
 
     if let Some(iface) = effective_linux_interface(interface, config)? {
         interceptor = interceptor.with_interface(iface);

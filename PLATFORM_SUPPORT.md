@@ -20,8 +20,10 @@ the release workflow; it does not imply transparent interception support.
 - Listener mode binds configured TCP/UDP ports and emulates the selected
   service directly.
 - Linux transparent redirection changes host firewall rules and requires
-  privileges. It remains experimental until dedicated chains, crash recovery,
-  and network-namespace E2E are in place.
+  privileges. It isolates redirects in dedicated NetTrap chains and removes
+  stale managed chains on the next startup. `iptables-nft` compatibility is
+  supported through the system wrapper; direct `nft` and network-namespace E2E
+  remain pending.
 - macOS has no transparent redirection implementation.
 - Windows rejects `--intercept`. Release archives do not include WinDivert
   binaries or drivers.

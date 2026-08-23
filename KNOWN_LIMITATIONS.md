@@ -7,9 +7,10 @@ suite.
 ## Networking
 
 - Direct listener mode is the primary supported path.
-- Linux transparent redirection is experimental. It modifies host firewall
-  state and does not yet use dedicated NetTrap chains, nftables, crash recovery,
-  or network-namespace E2E.
+- Linux transparent redirection is experimental. It uses dedicated NetTrap
+  chains and removes stale managed chains on the next startup. Abrupt shutdown
+  can leave its jump rules and multi-host forwarding enabled until that restart
+  or manual cleanup. Direct `nft` support and network-namespace E2E are pending.
 - Windows rejects `--intercept`; WinDivert redirection is incomplete and no
   WinDivert driver is shipped.
 - macOS has no transparent redirection implementation.

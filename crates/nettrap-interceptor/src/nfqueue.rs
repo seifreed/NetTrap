@@ -18,13 +18,11 @@ use crate::prelude::*;
 pub struct NfqueueInterceptor {
     queue_num: u16,
     running: Arc<RwLock<bool>>,
-    rules_installed: RwLock<Vec<IptablesRule>>,
+    managed_families: RwLock<Vec<IpFamily>>,
     mode: NetworkMode,
     interface: Option<String>,
     redirect_rules: Vec<PortRedirect>,
-    flush_on_start: bool,
-    saved_ipv4_rules: RwLock<Option<String>>,
-    saved_ipv6_rules: RwLock<Option<String>>,
+    run_marker: String,
     saved_ipv4_forward: RwLock<Option<String>>,
     saved_ipv6_forward: RwLock<Option<String>>,
 }
@@ -33,12 +31,6 @@ pub struct NfqueueInterceptor {
 pub enum NetworkMode {
     SingleHost,
     MultiHost,
-}
-
-#[derive(Debug, Clone)]
-struct IptablesRule {
-    command: &'static str,
-    rule_args: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,20 +75,6 @@ impl IpFamily {
         }
     }
 
-    fn save_command(self) -> &'static str {
-        match self {
-            Self::V4 => "iptables-save",
-            Self::V6 => "ip6tables-save",
-        }
-    }
-
-    fn restore_command(self) -> &'static str {
-        match self {
-            Self::V4 => "iptables-restore",
-            Self::V6 => "ip6tables-restore",
-        }
-    }
-
     fn loopback_cidr(self) -> &'static str {
         match self {
             Self::V4 => "127.0.0.0/8",
@@ -106,17 +84,18 @@ impl IpFamily {
 }
 
 const IP_FAMILIES: [IpFamily; 2] = [IpFamily::V4, IpFamily::V6];
+const NETTRAP_OUTPUT_CHAIN: &str = "NETTRAP_OUTPUT";
+const NETTRAP_PREROUTING_CHAIN: &str = "NETTRAP_PREROUTING";
+const NETTRAP_JUMP_COMMENT: &str = "nettrap-managed";
 const IPV4_FORWARD_PATH: &str = "/proc/sys/net/ipv4/ip_forward";
 const IPV6_FORWARD_PATH: &str = "/proc/sys/net/ipv6/conf/all/forwarding";
 const MAX_FORWARDING_STATE_BYTES: u64 = 64;
-const MAX_SAVED_RULES_BYTES: usize = 4 * 1024 * 1024;
 const MAX_COMMAND_ERROR_BYTES: usize = 64 * 1024;
 const MAX_COMMAND_LABEL_CHARS: usize = 512;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
 struct LimitedCommandOutput {
     status: ExitStatus,
-    stdout: Vec<u8>,
     stderr: Vec<u8>,
 }
 
@@ -132,10 +111,11 @@ fn build_redirect_rule_args(
     redirect: &PortRedirect,
     proto: &str,
     family: IpFamily,
+    run_marker: &str,
 ) -> (&'static str, Vec<String>) {
     let chain = match mode {
-        NetworkMode::SingleHost => "OUTPUT",
-        NetworkMode::MultiHost => "PREROUTING",
+        NetworkMode::SingleHost => NETTRAP_OUTPUT_CHAIN,
+        NetworkMode::MultiHost => NETTRAP_PREROUTING_CHAIN,
     };
     let mut args = vec![
         "-t".to_string(),
@@ -171,6 +151,10 @@ fn build_redirect_rule_args(
     }
 
     args.extend_from_slice(&[
+        "-m".to_string(),
+        "comment".to_string(),
+        "--comment".to_string(),
+        run_marker.to_string(),
         "-j".to_string(),
         "REDIRECT".to_string(),
         "--to-port".to_string(),
@@ -185,13 +169,11 @@ impl NfqueueInterceptor {
         Ok(Self {
             queue_num: 0,
             running: Arc::new(RwLock::new(false)),
-            rules_installed: RwLock::new(Vec::new()),
+            managed_families: RwLock::new(Vec::new()),
             mode: NetworkMode::SingleHost,
             interface: None,
             redirect_rules: Vec::new(),
-            flush_on_start: false,
-            saved_ipv4_rules: RwLock::new(None),
-            saved_ipv6_rules: RwLock::new(None),
+            run_marker: format!("nettrap:{}", std::process::id()),
             saved_ipv4_forward: RwLock::new(None),
             saved_ipv6_forward: RwLock::new(None),
         })
@@ -212,141 +194,55 @@ impl NfqueueInterceptor {
         self
     }
 
-    pub fn with_flush_on_start(mut self, flush: bool) -> Self {
-        self.flush_on_start = flush;
-        self
-    }
-
-    /// Save current iptables rules for restoration on shutdown
-    fn save_iptables_rules(&self) -> Result<()> {
-        *self.saved_ipv4_rules.write() = Some(Self::save_rules(IpFamily::V4)?);
-        *self.saved_ipv6_rules.write() = Some(Self::save_rules(IpFamily::V6)?);
-        Ok(())
-    }
-
-    /// Restore saved iptables rules
-    fn restore_iptables_rules(&self) -> Result<()> {
-        self.restore_iptables_rules_with(Self::restore_rules)
-    }
-
-    fn restore_iptables_rules_with<F>(&self, mut restore: F) -> Result<()>
-    where
-        F: FnMut(IpFamily, &str) -> Result<()>,
-    {
-        let mut errors = Vec::new();
-
-        if let Some(ref rules) = *self.saved_ipv4_rules.read()
-            && let Err(err) = restore(IpFamily::V4, rules)
-        {
-            errors.push(format!("{}: {}", IpFamily::V4.restore_command(), err));
-        }
-        if let Some(ref rules) = *self.saved_ipv6_rules.read()
-            && let Err(err) = restore(IpFamily::V6, rules)
-        {
-            errors.push(format!("{}: {}", IpFamily::V6.restore_command(), err));
-        }
-
-        if !errors.is_empty() {
-            return Err(Error::Interception(format!(
-                "failed to restore saved iptables rules: {}",
-                errors.join("; ")
-            )));
-        }
-
-        Ok(())
-    }
-
-    fn save_rules(family: IpFamily) -> Result<String> {
-        let output = run_command_with_limited_output(
-            Command::new(family.save_command()),
-            family.save_command(),
-            MAX_SAVED_RULES_BYTES,
-            MAX_COMMAND_ERROR_BYTES,
-        )?;
-
-        if !output.status.success() {
-            return Err(Error::Interception(format!(
-                "{} failed: {}",
-                family.save_command(),
-                render_command_output(&output.stderr)
-            )));
-        }
-
-        tracing::debug!(
-            "Saved {} rules ({} bytes)",
-            family.command(),
-            output.stdout.len()
-        );
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    }
-
-    fn restore_rules(family: IpFamily, rules: &str) -> Result<()> {
-        let mut child = Command::new(family.restore_command())
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| {
-                Error::Interception(format!("{} failed: {}", family.restore_command(), e))
-            })?;
-
-        if let Some(mut stdin) = child.stdin.take() {
-            use std::io::Write;
-            stdin.write_all(rules.as_bytes()).map_err(|e| {
-                Error::Interception(format!("{} write failed: {}", family.restore_command(), e))
-            })?;
-        }
-
-        let status = wait_for_command(&mut child, family.restore_command(), COMMAND_TIMEOUT)?;
-        if !status.success() {
-            return Err(Error::Interception(format!(
-                "{} exited with status {}",
-                family.restore_command(),
-                status
-            )));
-        }
-
-        tracing::info!("Restored {} rules", family.command());
-        Ok(())
-    }
-
     /// Install iptables redirect rules for all listener ports
     fn install_redirect_rules(&self) -> Result<()> {
-        {
-            let mut installed = self.rules_installed.write();
-            installed.clear();
+        self.managed_families.write().clear();
+        let (builtin_chain, managed_chain) = self.chain_names();
+        for family in IP_FAMILIES {
+            self.recover_stale_chain(family, builtin_chain, managed_chain)?;
+            self.run_iptables(
+                family.command(),
+                &["-t", "nat", "-N", managed_chain].map(str::to_string),
+            )?;
+
+            let jump_args = build_jump_rule_args(builtin_chain, managed_chain, true);
+            if let Err(err) = self.run_iptables(family.command(), &jump_args) {
+                let _ = self.try_run_iptables(
+                    family.command(),
+                    &["-t", "nat", "-X", managed_chain].map(str::to_string),
+                );
+                return Err(err);
+            }
+            self.managed_families.write().push(family);
 
             for redirect in &self.redirect_rules {
                 let proto = if redirect.is_tcp { "tcp" } else { "udp" };
-                for family in IP_FAMILIES {
-                    let (_chain, args) = build_redirect_rule_args(
-                        self.mode,
-                        self.interface.as_deref(),
-                        redirect,
+                let (_chain, args) = build_redirect_rule_args(
+                    self.mode,
+                    self.interface.as_deref(),
+                    redirect,
+                    proto,
+                    family,
+                    &self.run_marker,
+                );
+
+                self.run_iptables(family.command(), &args)?;
+
+                if let Some(source_port) = redirect.source_port {
+                    tracing::debug!(
+                        "Installed {} REDIRECT rule for {} port {} -> {}",
+                        family.command(),
                         proto,
-                        family,
+                        source_port,
+                        redirect.target_port
                     );
-
-                    self.run_iptables(family.command(), &args)?;
-                    installed.push(IptablesRule {
-                        command: family.command(),
-                        rule_args: args,
-                    });
-
-                    if let Some(source_port) = redirect.source_port {
-                        tracing::debug!(
-                            "Installed {} REDIRECT rule for {} port {} -> {}",
-                            family.command(),
-                            proto,
-                            source_port,
-                            redirect.target_port
-                        );
-                    } else {
-                        tracing::debug!(
-                            "Installed catch-all {} REDIRECT rule for {} traffic -> {}",
-                            family.command(),
-                            proto,
-                            redirect.target_port
-                        );
-                    }
+                } else {
+                    tracing::debug!(
+                        "Installed catch-all {} REDIRECT rule for {} traffic -> {}",
+                        family.command(),
+                        proto,
+                        redirect.target_port
+                    );
                 }
             }
         }
@@ -355,6 +251,28 @@ impl NfqueueInterceptor {
             self.enable_multihost_forwarding()?;
         }
 
+        Ok(())
+    }
+
+    fn chain_names(&self) -> (&'static str, &'static str) {
+        match self.mode {
+            NetworkMode::SingleHost => ("OUTPUT", NETTRAP_OUTPUT_CHAIN),
+            NetworkMode::MultiHost => ("PREROUTING", NETTRAP_PREROUTING_CHAIN),
+        }
+    }
+
+    fn recover_stale_chain(
+        &self,
+        family: IpFamily,
+        builtin_chain: &str,
+        managed_chain: &str,
+    ) -> Result<()> {
+        let jump_args = build_jump_rule_args(builtin_chain, managed_chain, false);
+        let _ = self.try_run_iptables(family.command(), &jump_args)?;
+        for action in ["-F", "-X"] {
+            let args = ["-t", "nat", action, managed_chain].map(str::to_string);
+            let _ = self.try_run_iptables(family.command(), &args)?;
+        }
         Ok(())
     }
 
@@ -418,30 +336,31 @@ impl NfqueueInterceptor {
     where
         F: FnMut(&str, &[String]) -> Result<()>,
     {
-        let rules = self.rules_installed.read().clone();
+        let families = self.managed_families.read().clone();
+        let (builtin_chain, managed_chain) = self.chain_names();
         let mut errors = Vec::new();
 
-        for rule in &rules {
-            let delete_args: Vec<String> = rule
-                .rule_args
-                .iter()
-                .map(|a| {
-                    if a == "-A" {
-                        "-D".to_string()
-                    } else {
-                        a.clone()
-                    }
-                })
-                .collect();
-
-            if let Err(err) = delete_rule(rule.command, &delete_args) {
-                tracing::warn!("Failed to remove {} rule: {}", rule.command, err);
-                errors.push(format!("{}: {}", rule.command, err));
+        for family in families.iter().rev() {
+            let command = family.command();
+            let cleanup_args = [
+                build_jump_rule_args(builtin_chain, managed_chain, false),
+                ["-t", "nat", "-F", managed_chain]
+                    .map(str::to_string)
+                    .to_vec(),
+                ["-t", "nat", "-X", managed_chain]
+                    .map(str::to_string)
+                    .to_vec(),
+            ];
+            for args in cleanup_args {
+                if let Err(err) = delete_rule(command, &args) {
+                    tracing::warn!("Failed to clean {} chain: {}", command, err);
+                    errors.push(format!("{}: {}", command, err));
+                }
             }
         }
 
-        self.rules_installed.write().clear();
-        tracing::info!("Removed {} iptables rules", rules.len());
+        self.managed_families.write().clear();
+        tracing::info!("Removed {} managed iptables chains", families.len());
         if errors.is_empty() {
             return Ok(());
         }
@@ -453,6 +372,18 @@ impl NfqueueInterceptor {
     }
 
     fn run_iptables(&self, command: &str, args: &[String]) -> Result<()> {
+        if let Some(stderr) = self.run_iptables_command(command, args)? {
+            let label = command_invocation_label(command, args);
+            return Err(Error::Interception(format!("{} failed: {}", label, stderr)));
+        }
+        Ok(())
+    }
+
+    fn try_run_iptables(&self, command: &str, args: &[String]) -> Result<bool> {
+        Ok(self.run_iptables_command(command, args)?.is_none())
+    }
+
+    fn run_iptables_command(&self, command: &str, args: &[String]) -> Result<Option<String>> {
         let mut process = Command::new(command);
         process.args(args);
         let label = command_invocation_label(command, args);
@@ -464,24 +395,30 @@ impl NfqueueInterceptor {
         )?;
 
         if !output.status.success() {
-            return Err(Error::Interception(format!(
-                "{} failed: {}",
-                label,
-                render_command_output(&output.stderr)
-            )));
+            let stderr = render_command_output(&output.stderr);
+            tracing::debug!("{} did not apply: {}", label, stderr);
+            return Ok(Some(stderr));
         }
-        Ok(())
+        Ok(None)
     }
+}
 
-    /// Flush iptables NAT table (optional, controlled by config)
-    pub fn flush_nat_rules(&self) -> Result<()> {
-        let args = ["-t".to_string(), "nat".to_string(), "-F".to_string()];
-        for family in IP_FAMILIES {
-            self.run_iptables(family.command(), &args)?;
-        }
-        tracing::info!("Flushed iptables/ip6tables NAT rules");
-        Ok(())
+fn build_jump_rule_args(builtin_chain: &str, managed_chain: &str, insert: bool) -> Vec<String> {
+    let mut args = vec!["-t".to_string(), "nat".to_string()];
+    if insert {
+        args.extend(["-I".to_string(), builtin_chain.to_string(), "1".to_string()]);
+    } else {
+        args.extend(["-D".to_string(), builtin_chain.to_string()]);
     }
+    args.extend([
+        "-m".to_string(),
+        "comment".to_string(),
+        "--comment".to_string(),
+        NETTRAP_JUMP_COMMENT.to_string(),
+        "-j".to_string(),
+        managed_chain.to_string(),
+    ]);
+    args
 }
 
 fn run_command_with_limited_output(
@@ -514,8 +451,8 @@ fn run_command_with_limited_output(
     let stdout = join_limited_reader(stdout_reader, label, "stdout")?;
     let stderr = join_limited_reader(stderr_reader, label, "stderr")?;
 
-    let stdout = match stdout {
-        LimitedCommandStream::Content(stdout) => stdout,
+    match stdout {
+        LimitedCommandStream::Content(_) => {}
         LimitedCommandStream::TooLarge => {
             return Err(Error::Interception(format!(
                 "{label} stdout exceeded {stdout_limit} byte limit"
@@ -531,11 +468,7 @@ fn run_command_with_limited_output(
         }
     };
 
-    Ok(LimitedCommandOutput {
-        status,
-        stdout,
-        stderr,
-    })
+    Ok(LimitedCommandOutput { status, stderr })
 }
 
 fn wait_for_command(child: &mut Child, label: &str, timeout: Duration) -> Result<ExitStatus> {
@@ -640,17 +573,10 @@ impl Interceptor for NfqueueInterceptor {
             ));
         }
 
-        self.save_iptables_rules()?;
-
-        if self.flush_on_start {
-            self.flush_nat_rules()?;
-        }
-
         if let Err(err) = self.install_redirect_rules() {
             let mut cleanup_errors = Vec::new();
             Self::run_shutdown_cleanup(
                 || self.remove_redirect_rules(),
-                || self.restore_iptables_rules(),
                 || Ok(()),
                 &mut cleanup_errors,
             );
@@ -698,7 +624,6 @@ impl Interceptor for NfqueueInterceptor {
         let mut cleanup_errors = Vec::new();
         Self::run_shutdown_cleanup(
             || self.remove_redirect_rules(),
-            || self.restore_iptables_rules(),
             || {
                 if self.mode == NetworkMode::MultiHost {
                     Self::restore_forwarding(
@@ -740,22 +665,16 @@ impl Interceptor for NfqueueInterceptor {
 }
 
 impl NfqueueInterceptor {
-    fn run_shutdown_cleanup<Remove, Restore, Forward>(
+    fn run_shutdown_cleanup<Remove, Forward>(
         mut remove_redirect_rules: Remove,
-        mut restore_iptables_rules: Restore,
         mut restore_forwarding: Forward,
         cleanup_errors: &mut Vec<String>,
     ) where
         Remove: FnMut() -> Result<()>,
-        Restore: FnMut() -> Result<()>,
         Forward: FnMut() -> Result<()>,
     {
         if let Err(err) = remove_redirect_rules() {
             cleanup_errors.push(format!("redirect rule removal failed: {}", err));
-        }
-
-        if let Err(err) = restore_iptables_rules() {
-            cleanup_errors.push(format!("iptables restore failed: {}", err));
         }
 
         if let Err(err) = restore_forwarding() {
@@ -891,11 +810,16 @@ mod tests {
             &redirect,
             "tcp",
             IpFamily::V4,
+            "nettrap:test",
         );
 
-        assert_eq!(chain, "OUTPUT");
+        assert_eq!(chain, NETTRAP_OUTPUT_CHAIN);
         assert!(contains_args(&args, &["-m", "owner", "!", "--uid-owner"]));
         assert!(contains_args(&args, &["!", "-d", "127.0.0.0/8"]));
+        assert!(contains_args(
+            &args,
+            &["-m", "comment", "--comment", "nettrap:test"]
+        ));
     }
 
     #[test]
@@ -907,6 +831,7 @@ mod tests {
             &redirect,
             "tcp",
             IpFamily::V4,
+            "nettrap:test",
         );
 
         assert!(contains_args(&args, &["-m", "owner", "!", "--uid-owner"]));
@@ -921,9 +846,10 @@ mod tests {
             &redirect,
             "tcp",
             IpFamily::V6,
+            "nettrap:test",
         );
 
-        assert_eq!(chain, "OUTPUT");
+        assert_eq!(chain, NETTRAP_OUTPUT_CHAIN);
         assert!(contains_args(&args, &["!", "-d", "::1/128"]));
         assert!(contains_args(&args, &["-m", "owner", "!", "--uid-owner"]));
         assert_eq!(IpFamily::V6.command(), "ip6tables");
@@ -938,83 +864,50 @@ mod tests {
             &redirect,
             "udp",
             IpFamily::V6,
+            "nettrap:test",
         );
 
-        assert_eq!(chain, "PREROUTING");
+        assert_eq!(chain, NETTRAP_PREROUTING_CHAIN);
         assert!(!contains_args(&args, &["-m", "owner", "!", "--uid-owner"]));
         assert!(contains_args(&args, &["-i", "eth0"]));
         assert!(contains_args(&args, &["!", "-d", "::1/128"]));
     }
 
     #[test]
-    fn restore_iptables_rules_attempts_all_saved_families_before_failing() {
-        let interceptor =
-            NfqueueInterceptor::new(InterceptorConfig::default()).expect("interceptor builds");
-        *interceptor.saved_ipv4_rules.write() = Some("ipv4 rules".to_string());
-        *interceptor.saved_ipv6_rules.write() = Some("ipv6 rules".to_string());
-        let mut attempted = Vec::new();
+    fn test_managed_jump_rule_is_stable_and_auditable() {
+        let insert = build_jump_rule_args("OUTPUT", NETTRAP_OUTPUT_CHAIN, true);
+        let delete = build_jump_rule_args("OUTPUT", NETTRAP_OUTPUT_CHAIN, false);
 
-        let err = interceptor
-            .restore_iptables_rules_with(|family, rules| {
-                attempted.push((family, rules.to_string()));
-                Err(Error::Interception(format!(
-                    "{} restore failed",
-                    family.restore_command()
-                )))
-            })
-            .expect_err("restore failures should be reported");
-
-        assert_eq!(
-            attempted,
-            vec![
-                (IpFamily::V4, "ipv4 rules".to_string()),
-                (IpFamily::V6, "ipv6 rules".to_string())
-            ]
-        );
-        let message = err.to_string();
-        assert!(message.contains("iptables-restore"));
-        assert!(message.contains("ip6tables-restore"));
+        assert!(contains_args(&insert, &["-I", "OUTPUT", "1"]));
+        assert!(contains_args(&delete, &["-D", "OUTPUT"]));
+        for args in [insert, delete] {
+            assert!(contains_args(
+                &args,
+                &["-m", "comment", "--comment", NETTRAP_JUMP_COMMENT]
+            ));
+            assert!(contains_args(&args, &["-j", NETTRAP_OUTPUT_CHAIN]));
+        }
     }
 
     #[test]
-    fn remove_redirect_rules_attempts_all_saved_rules_before_failing() {
+    fn test_remove_redirect_rules_cleans_only_managed_chains() {
         let interceptor =
             NfqueueInterceptor::new(InterceptorConfig::default()).expect("interceptor builds");
-        *interceptor.rules_installed.write() = vec![
-            IptablesRule {
-                command: "iptables",
-                rule_args: vec!["-A".to_string(), "INPUT".to_string()],
-            },
-            IptablesRule {
-                command: "ip6tables",
-                rule_args: vec!["-A".to_string(), "OUTPUT".to_string()],
-            },
-        ];
+        *interceptor.managed_families.write() = IP_FAMILIES.to_vec();
         let mut attempted = Vec::new();
 
-        let err = interceptor
+        interceptor
             .remove_redirect_rules_with(|command, args| {
                 attempted.push((command.to_string(), args.to_vec()));
-                Err(Error::Interception(format!("{} delete failed", command)))
+                Ok(())
             })
-            .expect_err("rule deletion failures should be reported");
+            .expect("managed chains should be removed");
 
-        assert_eq!(
-            attempted,
-            vec![
-                (
-                    "iptables".to_string(),
-                    vec!["-D".to_string(), "INPUT".to_string()]
-                ),
-                (
-                    "ip6tables".to_string(),
-                    vec!["-D".to_string(), "OUTPUT".to_string()]
-                )
-            ]
-        );
-        let message = err.to_string();
-        assert!(message.contains("iptables"));
-        assert!(message.contains("ip6tables"));
+        assert_eq!(attempted.len(), 6);
+        assert!(attempted.iter().all(|(_, args)| {
+            args.contains(&NETTRAP_OUTPUT_CHAIN.to_string()) && !args.contains(&"INPUT".to_string())
+        }));
+        assert!(interceptor.managed_families.read().is_empty());
     }
 
     #[test]
@@ -1095,16 +988,11 @@ mod tests {
 
     #[test]
     fn shutdown_cleanup_continues_after_redirect_rule_failure() {
-        let mut called_restore = false;
         let mut called_forwarding = false;
         let mut errors = Vec::new();
 
         NfqueueInterceptor::run_shutdown_cleanup(
             || Err(Error::Interception("remove failed".to_string())),
-            || {
-                called_restore = true;
-                Ok(())
-            },
             || {
                 called_forwarding = true;
                 Ok(())
@@ -1112,7 +1000,6 @@ mod tests {
             &mut errors,
         );
 
-        assert!(called_restore);
         assert!(called_forwarding);
         assert_eq!(errors.len(), 1);
         assert!(errors[0].contains("redirect rule removal failed"));
@@ -1123,7 +1010,6 @@ mod tests {
         let mut errors = Vec::new();
 
         NfqueueInterceptor::run_shutdown_cleanup(
-            || Ok(()),
             || Ok(()),
             || Err(Error::Interception("forwarding restore failed".to_string())),
             &mut errors,
