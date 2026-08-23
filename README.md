@@ -299,7 +299,7 @@ nettrap tls caroot              # Show the mkcert CA root directory
 nettrap pcap -i <file>          # Replay a PCAP file offline and extract indicators
 nettrap report -i <file>        # Export NBI report from JSON/JSONL input
 nettrap status [--json]         # Show engine status
-nettrap api [-b <ADDR>]         # Start REST API server (/health, /api/flows, /api/stats; default 127.0.0.1:9090)
+nettrap api [-b <ADDR>]         # Start REST API server (/health, /api/v1/flows, /api/v1/stats; default 127.0.0.1:9090)
 ```
 
 ### Global Flags

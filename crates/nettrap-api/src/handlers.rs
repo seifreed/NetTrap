@@ -5,6 +5,8 @@ use nettrap_flow::FlowManager;
 
 use crate::health::RuntimeHealth;
 
+pub const API_SCHEMA_VERSION: u32 = 1;
+
 pub struct ApiState {
     pub flow_manager: Arc<FlowManager>,
     pub runtime_health: Arc<RuntimeHealth>,
@@ -31,6 +33,8 @@ impl ApiState {
 pub fn create_router(state: ApiState) -> Router {
     Router::new()
         .route("/health", get(health_handler))
+        .route("/api/v1/flows", get(flows_handler))
+        .route("/api/v1/stats", get(stats_handler))
         .route("/api/flows", get(flows_handler))
         .route("/api/stats", get(stats_handler))
         .with_state(Arc::new(state))
@@ -38,12 +42,15 @@ pub fn create_router(state: ApiState) -> Router {
 
 pub async fn health_handler(State(state): State<Arc<ApiState>>) -> Json<serde_json::Value> {
     let health = state.runtime_health.snapshot();
-    Json(crate::runtime_health_payload(&health))
+    let mut payload = crate::runtime_health_payload(&health);
+    payload["schema_version"] = API_SCHEMA_VERSION.into();
+    Json(payload)
 }
 
 pub async fn flows_handler(State(state): State<Arc<ApiState>>) -> Json<serde_json::Value> {
     let flows: Vec<_> = state.flow_manager.iter().collect();
     Json(serde_json::json!({
+        "schema_version": API_SCHEMA_VERSION,
         "flows": flows.iter().map(|f| {
             serde_json::json!({
                 "id": f.id.to_string(),
@@ -71,6 +78,7 @@ pub async fn stats_handler(State(state): State<Arc<ApiState>>) -> Json<serde_jso
         )
     });
     Json(serde_json::json!({
+        "schema_version": API_SCHEMA_VERSION,
         "total_flows": state.flow_manager.active_count(),
         "total_bytes": total_bytes,
     }))
@@ -145,6 +153,7 @@ mod tests {
         let response = flows_handler(State(state)).await.0;
         let flows = response["flows"].as_array().expect("flows array");
 
+        assert_eq!(response["schema_version"], API_SCHEMA_VERSION);
         assert_eq!(flows.len(), 1);
         assert_eq!(flows[0]["src"], "192.168.1.10:53000");
         assert_eq!(flows[0]["dst"], "10.0.0.5:443");
@@ -182,6 +191,7 @@ mod tests {
 
         let response = stats_handler(State(state)).await.0;
 
+        assert_eq!(response["schema_version"], API_SCHEMA_VERSION);
         assert_eq!(response["total_flows"], 2);
         assert_eq!(response["total_bytes"], 100);
     }
@@ -207,6 +217,7 @@ mod tests {
 
         let response = health_handler(State(state)).await.0;
 
+        assert_eq!(response["schema_version"], API_SCHEMA_VERSION);
         assert_eq!(response["status"], "error");
         assert_eq!(response["fatal_error"], "bind failed");
         assert_eq!(response["listeners"][0]["state"], "failed");
