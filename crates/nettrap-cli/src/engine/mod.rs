@@ -1208,9 +1208,9 @@ mod tests {
             report_format: None,
         };
 
-        let err = build_engine(&args, false, None)
-            .await
-            .expect_err("Windows interception must remain disabled");
+        let Err(err) = build_engine(&args, false, None).await else {
+            panic!("Windows interception must remain disabled");
+        };
 
         assert!(err.to_string().contains("not supported on Windows"));
     }
