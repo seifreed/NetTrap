@@ -7,6 +7,8 @@ use nettrap_core::{DatabaseConfig, DistributedConfig};
 use super::ListenerConfig;
 use crate::config::{default_dns_config, default_http_config};
 
+pub const CONFIG_VERSION: u32 = 1;
+
 /// FakeTime mode configuration — shifts all service timestamps to trigger time-bombs
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FakeTimeConfig {
@@ -39,6 +41,8 @@ pub enum NetworkMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EngineConfig {
+    #[serde(default = "current_config_version")]
+    pub config_version: u32,
     #[serde(default)]
     pub listeners: Vec<ListenerConfig>,
     #[serde(default = "default_attribution_enabled")]
@@ -118,6 +122,9 @@ pub struct EngineConfig {
 fn default_attribution_enabled() -> bool {
     true
 }
+fn current_config_version() -> u32 {
+    CONFIG_VERSION
+}
 fn default_attribution_timeout_ms() -> u64 {
     5000
 }
@@ -134,6 +141,7 @@ fn default_report_language() -> String {
 impl Default for EngineConfig {
     fn default() -> Self {
         Self {
+            config_version: CONFIG_VERSION,
             listeners: vec![default_dns_config(), default_http_config()],
             attribution_enabled: true,
             attribution_timeout_ms: 5000,

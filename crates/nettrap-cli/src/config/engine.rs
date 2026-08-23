@@ -4,7 +4,7 @@ mod model;
 mod parsing;
 
 use super::ListenerConfig;
-pub use model::{EngineConfig, FakeTimeConfig, NetworkMode};
+pub use model::{CONFIG_VERSION, EngineConfig, FakeTimeConfig, NetworkMode};
 pub use nettrap_core::{DatabaseConfig, DistributedConfig, EventSinkConfig};
 
 use parsing::{
@@ -47,6 +47,12 @@ impl EngineConfig {
     }
 
     fn validate_global_settings(&mut self) -> crate::Result<()> {
+        if self.config_version != CONFIG_VERSION {
+            return Err(crate::Error::Config(format!(
+                "unsupported config_version {}; expected {}",
+                self.config_version, CONFIG_VERSION
+            )));
+        }
         if self.database.pool_size == 0 {
             return Err(crate::Error::Config(
                 "database.pool_size must be greater than 0".to_string(),

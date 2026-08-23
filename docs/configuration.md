@@ -9,6 +9,7 @@ nettrap config --defaults > config.toml
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
+| `config_version` | u32 | `1` | Configuration schema version; omitted legacy files are treated as v1 and unknown versions are rejected |
 | `attribution_enabled` | bool | `true` | Enable process-to-connection tracking |
 | `attribution_timeout_ms` | u64 | `5000` | Attribution operation timeout and cache TTL |
 | `default_decision` | string | `"intercept"` | Reserved alpha field; only `intercept` is accepted and no per-flow policy engine is active |
@@ -38,6 +39,14 @@ nettrap config --defaults > config.toml
 | `tls_ca_cert` | string | - | TLS CA certificate path |
 | `tls_ca_key` | string | - | TLS CA private key path |
 | `tls_cert_dir` | string | - | Directory for generated TLS certificates |
+
+## Configuration Compatibility
+
+Version 1 is the only current schema. Existing unversioned configuration files
+remain valid and are interpreted as version 1. NetTrap fails closed on unknown
+versions instead of applying a partial configuration. A future incompatible
+schema will ship with an explicit migration command before version 2 is
+accepted.
 
 ## Listener Options (`[[listeners]]`)
 

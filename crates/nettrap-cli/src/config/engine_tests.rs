@@ -1,9 +1,10 @@
 use std::fs;
 
 use super::{
-    EngineConfig, MAX_DISTRIBUTED_EVENT_SINKS, MAX_DISTRIBUTED_HTTP_SINK_BATCH_SIZE,
-    MAX_DISTRIBUTED_NODE_TAG_BYTES, MAX_DISTRIBUTED_NODE_TAGS, MAX_FILTER_RULE_BYTES,
-    MAX_FILTER_RULES_PER_LIST, parse_listener_pasv_port, validate_listener_optional_string_fields,
+    CONFIG_VERSION, EngineConfig, MAX_DISTRIBUTED_EVENT_SINKS,
+    MAX_DISTRIBUTED_HTTP_SINK_BATCH_SIZE, MAX_DISTRIBUTED_NODE_TAG_BYTES,
+    MAX_DISTRIBUTED_NODE_TAGS, MAX_FILTER_RULE_BYTES, MAX_FILTER_RULES_PER_LIST,
+    parse_listener_pasv_port, validate_listener_optional_string_fields,
 };
 use crate::config::ListenerConfig;
 use crate::engine::validate_adapter_configuration;
@@ -1559,6 +1560,43 @@ fn from_file_rejects_unsupported_default_decision() {
     let _ = fs::remove_file(&path);
 
     assert!(err.to_string().contains("unsupported default_decision"));
+}
+
+#[test]
+fn from_file_treats_unversioned_config_as_version_one() {
+    let path = std::env::temp_dir().join(format!(
+        "nettrap-config-version-legacy-{}.toml",
+        std::process::id()
+    ));
+    let mut value = toml::Value::try_from(EngineConfig::default()).expect("serialize config");
+    value
+        .as_table_mut()
+        .expect("engine config serializes as a table")
+        .remove("config_version");
+    fs::write(&path, toml::to_string(&value).expect("encode config")).expect("write config");
+
+    let loaded = EngineConfig::from_file(&path).expect("legacy v1 config should load");
+
+    let _ = fs::remove_file(&path);
+    assert_eq!(loaded.config_version, CONFIG_VERSION);
+}
+
+#[test]
+fn from_file_rejects_unsupported_config_version() {
+    let path = std::env::temp_dir().join(format!(
+        "nettrap-config-version-unsupported-{}.toml",
+        std::process::id()
+    ));
+    let config = EngineConfig {
+        config_version: CONFIG_VERSION + 1,
+        ..EngineConfig::default()
+    };
+    fs::write(&path, toml::to_string(&config).expect("serialize config")).expect("write config");
+
+    let err = EngineConfig::from_file(&path).expect_err("unknown config version should fail");
+
+    let _ = fs::remove_file(&path);
+    assert!(err.to_string().contains("unsupported config_version"));
 }
 
 #[test]

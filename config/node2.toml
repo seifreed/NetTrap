@@ -1,5 +1,6 @@
 attribution_enabled = false
 attribution_timeout_ms = 5000
+config_version = 1
 default_decision = "intercept"
 pcap_enabled = false
 output_format = "jsonl"
