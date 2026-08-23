@@ -191,7 +191,21 @@ jobs:
           done
 
       - name: Run benchmarks
-        run: cargo bench --no-fail-fast
+        run: |
+          mkdir -p target/criterion
+          rustc -Vv > target/criterion/environment.txt
+          cargo -V >> target/criterion/environment.txt
+          uname -a >> target/criterion/environment.txt
+          cargo bench --no-fail-fast
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: benchmark-results-${{ github.sha }}
+          path: target/criterion
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Check outdated dependencies
         run: cargo outdated
