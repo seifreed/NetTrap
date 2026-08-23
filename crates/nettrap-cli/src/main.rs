@@ -60,10 +60,10 @@ fn configure_windows_arm64_runtime() {
         }
     }
 
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            prepend_path(dir.to_path_buf());
-        }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        prepend_path(dir.to_path_buf());
     }
 
     prepend_path(PathBuf::from(r"C:\Windows\System32\Npcap"));
