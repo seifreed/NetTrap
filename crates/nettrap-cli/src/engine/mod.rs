@@ -1168,6 +1168,7 @@ mod tests {
             .expect("api-only mode should be allowed");
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[tokio::test]
     async fn build_engine_requires_interceptor_when_requested() {
         let args = RunArgs {
@@ -1189,6 +1190,29 @@ mod tests {
 
         assert!(engine.options.intercept_enabled);
         assert!(engine.options.require_interceptor);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn build_engine_rejects_windows_interception() {
+        let args = RunArgs {
+            interface: None,
+            ports: Vec::new(),
+            attribution: false,
+            intercept: true,
+            output: None,
+            pcap: false,
+            pcap_path: None,
+            log_level: None,
+            json_output: false,
+            report_format: None,
+        };
+
+        let err = build_engine(&args, false, None)
+            .await
+            .expect_err("Windows interception must remain disabled");
+
+        assert!(err.to_string().contains("not supported on Windows"));
     }
 
     #[tokio::test]
