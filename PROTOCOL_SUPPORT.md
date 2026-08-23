@@ -9,6 +9,11 @@ malware-analysis labs.
 NetTrap process. Crate unit/integration tests exist beyond the two entries marked
 Yes, but they do not establish real-client compatibility.
 
+The required client contract is `dig` 9.x, `curl` 8.x, and OpenSSL 3.x or
+LibreSSL 3.x. `tests/verify_platform.sh` fails on other major versions and logs
+the exact client versions used by each runner. A new major is added only after
+the same E2E suite passes with it.
+
 | Handler | Current behavior | Client E2E | Known ceiling |
 |---|---|---:|---|
 | DNS | Parses UDP/TCP queries and builds synthetic records/NXDOMAIN responses | Yes (`dig`, UDP and TCP) | Broad resolver compatibility is not a required gate |

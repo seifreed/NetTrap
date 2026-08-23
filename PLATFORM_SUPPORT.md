@@ -33,3 +33,24 @@ the release workflow; it does not imply transparent interception support.
   experimental on every platform.
 
 Only targets listed with a release asset are packaged by `release.yml`.
+
+## Tested Operating Systems
+
+These are tested environments, not broader minimum-version claims. Platforms
+outside this table may work but are unsupported until added to CI.
+
+| Target | Required CI environment |
+|---|---|
+| Linux x86_64 | Current `ubuntu-latest` GitHub-hosted runner |
+| Linux ARM64 | Ubuntu 24.04 ARM GitHub-hosted runner |
+| macOS x86_64 | macOS 15 Intel GitHub-hosted runner |
+| macOS ARM64 | macOS 14 ARM GitHub-hosted runner |
+| Windows x86_64 | Current `windows-latest` GitHub-hosted runner |
+| Windows ARM64 | Windows 11 ARM GitHub-hosted runner |
+
+## macOS Decision
+
+macOS is listener and experimental capture only for the 1.0 scope. Transparent
+redirection is not on the 1.0 roadmap. That decision changes only if a native
+adapter is contributed with fail-open cleanup and privileged E2E coverage on
+both Intel and ARM runners.

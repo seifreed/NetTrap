@@ -106,6 +106,28 @@ echo ""
 
 echo "=== Step 6: Integration Tests ==="
 
+DIG_VERSION=$(dig -v 2>&1)
+CURL_VERSION=$(curl --version | head -n 1)
+OPENSSL_VERSION=$(openssl version)
+
+echo "Client versions:"
+echo "  $DIG_VERSION"
+echo "  $CURL_VERSION"
+echo "  $OPENSSL_VERSION"
+
+if ! grep -qE 'DiG 9\.' <<< "$DIG_VERSION"; then
+    echo "✗ Supported dig major is 9.x"
+    exit 1
+fi
+if ! grep -qE '^curl 8\.' <<< "$CURL_VERSION"; then
+    echo "✗ Supported curl major is 8.x"
+    exit 1
+fi
+if ! grep -qE '^(OpenSSL 3\.|LibreSSL 3\.)' <<< "$OPENSSL_VERSION"; then
+    echo "✗ Supported TLS client majors are OpenSSL 3.x and LibreSSL 3.x"
+    exit 1
+fi
+
 mkdir -p /tmp/nettrap_smtp_test
 
 cat > /tmp/nettrap_test_config.toml << 'EOF'
