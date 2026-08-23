@@ -7,7 +7,7 @@ use parking_lot::RwLock;
 
 use crate::prelude::*;
 
-const DNS_QUERY_ONLY_COUNTS: [u16; 4] = [1, 0, 0, 0];
+const MAX_DNS_QUERY_ADDITIONALS: u16 = 1;
 
 fn dns_section_counts(data: &[u8]) -> Option<[u16; 4]> {
     let counts = data.get(4..12)?;
@@ -25,7 +25,10 @@ fn dns_section_counts(data: &[u8]) -> Option<[u16; 4]> {
 /// parser panics, so callers' `?` / `map_err` paths degrade to a normal
 /// protocol error instead of crashing the honeypot process.
 fn safe_message_from_vec(data: &[u8]) -> Option<Message> {
-    if dns_section_counts(data) != Some(DNS_QUERY_ONLY_COUNTS) {
+    if !matches!(
+        dns_section_counts(data),
+        Some([1, 0, 0, additionals]) if additionals <= MAX_DNS_QUERY_ADDITIONALS
+    ) {
         return None;
     }
 
@@ -342,7 +345,7 @@ impl DnsHandlerTrait for DnsHandler {
                     "Expected exactly one DNS query, got {questions}"
                 )));
             }
-            if answers != 0 || authorities != 0 || additionals != 0 {
+            if answers != 0 || authorities != 0 || additionals > MAX_DNS_QUERY_ADDITIONALS {
                 return Err(Error::Protocol(
                     "DNS query contains unexpected resource record sections".into(),
                 ));
@@ -368,6 +371,7 @@ impl DnsHandlerTrait for DnsHandler {
         if !message.answers.is_empty()
             || !message.authorities.is_empty()
             || !message.additionals.is_empty()
+            || message.signature.is_some()
         {
             return Err(Error::Protocol(
                 "DNS query contains unexpected resource record sections".into(),
@@ -899,6 +903,21 @@ mod tests {
         ];
 
         assert!(safe_message_from_vec(&fuzz_regression).is_none());
+    }
+
+    #[test]
+    fn test_safe_message_from_vec_accepts_edns_query() {
+        let mut message = Message::query();
+        message.add_query(hickory_proto::op::Query::query(
+            Name::from_ascii("example.com.").expect("valid query name"),
+            RecordType::A,
+        ));
+        let mut edns = hickory_proto::op::Edns::new();
+        edns.set_max_payload(1232);
+        message.set_edns(edns);
+        let query = message.to_vec().expect("EDNS query should serialize");
+
+        assert!(safe_message_from_vec(&query).is_some());
     }
 
     #[test]
