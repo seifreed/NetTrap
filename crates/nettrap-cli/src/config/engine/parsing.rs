@@ -161,15 +161,13 @@ pub(crate) fn normalize_default_decision(decision: &mut String) -> crate::Result
     }
 
     let normalized = trimmed.to_ascii_lowercase();
-    if normalized != "intercept" {
-        return Err(crate::Error::Config(format!(
-            "unsupported default_decision '{}'",
-            trimmed
-        )));
-    }
+    let parsed = normalized
+        .parse::<nettrap_engine::FlowDecision>()
+        .map_err(|_| crate::Error::Config(format!("unsupported default_decision '{}'", trimmed)))?;
+    let normalized = parsed.as_str();
 
-    if normalized != *decision {
-        *decision = normalized;
+    if normalized != decision {
+        normalized.clone_into(decision);
     }
 
     Ok(())
@@ -315,10 +313,19 @@ mod tests {
     }
 
     #[test]
-    fn normalize_default_decision_accepts_intercept() {
+    fn normalize_default_decision_migrates_intercept_to_emulate() {
         let mut decision = " INTERCEPT ".to_string();
         normalize_default_decision(&mut decision).unwrap();
-        assert_eq!(decision, "intercept");
+        assert_eq!(decision, "emulate");
+    }
+
+    #[test]
+    fn normalize_default_decision_accepts_all_supported_values() {
+        for value in ["pass", "capture", "emulate", "sinkhole", "block"] {
+            let mut decision = value.to_string();
+            normalize_default_decision(&mut decision).unwrap();
+            assert_eq!(decision, value);
+        }
     }
 
     #[test]

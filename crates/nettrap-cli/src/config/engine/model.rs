@@ -129,7 +129,7 @@ fn default_attribution_timeout_ms() -> u64 {
     5000
 }
 fn default_decision() -> String {
-    "intercept".to_string()
+    "emulate".to_string()
 }
 fn default_output_format() -> String {
     "jsonl".to_string()
@@ -145,7 +145,7 @@ impl Default for EngineConfig {
             listeners: vec![default_dns_config(), default_http_config()],
             attribution_enabled: true,
             attribution_timeout_ms: 5000,
-            default_decision: "intercept".to_string(),
+            default_decision: "emulate".to_string(),
             pcap_enabled: false,
             pcap_path: None,
             output_format: "jsonl".to_string(),

@@ -1538,7 +1538,7 @@ fn from_file_normalizes_default_decision() {
 
     let _ = fs::remove_file(&path);
 
-    assert_eq!(loaded.default_decision, "intercept");
+    assert_eq!(loaded.default_decision, "emulate");
 }
 
 #[test]

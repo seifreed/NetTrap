@@ -1,9 +1,11 @@
 //! Runtime policies that do not depend on a concrete listener or platform adapter.
 
 pub mod health;
+mod policy;
 mod runtime;
 
 pub use health::RuntimeHealth;
+pub use policy::{FlowDecision, ParseFlowDecisionError};
 pub use runtime::{RuntimeHost, RuntimeRunner};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
