@@ -1,6 +1,16 @@
 #!/bin/bash
 
-set -e
+set -euo pipefail
+
+cleanup() {
+    if [ -n "${NETTRAP_PID:-}" ]; then
+        kill "$NETTRAP_PID" 2>/dev/null || true
+        wait "$NETTRAP_PID" 2>/dev/null || true
+    fi
+    rm -f /tmp/nettrap_test_config.toml /tmp/dns_result.txt
+}
+
+trap cleanup EXIT
 
 echo "========================================"
 echo "NetTrap Cross-Platform Verification"
@@ -18,30 +28,18 @@ echo "=== Step 1: Build Verification ==="
 echo "Building NetTrap for $OS $ARCH..."
 
 cargo build --release 2>&1 | tail -10
-
-if [ $? -eq 0 ]; then
-    echo "✓ Build successful"
-else
-    echo "✗ Build failed"
-    exit 1
-fi
+echo "✓ Build successful"
 
 echo ""
 
 echo "=== Step 2: Unit Tests ==="
 cargo test --all 2>&1 | tail -30
-
-if [ $? -eq 0 ]; then
-    echo "✓ Unit tests passed"
-else
-    echo "✗ Unit tests failed"
-    exit 1
-fi
+echo "✓ Unit tests passed"
 
 echo ""
 
 echo "=== Step 3: Clippy Verification ==="
-cargo clippy --all-targets --all-features 2>&1 | grep -E "error|warning" | tail -20 || true
+cargo clippy --all-targets --all-features -- -D warnings
 
 echo ""
 
@@ -122,7 +120,7 @@ enabled = true
 emulate_response = true
 
 [[listeners]]
-name = "http_test"
+name = "http"
 protocol = "tcp"
 port = 18088
 bind_address = "127.0.0.1"
@@ -138,30 +136,33 @@ sleep 2
 
 echo "Testing DNS..."
 if command -v dig &> /dev/null; then
-    dig @127.0.0.1 -p 53539 test.example.com A +short > /tmp/dns_result.txt 2>&1 || true
-    if grep -qE "^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$" /tmp/dns_result.txt; then
+    if dig @127.0.0.1 -p 53539 test.example.com A +short > /tmp/dns_result.txt 2>&1 \
+        && grep -qE "^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$" /tmp/dns_result.txt; then
         echo "✓ DNS test passed"
     else
-        echo "⚠ DNS test inconclusive (may require privileged ports)"
+        echo "✗ DNS test failed"
+        exit 1
     fi
 else
-    echo "⚠ dig not available, skipping DNS test"
+    echo "✗ dig is required for the DNS integration test"
+    exit 1
 fi
 
 echo "Testing HTTP..."
 if command -v curl &> /dev/null; then
-    HTTP_RESULT=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:18088/ 2>/dev/null || echo "000")
+    HTTP_RESULT=$(curl --noproxy '*' --silent --show-error --output /dev/null \
+        --write-out "%{http_code}" --retry 5 --retry-connrefused --retry-delay 1 \
+        --header "Host: example.test" http://127.0.0.1:18088/)
     if [ "$HTTP_RESULT" = "200" ]; then
         echo "✓ HTTP test passed"
     else
-        echo "⚠ HTTP test returned: $HTTP_RESULT"
+        echo "✗ HTTP test returned: $HTTP_RESULT"
+        exit 1
     fi
 else
-    echo "⚠ curl not available, skipping HTTP test"
+    echo "✗ curl is required for the HTTP integration test"
+    exit 1
 fi
-
-kill $NETTRAP_PID 2>/dev/null || true
-rm -f /tmp/nettrap_test_config.toml /tmp/dns_result.txt
 
 echo ""
 

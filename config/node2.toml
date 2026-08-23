@@ -46,8 +46,5 @@ enabled = true
 node_region = "eu-west-1"
 node_tags = ["node2", "secondary"]
 health_bind = "0.0.0.0:9090"
+metrics_bind = "0.0.0.0:9091"
 heartbeat_interval_secs = 0
-
-[[distributed.event_sinks]]
-type = "tcp"
-target = "collector:5044"

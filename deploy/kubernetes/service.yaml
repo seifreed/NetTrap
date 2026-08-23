@@ -15,18 +15,6 @@ spec:
     targetPort: 8080
     protocol: TCP
     name: http
-  - port: 443
-    targetPort: 8443
-    protocol: TCP
-    name: https
-  - port: 25
-    targetPort: 2525
-    protocol: TCP
-    name: smtp
-  - port: 21
-    targetPort: 2121
-    protocol: TCP
-    name: ftp
   - port: 22
     targetPort: 2222
     protocol: TCP
@@ -48,8 +36,8 @@ metadata:
 spec:
   type: ClusterIP
   ports:
-  - port: 9090
-    targetPort: 9090
+  - port: 9091
+    targetPort: 9091
     protocol: TCP
     name: metrics
   selector:

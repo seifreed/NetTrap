@@ -20,9 +20,15 @@ spec:
         prometheus.io/port: "9090"
         prometheus.io/path: "/metrics"
     spec:
+      securityContext:
+        fsGroup: 10001
+        runAsGroup: 10001
+        runAsNonRoot: true
+        runAsUser: 10001
       containers:
       - name: nettrap
-        image: nettrap:latest
+        image: nettrap:0.1.0-alpha.1
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 5353
           protocol: UDP
@@ -30,15 +36,6 @@ spec:
         - containerPort: 8080
           protocol: TCP
           name: http
-        - containerPort: 8443
-          protocol: TCP
-          name: https
-        - containerPort: 2525
-          protocol: TCP
-          name: smtp
-        - containerPort: 2121
-          protocol: TCP
-          name: ftp
         - containerPort: 2222
           protocol: TCP
           name: ssh
@@ -46,6 +43,9 @@ spec:
           protocol: TCP
           name: telnet
         - containerPort: 9090
+          protocol: TCP
+          name: health
+        - containerPort: 9091
           protocol: TCP
           name: metrics
         livenessProbe:
@@ -70,16 +70,28 @@ spec:
         volumeMounts:
         - name: config
           mountPath: /etc/nettrap
-        - name: pcap-storage
-          mountPath: /var/lib/nettrap/pcap
+        - name: data-storage
+          mountPath: /var/lib/nettrap
         securityContext:
+          allowPrivilegeEscalation: false
           capabilities:
-            add:
-            - NET_ADMIN
-            - NET_RAW
+            drop:
+            - ALL
       volumes:
       - name: config
         configMap:
           name: nettrap-config
-      - name: pcap-storage
-        emptyDir: {}
+      - name: data-storage
+        persistentVolumeClaim:
+          claimName: nettrap-data
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nettrap-data
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi

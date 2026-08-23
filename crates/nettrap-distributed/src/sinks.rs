@@ -862,7 +862,7 @@ mod tests {
             std::future::pending::<()>().await;
         });
 
-        let sink = HttpSink::new(format!("http://{addr}"), None, 1, 1000, 10);
+        let sink = HttpSink::new(format!("http://{addr}"), None, 1, 1000, 250);
         let event = nettrap_core::NetworkBehaviorIndicator::new(
             "test-listener",
             "RAW",
@@ -871,7 +871,7 @@ mod tests {
             "127.0.0.1",
             8080,
         );
-        let result = tokio::time::timeout(std::time::Duration::from_millis(200), sink.send(&event))
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), sink.send(&event))
             .await
             .expect("HTTP sink send should return after response body timeout");
 

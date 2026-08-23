@@ -10,7 +10,7 @@ data:
     pcap_enabled = true
     pcap_path = "/var/lib/nettrap/pcap/capture.pcap"
     output_format = "jsonl"
-    output_path = "/var/log/nettrap/events.jsonl"
+    output_path = "/var/lib/nettrap/events.jsonl"
 
     [[listeners]]
     name = "dns"
@@ -51,4 +51,5 @@ data:
     [distributed]
     enabled = true
     health_bind = "0.0.0.0:9090"
-    heartbeat_interval_secs = 30
+    metrics_bind = "0.0.0.0:9091"
+    heartbeat_interval_secs = 0

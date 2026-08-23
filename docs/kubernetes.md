@@ -4,11 +4,14 @@
 
 - Kubernetes cluster (1.24+)
 - kubectl configured
-- Container registry access
+- A `nettrap:0.1.0-alpha.1` image available to the cluster
 
 ## Quick Deploy
 
 ```bash
+# Build the listener-mode image.
+docker build -t nettrap:0.1.0-alpha.1 .
+
 # Create namespace
 kubectl apply -f deploy/kubernetes/namespace.yaml
 
@@ -23,6 +26,9 @@ kubectl apply -f deploy/kubernetes/service.yaml -n nettrap
 kubectl get pods -n nettrap
 kubectl get svc -n nettrap
 ```
+
+For a remote cluster, push the image to your registry and replace `image` in
+`deploy/kubernetes/deployment.yaml` with that immutable tag or digest.
 
 ## Verify Health
 

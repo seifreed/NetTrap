@@ -27,7 +27,9 @@ RUN apt-get update && apt-get install -y \
     netcat-openbsd \
     procps \
     iproute2 \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 10001 nettrap \
+    && useradd --system --uid 10001 --gid nettrap --home-dir /app --shell /usr/sbin/nologin nettrap
 
 COPY --from=builder /app/target/release/nettrap /usr/local/bin/
 
@@ -35,9 +37,12 @@ COPY defaultFiles /app/defaultFiles
 COPY config/default.toml /etc/nettrap/config.toml
 COPY tests/integration_test.sh /app/integration_test.sh
 
-RUN mkdir -p /var/log/nettrap /var/lib/nettrap/pcap
+RUN mkdir -p /var/log/nettrap /var/lib/nettrap/pcap \
+    && chown -R nettrap:nettrap /var/log/nettrap /var/lib/nettrap
 
-EXPOSE 5353/udp 8080 8443 2525 2121 2222 2323 3306 6379 9090
+EXPOSE 5353/udp 8080 2222 2323 9090 9091
+
+USER nettrap
 
 ENTRYPOINT ["nettrap"]
-CMD ["run", "-c", "/etc/nettrap/config.toml"]
+CMD ["run", "-c", "/etc/nettrap/config.toml", "-o", "/var/log/nettrap/events.jsonl"]

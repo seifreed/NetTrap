@@ -1,21 +1,18 @@
-version: '3.8'
-
 services:
   nettrap-node1:
     build: .
     container_name: nettrap-node1
-    cap_add:
-      - NET_ADMIN
-      - NET_RAW
     ports:
-      - "5353:5353/udp"
-      - "8080:8080"
+      - "1053:5353/udp"
+      - "${NETTRAP_NODE1_HTTP_PORT:-8080}:8080"
       - "2222:2222"
       - "2323:2323"
       - "9091:9090"
+      - "9191:9091"
     volumes:
-      - ./config/node1.toml:/etc/nettrap/config.toml
+      - ./config/node1.toml:/etc/nettrap/config.toml:ro
       - pcap-node1:/var/lib/nettrap/pcap
+      - logs-node1:/var/log/nettrap
     environment:
       - NETTRAP_NODE_REGION=local
       - NETTRAP_NODE_TAGS=node1,primary
@@ -25,54 +22,28 @@ services:
   nettrap-node2:
     build: .
     container_name: nettrap-node2
-    cap_add:
-      - NET_ADMIN
-      - NET_RAW
     ports:
-      - "5354:5353/udp"
+      - "1054:5353/udp"
       - "8081:8080"
       - "2223:2222"
       - "2324:2323"
       - "9092:9090"
+      - "9192:9091"
     volumes:
-      - ./config/node2.toml:/etc/nettrap/config.toml
+      - ./config/node2.toml:/etc/nettrap/config.toml:ro
       - pcap-node2:/var/lib/nettrap/pcap
+      - logs-node2:/var/log/nettrap
     environment:
       - NETTRAP_NODE_REGION=local
       - NETTRAP_NODE_TAGS=node2,secondary
     networks:
       - nettrap-net
 
-  elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.12.0
-    container_name: nettrap-elasticsearch
-    environment:
-      - discovery.type=single-node
-      - xpack.security.enabled=false
-      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
-    ports:
-      - "9200:9200"
-    volumes:
-      - es-data:/usr/share/elasticsearch/data
-    networks:
-      - nettrap-net
-
-  kibana:
-    image: docker.elastic.co/kibana/kibana:8.12.0
-    container_name: nettrap-kibana
-    environment:
-      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
-    ports:
-      - "5601:5601"
-    depends_on:
-      - elasticsearch
-    networks:
-      - nettrap-net
-
 volumes:
   pcap-node1:
   pcap-node2:
-  es-data:
+  logs-node1:
+  logs-node2:
 
 networks:
   nettrap-net:
