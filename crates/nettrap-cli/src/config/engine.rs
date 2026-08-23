@@ -10,7 +10,8 @@ pub use nettrap_core::{DatabaseConfig, DistributedConfig, EventSinkConfig};
 use parsing::{
     canonicalize_bind_address, normalize_default_decision, normalize_optional_identifier,
     normalize_optional_path, normalize_optional_url, normalize_report_language,
-    normalize_restrict_interface, validate_file_prefix_setting, validate_output_format_setting,
+    normalize_restrict_interface, validate_file_prefix_setting,
+    validate_loopback_socket_addr_setting, validate_output_format_setting,
     validate_socket_addr_setting,
 };
 
@@ -67,7 +68,7 @@ impl EngineConfig {
             ));
         }
 
-        validate_socket_addr_setting("api_bind", self.api_bind.as_deref())?;
+        validate_loopback_socket_addr_setting("api_bind", self.api_bind.as_deref())?;
         validate_socket_addr_setting(
             "distributed.health_bind",
             self.distributed.health_bind.as_deref(),
@@ -285,7 +286,7 @@ impl EngineConfig {
             ));
         }
 
-        validate_socket_addr_setting("api_bind", self.api_bind.as_deref())?;
+        validate_loopback_socket_addr_setting("api_bind", self.api_bind.as_deref())?;
         validate_output_format_setting(&self.output_format)?;
         normalize_default_decision(&mut self.default_decision)?;
         normalize_restrict_interface(&mut self.restrict_interface)?;

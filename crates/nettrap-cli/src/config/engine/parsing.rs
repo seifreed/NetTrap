@@ -39,6 +39,26 @@ pub(crate) fn validate_socket_addr_setting(
     parse_optional_socket_addr(setting_name, value).map(|_| ())
 }
 
+pub(crate) fn validate_loopback_socket_addr_setting(
+    setting_name: &str,
+    value: Option<&str>,
+) -> crate::Result<()> {
+    let is_non_loopback = parse_optional_socket_addr(setting_name, value)?.is_some_and(|addr| {
+        !match normalize_bind_addr(addr.ip()) {
+            NormalizedBindAddr::V4(ip) => ip.is_loopback(),
+            NormalizedBindAddr::V6(ip) => ip.is_loopback(),
+        }
+    });
+    if is_non_loopback {
+        return Err(crate::Error::Config(format!(
+            "{} must use a loopback address because API authentication is not available",
+            setting_name
+        )));
+    }
+
+    Ok(())
+}
+
 pub(crate) fn validate_output_format_setting(value: &str) -> crate::Result<()> {
     value
         .parse::<nettrap_core::ExportFormat>()

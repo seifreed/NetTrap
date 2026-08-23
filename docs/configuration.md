@@ -34,7 +34,7 @@ nettrap config --defaults > config.toml
 | `smtp_dir` | string | - | Directory for captured SMTP data |
 | `log_hexdump` | bool | `false` | Enable hexdump in logs |
 | `report_language` | string | `"en"` | NBI report language (`en`, `es`, or `de`) |
-| `api_bind` | string | - | REST API bind address |
+| `api_bind` | string | - | REST API loopback bind address; non-loopback binds are rejected |
 | `tls_ca_cert` | string | - | TLS CA certificate path |
 | `tls_ca_key` | string | - | TLS CA private key path |
 | `tls_cert_dir` | string | - | Directory for generated TLS certificates |

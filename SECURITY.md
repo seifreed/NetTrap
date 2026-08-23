@@ -39,7 +39,7 @@ themselves unless they create a security boundary failure.
 
 ## Operational Safety
 
-Run NetTrap only in an isolated analysis lab. Do not expose the REST API beyond
-loopback, use Linux transparent redirection on a production host, or install
-the generated CA into a production trust store. See
+Run NetTrap only in an isolated analysis lab. The REST API rejects non-loopback
+binds while it is unauthenticated. Do not use Linux transparent redirection on
+a production host or install the generated CA into a production trust store. See
 [PLATFORM_SUPPORT.md](PLATFORM_SUPPORT.md) for platform-specific boundaries.

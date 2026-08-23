@@ -877,6 +877,14 @@ mod tests {
     }
 
     #[test]
+    fn load_api_config_rejects_non_loopback_api_bind() {
+        let err = load_api_config(None, Some("0.0.0.0:18888"))
+            .expect_err("unauthenticated API must not bind beyond loopback");
+
+        assert!(err.to_string().contains("must use a loopback address"));
+    }
+
+    #[test]
     fn load_api_config_ignores_redirect_defaults_in_api_mode() {
         let path = std::env::temp_dir().join(format!(
             "nettrap-api-redirect-default-{}.toml",

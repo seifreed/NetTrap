@@ -32,8 +32,8 @@ See [PROTOCOL_SUPPORT.md](PROTOCOL_SUPPORT.md) for the handler-by-handler matrix
 
 ## API, Data, and Compatibility
 
-- The REST API has no authentication. Its default loopback bind is the only
-  supported alpha deployment; do not expose it on an untrusted interface.
+- The REST API has no authentication and rejects non-loopback bind addresses.
+  It is not a remote administration surface.
 - Event, report, API, and configuration schemas do not yet have migration or
   compatibility guarantees.
 - Release binaries are not platform code-signed. GitHub release artifacts do

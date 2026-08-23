@@ -2016,6 +2016,20 @@ fn from_file_api_rejects_invalid_api_bind() {
 }
 
 #[test]
+fn validate_rejects_non_loopback_api_bind() {
+    let mut config = EngineConfig {
+        api_bind: Some("0.0.0.0:8080".into()),
+        ..EngineConfig::default()
+    };
+
+    let err = config
+        .validate()
+        .expect_err("unauthenticated API must not bind beyond loopback");
+
+    assert!(err.to_string().contains("must use a loopback address"));
+}
+
+#[test]
 fn from_file_api_ignores_invalid_distributed_probe_binds() {
     let path = std::env::temp_dir().join(format!(
         "nettrap-invalid-distributed-bind-{}.toml",
@@ -2204,7 +2218,10 @@ fn validate_socket_collision_with_unspecified_listener_and_concrete_api_bind() {
 fn validate_socket_collision_with_ipv4_and_ipv6_wildcards() {
     let mut config = EngineConfig {
         listeners: vec![ListenerConfig::new("http", 8080).with_bind_address("0.0.0.0")],
-        api_bind: Some("[::]:8080".into()),
+        distributed: crate::config::DistributedConfig {
+            health_bind: Some("[::]:8080".into()),
+            ..crate::config::DistributedConfig::default()
+        },
         ..EngineConfig::default()
     };
 
@@ -2213,8 +2230,9 @@ fn validate_socket_collision_with_ipv4_and_ipv6_wildcards() {
         .expect_err("dual-stack wildcards should collide");
 
     assert!(
-        err.to_string()
-            .contains("listener 'http' and api_bind overlap on tcp socket port 8080")
+        err.to_string().contains(
+            "listener 'http' and distributed.health_bind overlap on tcp socket port 8080"
+        )
     );
 }
 
