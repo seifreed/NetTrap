@@ -1,0 +1,58 @@
+name: Bug report
+description: Report a reproducible NetTrap defect
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not report vulnerabilities here. Use the private security form.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: 0.1.0-alpha.1 or commit SHA
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Linux x86_64
+        - Linux ARM64
+        - macOS x86_64
+        - macOS ARM64
+        - Windows x86_64
+        - Windows ARM64
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Include commands and a synthetic config or fixture. Do not attach malware.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and logs
+      description: Redact credentials, payloads, private traffic, and keys.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety checks
+      options:
+        - label: This is not an undisclosed vulnerability.
+          required: true
+        - label: The report contains no malware, secrets, or private captures.
+          required: true

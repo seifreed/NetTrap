@@ -12,3 +12,4 @@
 8. [Architecture](architecture.md) — Internal architecture and design decisions
 9. [Known Limitations](../KNOWN_LIMITATIONS.md) — Alpha boundaries
 10. [Security Policy](../SECURITY.md) — Private reporting and supported versions
+11. [Contributing](../CONTRIBUTING.md) — Development workflow and quality gates

@@ -367,6 +367,8 @@ nettrap-cli             # Binary entry point + engine orchestration
 | [Platform Support](PLATFORM_SUPPORT.md) | Release targets and mode boundaries |
 | [Known Limitations](KNOWN_LIMITATIONS.md) | Alpha boundaries and unsupported behavior |
 | [Security Policy](SECURITY.md) | Private reporting and supported versions |
+| [Contributing](CONTRIBUTING.md) | Development workflow and pull request requirements |
+| [Code of Conduct](CODE_OF_CONDUCT.md) | Community standards and enforcement |
 | [Changelog](CHANGELOG.md) | Release history and notable changes |
 | [Third-Party Notices](THIRD_PARTY_NOTICES.md) | External components and license inventory |
 | [Output Formats](docs/output-formats.md) | JSONL, JSON, SARIF, TOON, CSV |
@@ -376,20 +378,9 @@ nettrap-cli             # Binary entry point + engine orchestration
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-### Code Style
-
-- Rust 2024 Edition
-- `cargo fmt` for formatting
-- `cargo clippy` for linting
-- Add tests for new functionality
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the required tests, quality gates,
+and pull request checklist. Participation is governed by the
+[Code of Conduct](CODE_OF_CONDUCT.md).
 
 ---
 
