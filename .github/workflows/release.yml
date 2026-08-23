@@ -135,7 +135,9 @@ jobs:
         if: matrix.archive == 'tar'
         run: |
           mkdir -p package
-          cp "target/${{ matrix.target }}/release/nettrap" LICENSE README.md package/
+          cp "target/${{ matrix.target }}/release/nettrap" \
+            LICENSE README.md CHANGELOG.md SECURITY.md KNOWN_LIMITATIONS.md \
+            THIRD_PARTY_NOTICES.md PLATFORM_SUPPORT.md PROTOCOL_SUPPORT.md package/
           "target/${{ matrix.target }}/release/nettrap" config --defaults > package/config.toml
           tar -czf "nettrap-${{ matrix.name }}.tar.gz" -C package .
 
@@ -143,7 +145,13 @@ jobs:
         if: matrix.archive == 'zip'
         run: |
           New-Item -ItemType Directory -Force -Path package
-          Copy-Item "target/${{ matrix.target }}/release/nettrap.exe", "LICENSE", "README.md" -Destination package
+          $releaseFiles = @(
+            "target/${{ matrix.target }}/release/nettrap.exe",
+            "LICENSE", "README.md", "CHANGELOG.md", "SECURITY.md",
+            "KNOWN_LIMITATIONS.md", "THIRD_PARTY_NOTICES.md",
+            "PLATFORM_SUPPORT.md", "PROTOCOL_SUPPORT.md"
+          )
+          Copy-Item $releaseFiles -Destination package
           & "target/${{ matrix.target }}/release/nettrap.exe" config --defaults | Out-File -FilePath package/config.toml -Encoding utf8
           Compress-Archive -Path package/* -DestinationPath "nettrap-${{ matrix.name }}.zip"
         shell: pwsh

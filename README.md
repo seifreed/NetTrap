@@ -365,6 +365,10 @@ nettrap-cli             # Binary entry point + engine orchestration
 | [Configuration Reference](docs/configuration.md) | All config options |
 | [Protocol Support](PROTOCOL_SUPPORT.md) | Verified fidelity and E2E coverage matrix |
 | [Platform Support](PLATFORM_SUPPORT.md) | Release targets and mode boundaries |
+| [Known Limitations](KNOWN_LIMITATIONS.md) | Alpha boundaries and unsupported behavior |
+| [Security Policy](SECURITY.md) | Private reporting and supported versions |
+| [Changelog](CHANGELOG.md) | Release history and notable changes |
+| [Third-Party Notices](THIRD_PARTY_NOTICES.md) | External components and license inventory |
 | [Output Formats](docs/output-formats.md) | JSONL, JSON, SARIF, TOON, CSV |
 | [Architecture](docs/architecture.md) | Internal design & crate structure |
 
@@ -401,7 +405,9 @@ If you find NetTrap useful, consider supporting its development:
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+This project is licensed under the [MIT License](LICENSE). See
+[Third-Party Notices](THIRD_PARTY_NOTICES.md) for dependencies and optional
+external components.
 
 **Author:** **Marc Rivero** | [@seifreed](https://github.com/seifreed)
 

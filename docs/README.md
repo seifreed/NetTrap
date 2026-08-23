@@ -10,3 +10,5 @@
 6. [Platform Support](../PLATFORM_SUPPORT.md) — Release targets and mode boundaries
 7. [Output Formats](output-formats.md) — JSON, JSONL, SARIF, TOON, CSV
 8. [Architecture](architecture.md) — Internal architecture and design decisions
+9. [Known Limitations](../KNOWN_LIMITATIONS.md) — Alpha boundaries
+10. [Security Policy](../SECURITY.md) — Private reporting and supported versions
