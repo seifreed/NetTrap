@@ -309,6 +309,14 @@ jobs:
           subject-checksums: target/release-subjects.sha256
           sbom-path: releases/nettrap.spdx.json
 
+      - name: Verify release attestations
+        run: |
+          for archive in releases/nettrap-*.tar.gz releases/nettrap-*.zip; do
+            gh attestation verify "$archive" --repo "$GITHUB_REPOSITORY"
+          done
+        env:
+          GH_TOKEN: ${{ github.token }}
+
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
