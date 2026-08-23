@@ -11,9 +11,9 @@ Yes, but they do not establish real-client compatibility.
 
 | Handler | Current behavior | Client E2E | Known ceiling |
 |---|---|---:|---|
-| DNS | Parses UDP/TCP queries and builds synthetic records/NXDOMAIN responses | Yes (`dig`, UDP) | TCP client E2E and broad resolver compatibility are not required gates |
-| HTTP | Parses requests, records metadata/body length, serves default/custom/webroot responses | Yes (`curl`) | Not a production web server; browser compatibility is not a required gate |
-| TLS | Detects ClientHello, fingerprints it, and can terminate inbound TLS locally | No | No general upstream MITM, selective passthrough, or pinning bypass |
+| DNS | Parses UDP/TCP queries and builds synthetic records/NXDOMAIN responses | Yes (`dig`, UDP and TCP) | Broad resolver compatibility is not a required gate |
+| HTTP | Parses requests, records metadata/body length, serves default/custom/webroot responses | Yes (`curl`, HTTP and HTTPS) | Not a production web server; browser compatibility is not a required gate |
+| TLS | Detects ClientHello, fingerprints it, and can terminate inbound TLS locally | Yes (`openssl s_client`) | No general upstream MITM, selective passthrough, or pinning bypass |
 | SMTP | Stateful command handling and DATA capture | No | No required real mail-client E2E |
 | FTP | Stateful command handling, passive transfers, and configured file serving | No | No required `ftp`/`lftp` E2E |
 | POP3 | USER/PASS and mailbox-command emulation | No | Synthetic mailbox only |

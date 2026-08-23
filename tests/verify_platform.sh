@@ -7,7 +7,7 @@ cleanup() {
         kill "$NETTRAP_PID" 2>/dev/null || true
         wait "$NETTRAP_PID" 2>/dev/null || true
     fi
-    rm -f /tmp/nettrap_test_config.toml /tmp/dns_result.txt
+    rm -f /tmp/nettrap_test_config.toml /tmp/dns_result.txt /tmp/tls_result.txt
 }
 
 trap cleanup EXIT
@@ -120,12 +120,29 @@ enabled = true
 emulate_response = true
 
 [[listeners]]
+name = "dns-tcp-test"
+protocol = "tcp"
+port = 53539
+bind_address = "127.0.0.1"
+enabled = true
+emulate_response = true
+
+[[listeners]]
 name = "http"
 protocol = "tcp"
 port = 18088
 bind_address = "127.0.0.1"
 enabled = true
 emulate_response = true
+
+[[listeners]]
+name = "https"
+protocol = "tcp"
+port = 18443
+bind_address = "127.0.0.1"
+enabled = true
+emulate_response = true
+use_ssl = true
 EOF
 
 echo "Starting NetTrap..."
@@ -143,8 +160,42 @@ if command -v dig &> /dev/null; then
         echo "✗ DNS test failed"
         exit 1
     fi
+    if dig +tcp @127.0.0.1 -p 53539 test.example.com A +short > /tmp/dns_result.txt 2>&1 \
+        && grep -qE "^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$" /tmp/dns_result.txt; then
+        echo "✓ DNS TCP test passed"
+    else
+        echo "✗ DNS TCP test failed"
+        cat /tmp/dns_result.txt
+        exit 1
+    fi
 else
     echo "✗ dig is required for the DNS integration test"
+    exit 1
+fi
+
+echo "Testing TLS handshake..."
+if command -v openssl &> /dev/null; then
+    if printf '' | openssl s_client -connect 127.0.0.1:18443 -servername example.test \
+        > /tmp/tls_result.txt 2>&1 \
+        && grep -q "BEGIN CERTIFICATE" /tmp/tls_result.txt; then
+        echo "✓ TLS handshake test passed"
+    else
+        echo "✗ TLS handshake test failed"
+        exit 1
+    fi
+else
+    echo "✗ openssl is required for the TLS integration test"
+    exit 1
+fi
+
+echo "Testing HTTPS..."
+HTTPS_RESULT=$(curl --noproxy '*' --insecure --silent --show-error --output /dev/null \
+    --write-out "%{http_code}" --retry 5 --retry-connrefused --retry-delay 1 \
+    --resolve example.test:18443:127.0.0.1 https://example.test:18443/)
+if [ "$HTTPS_RESULT" = "200" ]; then
+    echo "✓ HTTPS test passed"
+else
+    echo "✗ HTTPS test returned: $HTTPS_RESULT"
     exit 1
 fi
 
