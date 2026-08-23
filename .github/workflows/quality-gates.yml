@@ -125,6 +125,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Install system dependencies
         run: |
@@ -155,6 +157,7 @@ jobs:
           cargo install cargo-udeps --locked
           cargo install cargo-tarpaulin --locked
           cargo install cargo-fuzz --locked
+          cargo install cargo-semver-checks --locked
           cargo install cargo-outdated --locked
 
       - name: Check unused dependencies
@@ -163,7 +166,7 @@ jobs:
       - name: Run coverage report
         run: |
           mkdir -p target/quality-gates/coverage
-          cargo tarpaulin --out Xml --out Html --output-dir target/quality-gates/coverage
+          cargo tarpaulin --fail-under 70 --out Xml --out Html --output-dir target/quality-gates/coverage
 
       - name: Upload coverage reports
         uses: actions/upload-artifact@v7.0.1
@@ -176,8 +179,16 @@ jobs:
       - name: Build fuzz targets
         run: cargo +nightly fuzz build
 
-      - name: Run fuzz smoke test
-        run: cargo +nightly fuzz run http_request_parse -- -max_total_time=10
+      - name: Check public API compatibility
+        run: |
+          baseline="$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || printf 'HEAD^')"
+          cargo +nightly semver-checks --workspace --baseline-rev "$baseline"
+
+      - name: Run every fuzz target
+        run: |
+          for target in $(cargo +nightly fuzz list); do
+            cargo +nightly fuzz run "$target" -- -max_total_time=10
+          done
 
       - name: Run benchmarks
         run: cargo bench --no-fail-fast

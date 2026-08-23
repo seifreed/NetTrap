@@ -7,7 +7,7 @@ Usage: scripts/quality-gates.sh [quick|full]
 
 Modes:
   quick  Run PR-blocking gates: fmt, clippy, tests, audit, deny, lockfile, check, diff.
-  full   Run quick gates plus udeps, tarpaulin, fuzz smoke, benchmarks, and outdated.
+  full   Run quick gates plus udeps, coverage, semver, fuzzing, benchmarks, and outdated.
 EOF
 }
 
@@ -72,21 +72,36 @@ run_coverage() {
     local coverage_dir="target/quality-gates/coverage"
     mkdir -p "$coverage_dir"
     rm -f cobertura.xml tarpaulin-report.html
-    run cargo tarpaulin --out Xml --out Html --output-dir "$coverage_dir"
+    run cargo tarpaulin --fail-under 70 --out Xml --out Html --output-dir "$coverage_dir"
+}
+
+run_semver_check() {
+    local baseline
+    baseline="$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || printf 'HEAD^')"
+    run run_nightly semver-checks --workspace --baseline-rev "$baseline"
+}
+
+run_fuzz_smoke() {
+    local target
+    for target in $(run_nightly fuzz list); do
+        run run_nightly fuzz run "$target" -- -max_total_time=10
+    done
 }
 
 run_full() {
     require_command cargo-udeps
     require_command cargo-tarpaulin
     require_command cargo-fuzz
+    require_command cargo-semver-checks
     require_command cargo-outdated
     require_nightly_toolchain
 
     run_quick
     run run_nightly udeps --all-targets --all-features
     run_coverage
+    run_semver_check
     run run_nightly fuzz build
-    run run_nightly fuzz run http_request_parse -- -max_total_time=10
+    run_fuzz_smoke
     run cargo bench --no-fail-fast
     run cargo outdated
 }
