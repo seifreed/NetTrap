@@ -4,6 +4,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 
+pub const NBI_SCHEMA_VERSION: u32 = 1;
+
+fn nbi_schema_version() -> u32 {
+    NBI_SCHEMA_VERSION
+}
+
 fn should_normalize_legacy_event_id(event_id: &str) -> bool {
     let event_id = event_id.trim_matches([' ', '\t']);
     event_id.is_empty()
@@ -23,7 +29,7 @@ fn legacy_event_id_from_fingerprint(content_fingerprint: &str) -> String {
 }
 
 /// Network Behavior Indicator - structured per-protocol telemetry
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct NetworkBehaviorIndicator {
     pub event_id: String,
     pub timestamp: String,
@@ -45,6 +51,8 @@ pub struct NetworkBehaviorIndicator {
 
 #[derive(Debug, Clone, Deserialize)]
 struct NetworkBehaviorIndicatorSerde {
+    #[serde(default = "nbi_schema_version")]
+    schema_version: u32,
     event_id: String,
     timestamp: String,
     listener: String,
@@ -56,6 +64,45 @@ struct NetworkBehaviorIndicatorSerde {
     process_name: Option<String>,
     process_pid: Option<u32>,
     indicators: BTreeMap<String, String>,
+}
+
+#[derive(Serialize)]
+struct NetworkBehaviorIndicatorRef<'a> {
+    schema_version: u32,
+    event_id: &'a str,
+    timestamp: &'a str,
+    listener: &'a str,
+    protocol: &'a str,
+    src_ip: &'a str,
+    src_port: u16,
+    dst_ip: &'a str,
+    dst_port: u16,
+    process_name: Option<&'a str>,
+    process_pid: Option<u32>,
+    indicators: &'a BTreeMap<String, String>,
+}
+
+impl Serialize for NetworkBehaviorIndicator {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        NetworkBehaviorIndicatorRef {
+            schema_version: NBI_SCHEMA_VERSION,
+            event_id: &self.event_id,
+            timestamp: &self.timestamp,
+            listener: &self.listener,
+            protocol: &self.protocol,
+            src_ip: &self.src_ip,
+            src_port: self.src_port,
+            dst_ip: &self.dst_ip,
+            dst_port: self.dst_port,
+            process_name: self.process_name.as_deref(),
+            process_pid: self.process_pid,
+            indicators: &self.indicators,
+        }
+        .serialize(serializer)
+    }
 }
 
 impl NetworkBehaviorIndicator {
@@ -211,6 +258,12 @@ impl<'de> Deserialize<'de> for NetworkBehaviorIndicator {
         D: serde::Deserializer<'de>,
     {
         let helper = NetworkBehaviorIndicatorSerde::deserialize(deserializer)?;
+        if helper.schema_version != NBI_SCHEMA_VERSION {
+            return Err(serde::de::Error::custom(format!(
+                "unsupported NBI schema_version {}; expected {}",
+                helper.schema_version, NBI_SCHEMA_VERSION
+            )));
+        }
         let src_ip = parse_nbi_ip_for_deserialize("src_ip", &helper.src_ip)
             .map_err(serde::de::Error::custom)?;
         let dst_ip = parse_nbi_ip_for_deserialize("dst_ip", &helper.dst_ip)
@@ -362,7 +415,7 @@ fn validate_text_length(field: &str, value: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{NetworkBehaviorIndicator, should_normalize_legacy_event_id};
+    use super::{NBI_SCHEMA_VERSION, NetworkBehaviorIndicator, should_normalize_legacy_event_id};
     use std::collections::BTreeMap;
 
     #[test]
@@ -385,6 +438,45 @@ mod tests {
         indicator.event_id = "event-123".to_string();
 
         assert_eq!(indicator.normalized_event_id(), "event-123");
+    }
+
+    #[test]
+    fn nbi_json_includes_schema_version() {
+        let indicator =
+            NetworkBehaviorIndicator::new("listener", "tcp", "127.0.0.1", 1, "127.0.0.1", 2);
+
+        let value = serde_json::to_value(indicator).expect("serialize NBI");
+
+        assert_eq!(value["schema_version"], NBI_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn nbi_deserialization_treats_missing_schema_version_as_v1() {
+        let indicator =
+            NetworkBehaviorIndicator::new("listener", "tcp", "127.0.0.1", 1, "127.0.0.1", 2);
+        let mut value = serde_json::to_value(&indicator).expect("serialize NBI");
+        value
+            .as_object_mut()
+            .expect("NBI serializes as an object")
+            .remove("schema_version");
+
+        let decoded: NetworkBehaviorIndicator =
+            serde_json::from_value(value).expect("legacy NBI should decode as v1");
+
+        assert_eq!(decoded.event_id, indicator.event_id);
+    }
+
+    #[test]
+    fn nbi_deserialization_rejects_unknown_schema_version() {
+        let indicator =
+            NetworkBehaviorIndicator::new("listener", "tcp", "127.0.0.1", 1, "127.0.0.1", 2);
+        let mut value = serde_json::to_value(indicator).expect("serialize NBI");
+        value["schema_version"] = (NBI_SCHEMA_VERSION + 1).into();
+
+        let err = serde_json::from_value::<NetworkBehaviorIndicator>(value)
+            .expect_err("unknown schema version should fail");
+
+        assert!(err.to_string().contains("unsupported NBI schema_version"));
     }
 
     #[test]

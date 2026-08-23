@@ -20,5 +20,5 @@ pub use health::{
     ComponentHealth, ComponentState, HealthStatus, ListenerHealth, NbiCollectorHealth,
     RuntimeHealthSnapshot,
 };
-pub use nbi::NetworkBehaviorIndicator;
+pub use nbi::{NBI_SCHEMA_VERSION, NetworkBehaviorIndicator};
 pub use prelude::*;
