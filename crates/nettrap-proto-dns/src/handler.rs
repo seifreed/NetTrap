@@ -7,12 +7,28 @@ use parking_lot::RwLock;
 
 use crate::prelude::*;
 
+const DNS_QUERY_ONLY_COUNTS: [u16; 4] = [1, 0, 0, 0];
+
+fn dns_section_counts(data: &[u8]) -> Option<[u16; 4]> {
+    let counts = data.get(4..12)?;
+    Some([
+        u16::from_be_bytes([counts[0], counts[1]]),
+        u16::from_be_bytes([counts[2], counts[3]]),
+        u16::from_be_bytes([counts[4], counts[5]]),
+        u16::from_be_bytes([counts[6], counts[7]]),
+    ])
+}
+
 /// Safely parse a DNS message from raw bytes, catching panics from the
 /// hickory-proto library (e.g. integer-overflow in TSIG RDATA error
 /// formatting on malformed input). Returns `None` when the underlying
 /// parser panics, so callers' `?` / `map_err` paths degrade to a normal
 /// protocol error instead of crashing the honeypot process.
 fn safe_message_from_vec(data: &[u8]) -> Option<Message> {
+    if dns_section_counts(data) != Some(DNS_QUERY_ONLY_COUNTS) {
+        return None;
+    }
+
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Message::from_vec(data)))
         .ok()
         .and_then(|r| r.ok())
@@ -320,6 +336,19 @@ pub trait DnsHandlerTrait: Send + Sync {
 #[async_trait]
 impl DnsHandlerTrait for DnsHandler {
     async fn handle_query(&self, query: &[u8], _src: std::net::SocketAddr) -> Result<Vec<u8>> {
+        if let Some([questions, answers, authorities, additionals]) = dns_section_counts(query) {
+            if questions != 1 {
+                return Err(Error::Protocol(format!(
+                    "Expected exactly one DNS query, got {questions}"
+                )));
+            }
+            if answers != 0 || authorities != 0 || additionals != 0 {
+                return Err(Error::Protocol(
+                    "DNS query contains unexpected resource record sections".into(),
+                ));
+            }
+        }
+
         let message = safe_message_from_vec(query)
             .ok_or_else(|| Error::Protocol("DNS message parse failed or panicked".into()))?;
         if message.metadata.message_type != hickory_proto::op::MessageType::Query
@@ -862,6 +891,15 @@ fn split_txt_character_strings(value: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_safe_message_from_vec_rejects_unsupported_sections_before_parsing() {
+        let fuzz_regression = [
+            0x3d, 0x00, 0x2c, 0x2e, 0x00, 0x00, 0xd4, 0x00, 0x01, 0x12, 0x00, 0x00,
+        ];
+
+        assert!(safe_message_from_vec(&fuzz_regression).is_none());
+    }
 
     #[test]
     fn default_response_ip_rejects_invalid_values() {
