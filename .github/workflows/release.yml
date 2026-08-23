@@ -1,0 +1,231 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  quality-gates:
+    name: Quality Gates
+    uses: ./.github/workflows/quality-gates.yml
+
+  e2e:
+    name: End-to-End Tests
+    needs: quality-gates
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Build integration image
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: .
+          push: false
+          load: true
+          tags: nettrap:release-test
+
+      - name: Run integration tests
+        run: docker run --rm --entrypoint /bin/bash nettrap:release-test /app/integration_test.sh
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: quality-gates
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            name: linux-x86_64
+            runner: ubuntu-latest
+            archive: tar
+          - target: aarch64-unknown-linux-gnu
+            name: linux-aarch64
+            runner: ubuntu-24.04-arm
+            archive: tar
+          - target: x86_64-apple-darwin
+            name: macos-x86_64
+            runner: macos-15-intel
+            archive: tar
+          - target: aarch64-apple-darwin
+            name: macos-aarch64
+            runner: macos-14
+            archive: tar
+          - target: x86_64-pc-windows-msvc
+            name: windows-x86_64
+            runner: windows-latest
+            arch: x64
+            archive: zip
+          - target: aarch64-pc-windows-msvc
+            name: windows-aarch64
+            runner: windows-11-arm
+            arch: arm64
+            archive: zip
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpcap-dev libnetfilter-queue-dev libnfnetlink-dev
+
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install libpcap
+
+      - name: Prepare Npcap SDK import libraries
+        if: runner.os == 'Windows'
+        run: |
+          $sdkArchive = Join-Path $env:RUNNER_TEMP "npcap-sdk.zip"
+          $sdkRoot = Join-Path $env:RUNNER_TEMP "npcap-sdk"
+          Invoke-WebRequest -Uri "https://npcap.com/dist/npcap-sdk-1.16.zip" -OutFile $sdkArchive
+          Expand-Archive -Path $sdkArchive -DestinationPath $sdkRoot -Force
+          $libDir = Join-Path $sdkRoot $(if ("${{ matrix.arch }}" -eq "arm64") { "Lib\ARM64" } else { "Lib\x64" })
+          "LIB=$libDir;$env:LIB" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "LIBPCAP_LIBDIR=$libDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        shell: pwsh
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
+          target: ${{ matrix.target }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: release-${{ runner.os }}-${{ matrix.target }}-
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Run platform tests
+        run: cargo test --all --locked --target ${{ matrix.target }}
+
+      - name: Smoke test binary
+        run: |
+          ./target/${{ matrix.target }}/release/nettrap --version
+          ./target/${{ matrix.target }}/release/nettrap config --defaults > /dev/null
+        if: runner.os != 'Windows'
+
+      - name: Smoke test Windows binary
+        if: runner.os == 'Windows'
+        run: |
+          & "target/${{ matrix.target }}/release/nettrap.exe" --version
+          & "target/${{ matrix.target }}/release/nettrap.exe" config --defaults | Out-Null
+        shell: pwsh
+
+      - name: Package Unix release
+        if: matrix.archive == 'tar'
+        run: |
+          mkdir -p package
+          cp "target/${{ matrix.target }}/release/nettrap" LICENSE README.md package/
+          "target/${{ matrix.target }}/release/nettrap" config --defaults > package/config.toml
+          tar -czf "nettrap-${{ matrix.name }}.tar.gz" -C package .
+
+      - name: Package Windows release
+        if: matrix.archive == 'zip'
+        run: |
+          New-Item -ItemType Directory -Force -Path package
+          Copy-Item "target/${{ matrix.target }}/release/nettrap.exe", "LICENSE", "README.md" -Destination package
+          & "target/${{ matrix.target }}/release/nettrap.exe" config --defaults | Out-File -FilePath package/config.toml -Encoding utf8
+          Compress-Archive -Path package/* -DestinationPath "nettrap-${{ matrix.name }}.zip"
+        shell: pwsh
+
+      - name: Upload packaged release
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: nettrap-${{ matrix.name }}
+          path: nettrap-${{ matrix.name }}.${{ matrix.archive == 'tar' && 'tar.gz' || 'zip' }}
+          if-no-files-found: error
+          archive: false
+
+  publish:
+    name: Publish Draft Release
+    needs: [build, e2e]
+    runs-on: ubuntu-latest
+    permissions:
+      artifact-metadata: write
+      attestations: write
+      contents: write
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Download release packages
+        uses: actions/download-artifact@v8.0.1
+        with:
+          pattern: nettrap-*
+          path: releases
+          merge-multiple: true
+
+      - name: Verify release package set
+        run: |
+          test -f releases/nettrap-linux-x86_64.tar.gz
+          test -f releases/nettrap-linux-aarch64.tar.gz
+          test -f releases/nettrap-macos-x86_64.tar.gz
+          test -f releases/nettrap-macos-aarch64.tar.gz
+          test -f releases/nettrap-windows-x86_64.zip
+          test -f releases/nettrap-windows-aarch64.zip
+
+      - name: Create draft prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft | grep -qx true; then
+            echo "Reusing existing draft release $GITHUB_REF_NAME"
+          else
+            gh release create "$GITHUB_REF_NAME" --draft --prerelease --verify-tag --generate-notes --title "$GITHUB_REF_NAME"
+          fi
+
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@v0.24.0
+        with:
+          path: .
+          format: spdx-json
+          output-file: releases/nettrap.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Generate checksums
+        run: |
+          sha256sum releases/nettrap-*.tar.gz releases/nettrap-*.zip > target/release-subjects.sha256
+          sha256sum releases/nettrap-* > releases/SHA256SUMS
+
+      - name: Attest build provenance
+        uses: actions/attest@v4
+        with:
+          subject-checksums: target/release-subjects.sha256
+
+      - name: Attest release SBOM
+        uses: actions/attest@v4
+        with:
+          subject-checksums: target/release-subjects.sha256
+          sbom-path: releases/nettrap.spdx.json
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" releases/*
+
+      - name: Publish prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false --prerelease

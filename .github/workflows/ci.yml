@@ -8,8 +8,6 @@ on:
   workflow_dispatch:
   schedule:
     - cron: "0 6 * * *"
-  release:
-    types: [published]
 
 env:
   CARGO_TERM_COLOR: always
@@ -96,7 +94,7 @@ jobs:
 
   build-macos:
     name: Build & Test (macOS ${{ matrix.target }})
-    if: github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'release'
+    if: github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -177,15 +175,19 @@ jobs:
 
       - name: Run integration tests
         run: |
+          set -e
           ./target/${{ matrix.target }}/release/nettrap run -c /tmp/nettrap_config.toml &
           NETTRAP_PID=$!
+          trap 'kill $NETTRAP_PID 2>/dev/null || true' EXIT
           sleep 3
 
           echo "=== macOS Integration Tests ==="
-          dig @127.0.0.1 -p 53530 example.com A +short | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' && echo "DNS: PASS" || echo "DNS: FAIL"
-          curl -s http://127.0.0.1:8088/ | grep -i "NetTrap" && echo "HTTP: PASS" || echo "HTTP: FAIL"
+          dig @127.0.0.1 -p 53530 example.com A +short | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
+          curl --fail --silent http://127.0.0.1:8088/ | grep -i "NetTrap"
 
-          kill $NETTRAP_PID 2>/dev/null || true
+          kill $NETTRAP_PID
+          wait $NETTRAP_PID || true
+          trap - EXIT
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7.0.1
@@ -195,7 +197,7 @@ jobs:
 
   build-windows:
     name: Build & Test (Windows ${{ matrix.target }})
-    if: github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'release'
+    if: github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -204,12 +206,10 @@ jobs:
           - target: x86_64-pc-windows-msvc
             name: windows-x64
             arch: x64
-            interceptor: windivert
             runner: windows-latest
           - target: aarch64-pc-windows-msvc
             name: windows-arm64
             arch: arm64
-            interceptor: npcap
             runner: windows-11-arm
 
     steps:
@@ -227,27 +227,10 @@ jobs:
           "LIBPCAP_LIBDIR=$libDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
         shell: pwsh
 
-      - name: Download WinDivert (x86/x64 only)
-        if: matrix.interceptor == 'windivert'
+      - name: Setup Npcap notice
         run: |
-          Invoke-WebRequest -Uri "https://reqrypt.org/download/WinDivert-2.2.2-A.zip" -OutFile "WinDivert.zip"
-          Expand-Archive -Path "WinDivert.zip" -DestinationPath "WinDivert"
-          New-Item -ItemType Directory -Force -Path "windivert"
-          
-          if ("${{ matrix.arch }}" -eq "x64") {
-            Copy-Item "WinDivert/WinDivert-2.2.2-A/x64/WinDivert.dll" -Destination "windivert/"
-            Copy-Item "WinDivert/WinDivert-2.2.2-A/x64/WinDivert64.sys" -Destination "windivert/"
-          } elseif ("${{ matrix.arch }}" -eq "x86") {
-            Copy-Item "WinDivert/WinDivert-2.2.2-A/x86/WinDivert.dll" -Destination "windivert/"
-            Copy-Item "WinDivert/WinDivert-2.2.2-A/x86/WinDivert32.sys" -Destination "windivert/"
-          }
-        shell: pwsh
-
-      - name: Setup Npcap notice (ARM64)
-        if: matrix.interceptor == 'npcap'
-        run: |
-          Write-Host "::notice::Windows ARM64 uses Npcap (PCAP) - WinDivert not available"
-          Write-Host "::notice::Npcap provides native ARM64 support for packet capture"
+          Write-Host "::notice::Windows builds support listener mode and Npcap-backed capture"
+          Write-Host "::notice::Transparent WinDivert interception is disabled"
           Write-Host "::notice::Install Npcap from https://nmap.org/npcap/"
         shell: pwsh
 
@@ -279,15 +262,8 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Copy WinDivert DLLs (x86/x64 only)
-        if: matrix.interceptor == 'windivert'
-        run: |
-          Copy-Item "windivert/WinDivert.dll" -Destination "target/${{ matrix.target }}/release/"
-        shell: pwsh
-
       - name: Run tests
         run: cargo test --all --target ${{ matrix.target }} -- --test-threads=1
-        continue-on-error: ${{ matrix.target == 'aarch64-pc-windows-msvc' }}
 
       - name: Create config for testing
         run: |
@@ -318,13 +294,18 @@ jobs:
           "@ | Out-File -FilePath "config.toml" -Encoding utf8
         shell: pwsh
 
+      - name: Smoke test binary
+        run: |
+          & "target/${{ matrix.target }}/release/nettrap.exe" --version
+          & "target/${{ matrix.target }}/release/nettrap.exe" config --defaults | Out-Null
+        shell: pwsh
+
       - name: Upload artifact
         uses: actions/upload-artifact@v7.0.1
         with:
           name: nettrap-${{ matrix.name }}
           path: |
             target/${{ matrix.target }}/release/nettrap.exe
-            target/${{ matrix.target }}/release/WinDivert.dll
             config.toml
 
   security-audit:
@@ -344,66 +325,3 @@ jobs:
 
       - name: Run security audit
         run: cargo audit
-
-  release:
-    name: Create Release
-    needs: [build-linux, build-macos, build-windows]
-    if: github.event_name == 'release' && github.event.action == 'published'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7.0.1
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v8.0.1
-        with:
-          path: artifacts/
-
-      - name: Create release archives
-        run: |
-          mkdir -p releases
-          
-          cd artifacts/nettrap-linux-x64
-          tar -czvf ../../releases/nettrap-linux-x86_64.tar.gz nettrap
-          cd ..
-          
-          cd nettrap-linux-x86
-          tar -czvf ../../releases/nettrap-linux-i686.tar.gz nettrap
-          cd ..
-          
-          cd nettrap-linux-arm64
-          tar -czvf ../../releases/nettrap-linux-aarch64.tar.gz nettrap
-          cd ..
-          
-          cd nettrap-linux-arm
-          tar -czvf ../../releases/nettrap-linux-arm.tar.gz nettrap
-          cd ..
-          
-          cd nettrap-macos-x64
-          tar -czvf ../../releases/nettrap-macos-x86_64.tar.gz nettrap
-          cd ..
-          
-          cd nettrap-macos-arm64
-          tar -czvf ../../releases/nettrap-macos-aarch64.tar.gz nettrap
-          cd ..
-          
-          cd nettrap-windows-x64
-          zip ../../releases/nettrap-windows-x86_64.zip nettrap.exe WinDivert.dll
-          cd ..
-          
-          cd nettrap-windows-x86
-          zip ../../releases/nettrap-windows-i686.zip nettrap.exe WinDivert.dll
-          cd ..
-          
-          cd nettrap-windows-arm64
-          zip ../../releases/nettrap-windows-aarch64.zip nettrap.exe
-          cd ..
-
-      - name: Upload release assets
-        uses: softprops/action-gh-release@v3.0.2
-        with:
-          files: releases/*
-          generate_release_notes: true
