@@ -155,6 +155,15 @@ port = 12525
 bind_address = "127.0.0.1"
 enabled = true
 emulate_response = true
+
+[[listeners]]
+name = "ftp"
+protocol = "tcp"
+port = 12121
+bind_address = "127.0.0.1"
+enabled = true
+emulate_response = true
+pasv_ports = "30100-30105"
 EOF
 
 echo "Starting NetTrap..."
@@ -219,6 +228,16 @@ if curl --noproxy '*' --silent --show-error --url smtp://127.0.0.1:12525 \
     echo "✓ SMTP test passed"
 else
     echo "✗ SMTP test failed"
+    exit 1
+fi
+
+echo "Testing FTP..."
+FTP_RESULT=$(curl --noproxy '*' --silent --show-error --user malware:secret \
+    ftp://127.0.0.1:12121/readme.txt)
+if [ "$FTP_RESULT" = "NetTrap default text file" ]; then
+    echo "✓ FTP test passed"
+else
+    echo "✗ FTP test returned unexpected content"
     exit 1
 fi
 
