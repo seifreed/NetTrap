@@ -49,6 +49,7 @@ pub struct StartupContext {
     pub output_path: Option<PathBuf>,
     pub nbi_path: Option<PathBuf>,
     pub http_post_dump_dir: Option<String>,
+    pub smtp_dir: Option<PathBuf>,
     pub log_hexdump: bool,
     pub global_process_whitelist: Vec<String>,
     pub global_process_blacklist: Vec<String>,
@@ -188,6 +189,7 @@ pub fn create_startup_context_with_overrides(
                 Some(value.to_owned())
             }
         }),
+        smtp_dir: config.smtp_dir.as_deref().map(PathBuf::from),
         log_hexdump: config.log_hexdump,
         global_process_whitelist: config.global_process_whitelist.clone(),
         global_process_blacklist: config.global_process_blacklist.clone(),
@@ -783,6 +785,20 @@ mod tests {
         assert!(startup.output_path.is_none());
         assert!(startup.nbi_path.is_none());
         assert!(startup.http_post_dump_dir.is_none());
+    }
+
+    #[test]
+    fn create_startup_context_preserves_smtp_directory() {
+        let mut config = EngineConfig::default();
+        config.smtp_dir = Some("mail-capture".to_string());
+
+        let startup = create_startup_context(&config, None, StartupMode::Standard)
+            .expect("configured SMTP directory should be accepted");
+
+        assert_eq!(
+            startup.smtp_dir.as_deref(),
+            Some(std::path::Path::new("mail-capture"))
+        );
     }
 
     #[test]

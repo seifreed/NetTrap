@@ -8,6 +8,7 @@ cleanup() {
         wait "$NETTRAP_PID" 2>/dev/null || true
     fi
     rm -f /tmp/nettrap_test_config.toml /tmp/dns_result.txt /tmp/tls_result.txt
+    rm -rf /tmp/nettrap_smtp_test
 }
 
 trap cleanup EXIT
@@ -105,11 +106,14 @@ echo ""
 
 echo "=== Step 6: Integration Tests ==="
 
+mkdir -p /tmp/nettrap_smtp_test
+
 cat > /tmp/nettrap_test_config.toml << 'EOF'
 attribution_enabled = false
 default_decision = "intercept"
 pcap_enabled = false
 output_format = "jsonl"
+smtp_dir = "/tmp/nettrap_smtp_test"
 
 [[listeners]]
 name = "dns_test"
@@ -143,6 +147,14 @@ bind_address = "127.0.0.1"
 enabled = true
 emulate_response = true
 use_ssl = true
+
+[[listeners]]
+name = "smtp"
+protocol = "tcp"
+port = 12525
+bind_address = "127.0.0.1"
+enabled = true
+emulate_response = true
 EOF
 
 echo "Starting NetTrap..."
@@ -196,6 +208,17 @@ if [ "$HTTPS_RESULT" = "200" ]; then
     echo "✓ HTTPS test passed"
 else
     echo "✗ HTTPS test returned: $HTTPS_RESULT"
+    exit 1
+fi
+
+echo "Testing SMTP..."
+if curl --noproxy '*' --silent --show-error --url smtp://127.0.0.1:12525 \
+    --mail-from sender@example.test --mail-rcpt receiver@example.test \
+    --upload-file /dev/null \
+    && find /tmp/nettrap_smtp_test -type f -name '*.eml' -print -quit | grep -q .; then
+    echo "✓ SMTP test passed"
+else
+    echo "✗ SMTP test failed"
     exit 1
 fi
 

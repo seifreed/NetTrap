@@ -155,10 +155,12 @@ pub(super) async fn spawn_listeners(
             if listener.use_ssl { " [SSL]" } else { "" }
         );
 
-        let smtp_dir = startup
-            .output_path
-            .as_ref()
-            .map(|p| p.parent().unwrap_or(p).join("smtp"));
+        let smtp_dir = startup.smtp_dir.clone().or_else(|| {
+            startup
+                .output_path
+                .as_ref()
+                .map(|p| p.parent().unwrap_or(p).join("smtp"))
+        });
 
         let listener_ctx = build_listener_context(listener, startup, smtp_dir)?;
         let bind_addr: std::net::IpAddr = listener.bind_address.parse().map_err(|err| {
