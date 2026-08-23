@@ -5,7 +5,9 @@ mod policy;
 mod runtime;
 
 pub use health::RuntimeHealth;
-pub use policy::{FlowDecision, ParseFlowDecisionError};
+pub use policy::{
+    FlowDecision, FlowPolicy, FlowPolicyResolution, FlowPolicyRule, ParseFlowDecisionError,
+};
 pub use runtime::{RuntimeHost, RuntimeRunner};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

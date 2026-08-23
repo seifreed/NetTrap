@@ -11,6 +11,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::io::AsyncReadExt;
+
 use super::super::tcp_ftp::{FtpCommandAction, finish_ftp_passive_transfer};
 use crate::listener_context::ListenerContext;
 use crate::session::SessionDestination;
@@ -20,10 +22,29 @@ use crate::utils::service_name::{is_usable_service_name_input, resolve_service_n
 
 pub async fn handle_tcp_connection(
     ctx: Arc<ListenerContext>,
+    stream: tokio::net::TcpStream,
+    peer: std::net::SocketAddr,
+    destination: SessionDestination,
+    output_path: Option<&std::path::Path>,
+) -> crate::Result<()> {
+    handle_tcp_connection_with_policy(
+        ctx,
+        stream,
+        peer,
+        destination,
+        output_path,
+        nettrap_engine::FlowPolicy::new(nettrap_engine::FlowDecision::Emulate).resolve(true),
+    )
+    .await
+}
+
+pub(crate) async fn handle_tcp_connection_with_policy(
+    ctx: Arc<ListenerContext>,
     mut stream: tokio::net::TcpStream,
     peer: std::net::SocketAddr,
     destination: SessionDestination,
     output_path: Option<&std::path::Path>,
+    configured: nettrap_engine::FlowPolicyResolution,
 ) -> crate::Result<()> {
     let control_local_addr = control_local_addr_or_log(stream.local_addr(), ctx.name(), &peer);
     let conn = TcpConnection {
@@ -34,8 +55,35 @@ pub async fn handle_tcp_connection(
         control_local_addr,
     };
 
-    if super::forward::is_forward_listener(conn.ctx.name()) {
-        return super::forward::forward_to_original_destination(&conn, stream).await;
+    let (decision, rule) = if super::forward::is_forward_listener(conn.ctx.name()) {
+        (
+            nettrap_engine::FlowDecision::Pass,
+            "listener.protocol=forward",
+        )
+    } else {
+        (configured.decision(), configured.rule().as_str())
+    };
+    log_event(
+        output_path,
+        conn.ctx.name(),
+        &peer,
+        "policy_decision",
+        &format!("decision={} rule={}", decision, rule),
+    )
+    .await;
+
+    match decision {
+        nettrap_engine::FlowDecision::Pass => {
+            return super::forward::forward_to_original_destination(&conn, stream, false).await;
+        }
+        nettrap_engine::FlowDecision::Capture => {
+            return super::forward::forward_to_original_destination(&conn, stream, true).await;
+        }
+        nettrap_engine::FlowDecision::Sinkhole => {
+            return sinkhole_tcp_connection(&conn, &mut stream).await;
+        }
+        nettrap_engine::FlowDecision::Block => return Ok(()),
+        nettrap_engine::FlowDecision::Emulate => {}
     }
 
     let (handlers, webroot_server, session, mut ssh_banner_sent, connection_buf) =
@@ -62,6 +110,34 @@ pub async fn handle_tcp_connection(
         connection_buf,
     )
     .await
+}
+
+async fn sinkhole_tcp_connection(
+    conn: &TcpConnection<'_>,
+    stream: &mut tokio::net::TcpStream,
+) -> crate::Result<()> {
+    const SINKHOLE_BUFFER_SIZE: usize = 16 * 1024;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(conn.ctx.timeout_ms());
+    let mut buffer = [0_u8; SINKHOLE_BUFFER_SIZE];
+    let mut received = 0_u64;
+    loop {
+        match tokio::time::timeout_at(deadline, stream.read(&mut buffer)).await {
+            Ok(Ok(0)) | Err(_) => break,
+            Ok(Ok(length)) => {
+                conn.ctx.write_pcap_event_for_destination(
+                    &buffer[..length],
+                    &conn.peer,
+                    &conn.destination,
+                );
+                received = received.saturating_add(length as u64);
+            }
+            Ok(Err(error)) => return Err(error.into()),
+        }
+    }
+    conn.ctx
+        .update_session_bytes(&conn.peer, "TCP", &conn.destination, received, 0);
+    Ok(())
 }
 
 fn control_local_addr_or_log(

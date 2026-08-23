@@ -11,6 +11,62 @@ pub enum FlowDecision {
     Block,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlowPolicyRule {
+    Default,
+    ListenerEmulationDisabled,
+}
+
+impl FlowPolicyRule {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default_decision",
+            Self::ListenerEmulationDisabled => "listener.emulate_response=false",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlowPolicyResolution {
+    decision: FlowDecision,
+    rule: FlowPolicyRule,
+}
+
+impl FlowPolicyResolution {
+    pub const fn decision(self) -> FlowDecision {
+        self.decision
+    }
+
+    pub const fn rule(self) -> FlowPolicyRule {
+        self.rule
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlowPolicy {
+    default_decision: FlowDecision,
+}
+
+impl FlowPolicy {
+    pub const fn new(default_decision: FlowDecision) -> Self {
+        Self { default_decision }
+    }
+
+    pub const fn resolve(self, emulate_response: bool) -> FlowPolicyResolution {
+        if matches!(self.default_decision, FlowDecision::Emulate) && !emulate_response {
+            return FlowPolicyResolution {
+                decision: FlowDecision::Capture,
+                rule: FlowPolicyRule::ListenerEmulationDisabled,
+            };
+        }
+
+        FlowPolicyResolution {
+            decision: self.default_decision,
+            rule: FlowPolicyRule::Default,
+        }
+    }
+}
+
 impl FlowDecision {
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -69,5 +125,16 @@ mod tests {
         assert_eq!("sinkhole".parse(), Ok(FlowDecision::Sinkhole));
         assert_eq!("block".parse(), Ok(FlowDecision::Block));
         assert!("drop".parse::<FlowDecision>().is_err());
+    }
+
+    #[test]
+    fn test_flow_policy_resolve_disables_only_emulation() {
+        let disabled = FlowPolicy::new(FlowDecision::Emulate).resolve(false);
+        assert_eq!(disabled.decision(), FlowDecision::Capture);
+        assert_eq!(disabled.rule(), FlowPolicyRule::ListenerEmulationDisabled);
+
+        let blocked = FlowPolicy::new(FlowDecision::Block).resolve(false);
+        assert_eq!(blocked.decision(), FlowDecision::Block);
+        assert_eq!(blocked.rule(), FlowPolicyRule::Default);
     }
 }

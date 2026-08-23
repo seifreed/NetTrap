@@ -12,7 +12,7 @@ nettrap config --defaults > config.toml
 | `config_version` | u32 | `1` | Configuration schema version; omitted legacy files are treated as v1 and unknown versions are rejected |
 | `attribution_enabled` | bool | `true` | Enable process-to-connection tracking |
 | `attribution_timeout_ms` | u64 | `5000` | Attribution operation timeout and cache TTL |
-| `default_decision` | string | `"intercept"` | Reserved alpha field; only `intercept` is accepted and no per-flow policy engine is active |
+| `default_decision` | string | `"emulate"` | TCP flow action: `pass`, `capture`, `emulate`, `sinkhole`, or `block`; legacy `intercept`/`passthrough` values migrate to `emulate`/`pass`. UDP currently always emulates. |
 | `pcap_enabled` | bool | `false` | Enable PCAP recording |
 | `pcap_path` | string | - | PCAP output file path |
 | `pcap_prefix` | string | - | PCAP filename prefix |
@@ -67,7 +67,7 @@ accepted.
 | `ftproot` | string | - | FTP file serving directory |
 | `tftproot` | string | - | TFTP file serving directory |
 | `response_delay_ms` | u64 | `0` | Response delay |
-| `emulate_response` | bool | `true` | Reserved alpha field; enabled listeners currently respond regardless of this value |
+| `emulate_response` | bool | `true` | For TCP listeners, `false` changes the default `emulate` action to `capture`; explicit `pass`, `capture`, `sinkhole`, and `block` decisions are unchanged. UDP support is pending. |
 | `timeout_ms` | u64 | `30000` | Per-connection timeout |
 | `max_connections` | u32 | `100` | Maximum concurrent connections for the listener |
 | `banner_delay_ms` | u64 | `0` | Delay before dummy/raw banners |

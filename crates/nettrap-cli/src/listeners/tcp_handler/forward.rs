@@ -14,6 +14,8 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
 use super::TcpConnection;
 use crate::listeners::tcp_framing::listener_name_matches_protocol;
 use crate::utils::log_event;
@@ -96,6 +98,7 @@ fn is_unusable_forward_target_ip(ip: &std::net::IpAddr) -> bool {
 pub(crate) async fn forward_to_original_destination(
     conn: &TcpConnection<'_>,
     mut stream: tokio::net::TcpStream,
+    capture: bool,
 ) -> crate::Result<()> {
     let ctx = &conn.ctx;
     let peer = &conn.peer;
@@ -138,13 +141,67 @@ pub(crate) async fn forward_to_original_destination(
     )
     .await;
 
-    finalize_forward_relay(
-        ctx,
-        peer,
-        &conn.destination,
-        target,
-        tokio::io::copy_bidirectional(&mut stream, &mut upstream).await,
+    let relay_result = if capture {
+        captured_bidirectional_copy(ctx, peer, &conn.destination, stream, upstream).await
+    } else {
+        tokio::io::copy_bidirectional(&mut stream, &mut upstream).await
+    };
+
+    finalize_forward_relay(ctx, peer, &conn.destination, target, relay_result)
+}
+
+async fn captured_bidirectional_copy(
+    ctx: &crate::listener_context::ListenerContext,
+    peer: &SocketAddr,
+    destination: &crate::session::SessionDestination,
+    client: tokio::net::TcpStream,
+    upstream: tokio::net::TcpStream,
+) -> std::io::Result<(u64, u64)> {
+    let (client_reader, client_writer) = client.into_split();
+    let (upstream_reader, upstream_writer) = upstream.into_split();
+    tokio::try_join!(
+        copy_with_capture(ctx, peer, destination, client_reader, upstream_writer, true,),
+        copy_with_capture(
+            ctx,
+            peer,
+            destination,
+            upstream_reader,
+            client_writer,
+            false,
+        )
     )
+}
+
+async fn copy_with_capture<R, W>(
+    ctx: &crate::listener_context::ListenerContext,
+    peer: &SocketAddr,
+    destination: &crate::session::SessionDestination,
+    mut reader: R,
+    mut writer: W,
+    request_direction: bool,
+) -> std::io::Result<u64>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    const RELAY_BUFFER_SIZE: usize = 16 * 1024;
+
+    let mut buffer = [0_u8; RELAY_BUFFER_SIZE];
+    let mut copied = 0_u64;
+    loop {
+        let length = reader.read(&mut buffer).await?;
+        if length == 0 {
+            writer.shutdown().await?;
+            return Ok(copied);
+        }
+        if request_direction {
+            ctx.write_pcap_event_for_destination(&buffer[..length], peer, destination);
+        } else {
+            ctx.write_pcap_response_for_destination(&buffer[..length], peer, destination);
+        }
+        writer.write_all(&buffer[..length]).await?;
+        copied = copied.saturating_add(length as u64);
+    }
 }
 
 fn forward_connect_error(target: SocketAddr, err: std::io::Error) -> crate::Error {
@@ -294,7 +351,7 @@ mod tests {
                 output_path: None,
                 control_local_addr,
             };
-            forward_to_original_destination(&conn, stream)
+            forward_to_original_destination(&conn, stream, false)
                 .await
                 .expect("forward ok");
         });
@@ -307,6 +364,58 @@ mod tests {
         let n = client.read(&mut buf).await.expect("read");
         assert_eq!(n, 0, "self-loop forward should close without relaying");
         server.await.expect("relay task");
+    }
+
+    #[tokio::test]
+    async fn captured_relay_preserves_both_directions() {
+        let client_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind client side");
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind upstream side");
+        let mut client = tokio::net::TcpStream::connect(
+            client_listener.local_addr().expect("client listener addr"),
+        )
+        .await
+        .expect("connect client");
+        let (relay_client, peer) = client_listener.accept().await.expect("accept client");
+        let relay_upstream =
+            tokio::net::TcpStream::connect(upstream_listener.local_addr().expect("upstream addr"))
+                .await
+                .expect("connect upstream");
+        let (mut upstream, _) = upstream_listener.accept().await.expect("accept upstream");
+        let ctx = forward_context();
+        let destination = SessionDestination::new_unchecked("192.0.2.1".to_string(), 443);
+
+        let relay =
+            captured_bidirectional_copy(&ctx, &peer, &destination, relay_client, relay_upstream);
+        let exchange = async {
+            use tokio::io::AsyncWriteExt;
+
+            client.write_all(b"request").await.expect("write request");
+            client.shutdown().await.expect("close request side");
+            let mut request = Vec::new();
+            upstream
+                .read_to_end(&mut request)
+                .await
+                .expect("read request");
+            assert_eq!(request, b"request");
+            upstream
+                .write_all(b"response")
+                .await
+                .expect("write response");
+            upstream.shutdown().await.expect("close response side");
+            let mut response = Vec::new();
+            client
+                .read_to_end(&mut response)
+                .await
+                .expect("read response");
+            assert_eq!(response, b"response");
+        };
+
+        let (relay_result, ()) = tokio::join!(relay, exchange);
+        assert_eq!(relay_result.expect("captured relay"), (7, 8));
     }
 
     #[test]

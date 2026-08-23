@@ -19,11 +19,10 @@ suite.
 
 ## Policy and Protocols
 
-- There is no per-flow policy engine for pass, capture, emulate, sinkhole, and
-  block decisions. `default_decision` and `emulate_response` are reserved alpha
-  fields and do not provide those controls.
-- Protocol handlers have uneven fidelity. Only DNS and HTTP have required
-  external-client E2E in the baseline CI contract.
+- TCP applies `pass`, `capture`, `emulate`, `sinkhole`, and `block` decisions
+  and audits the selected rule. UDP policy actions are not yet applied.
+- Protocol handlers have uneven fidelity. DNS, HTTP(S), TLS, SMTP, and FTP have
+  required external-client E2E in the baseline CI contract.
 - SSH does not complete a normal OpenSSH authentication session; SMB is not a
   full SMB2/SMB3 server; QUIC does not decrypt traffic or implement HTTP/3.
 - Local TLS termination does not connect upstream, provide selective

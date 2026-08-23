@@ -10,7 +10,7 @@ use tokio::task::JoinSet;
 
 use crate::listener_context::ListenerContext;
 use crate::listeners::attribution_semaphore;
-use crate::listeners::tcp_handler::handle_tcp_connection;
+use crate::listeners::tcp_handler::handle_tcp_connection_with_policy;
 #[cfg(target_os = "linux")]
 use crate::session::is_usable_session_destination_ip;
 use crate::session::{SessionDestination, normalize_session_ip};
@@ -21,6 +21,21 @@ pub async fn run_tcp_listener(
     ctx: Arc<ListenerContext>,
     listener: TcpListener,
     output_path: Option<&std::path::Path>,
+) -> crate::Result<()> {
+    run_tcp_listener_with_policy(
+        ctx,
+        listener,
+        output_path,
+        nettrap_engine::FlowPolicy::new(nettrap_engine::FlowDecision::Emulate).resolve(true),
+    )
+    .await
+}
+
+pub(crate) async fn run_tcp_listener_with_policy(
+    ctx: Arc<ListenerContext>,
+    listener: TcpListener,
+    output_path: Option<&std::path::Path>,
+    policy: nettrap_engine::FlowPolicyResolution,
 ) -> crate::Result<()> {
     let addr = listener.local_addr()?;
     let active_connections = Arc::new(AtomicU32::new(0));
@@ -60,6 +75,14 @@ pub async fn run_tcp_listener(
 
                 if !ctx.is_host_allowed(&canonical_socket_ip_string(&peer)) {
                     tracing::debug!("Host {} blocked by filter on {}", peer.ip(), ctx.name());
+                    crate::utils::log_event(
+                        output_path,
+                        ctx.name(),
+                        &peer,
+                        "policy_decision",
+                        "decision=block rule=host_filter",
+                    )
+                    .await;
                     continue;
                 }
 
@@ -107,16 +130,25 @@ pub async fn run_tcp_listener(
                     let _slot = slot;
                     if !apply_tcp_process_filter(&ctx_clone, &peer, &destination).await {
                         tracing::debug!("Process blocked by filter on {}", ctx_clone.name());
+                        crate::utils::log_event(
+                            out.as_deref(),
+                            ctx_clone.name(),
+                            &peer,
+                            "policy_decision",
+                            "decision=block rule=process_filter",
+                        )
+                        .await;
                         ctx_clone.remove_session(&peer, "TCP", &destination);
                         return;
                     }
 
-                    let result = handle_tcp_connection(
+                    let result = handle_tcp_connection_with_policy(
                         Arc::clone(&ctx_clone),
                         stream,
                         peer,
                         destination.clone(),
                         out.as_deref(),
+                        policy,
                     )
                     .await;
                     ctx_clone.remove_session(&peer, "TCP", &destination);

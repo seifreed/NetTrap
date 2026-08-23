@@ -9,7 +9,7 @@ use super::send_fatal_runtime_error;
 use crate::config::EngineConfig;
 use crate::engine::startup::StartupContext;
 use crate::engine::startup::build_listener_context;
-use crate::listeners::{run_tcp_listener, run_udp_listener};
+use crate::listeners::{run_tcp_listener_with_policy, run_udp_listener};
 
 pub(super) fn has_spawnable_listeners(config: &EngineConfig) -> bool {
     config
@@ -37,6 +37,7 @@ enum PreparedListener {
         name: String,
         listener: TcpListener,
         ctx: Arc<crate::listener_context::ListenerContext>,
+        policy: nettrap_engine::FlowPolicyResolution,
         output_path: Option<PathBuf>,
     },
     Udp {
@@ -107,6 +108,13 @@ pub(super) async fn spawn_listeners(
     use nettrap_core::prelude::Protocol;
 
     let mut prepared = Vec::new();
+    let default_decision = config.default_decision.parse().map_err(|_| {
+        crate::Error::Config(format!(
+            "unsupported default_decision '{}'",
+            config.default_decision
+        ))
+    })?;
+    let flow_policy = nettrap_engine::FlowPolicy::new(default_decision);
 
     for listener in &config.listeners {
         let is_default_target = listener_is_default_target(config, listener);
@@ -210,6 +218,7 @@ pub(super) async fn spawn_listeners(
                     name: listener.name.clone(),
                     listener: tcp_listener,
                     ctx,
+                    policy: flow_policy.resolve(listener.emulate_response),
                     output_path,
                 });
             }
@@ -268,12 +277,15 @@ pub(super) async fn spawn_listeners(
                 name,
                 listener,
                 ctx,
+                policy,
                 output_path,
             } => {
                 let runtime_health = Arc::clone(&runtime_health);
                 let fatal_runtime_tx = fatal_runtime_tx.clone();
                 handles.push(tokio::spawn(async move {
-                    let result = run_tcp_listener(ctx, listener, output_path.as_deref()).await;
+                    let result =
+                        run_tcp_listener_with_policy(ctx, listener, output_path.as_deref(), policy)
+                            .await;
                     let message = format!("TCP listener '{}' stopped unexpectedly", name);
                     match &result {
                         Ok(()) => {

@@ -18,6 +18,7 @@ mod forward;
 
 mod plain;
 pub use plain::handle_tcp_connection;
+pub(crate) use plain::handle_tcp_connection_with_policy;
 
 mod wrapped;
 pub use wrapped::handle_wrapped_connection;
