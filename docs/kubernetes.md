@@ -4,13 +4,14 @@
 
 - Kubernetes cluster (1.24+)
 - kubectl configured
-- A `nettrap:0.1.0-alpha.1` image available to the cluster
+- A NetTrap release OCI digest from `nettrap-oci-image.txt`
 
 ## Quick Deploy
 
 ```bash
-# Build the listener-mode image.
-docker build -t nettrap:0.1.0-alpha.1 .
+# Download nettrap-oci-image.txt and nettrap-kubernetes-deployment.yaml
+# from the same GitHub release. The generated deployment is pinned to
+# the multi-architecture image digest recorded in the text file.
 
 # Create namespace
 kubectl apply -f deploy/kubernetes/namespace.yaml
@@ -19,7 +20,7 @@ kubectl apply -f deploy/kubernetes/namespace.yaml
 kubectl apply -f deploy/kubernetes/configmap.yaml -n nettrap
 
 # Deploy NetTrap
-kubectl apply -f deploy/kubernetes/deployment.yaml -n nettrap
+kubectl apply -f nettrap-kubernetes-deployment.yaml -n nettrap
 kubectl apply -f deploy/kubernetes/service.yaml -n nettrap
 
 # Verify
@@ -27,8 +28,10 @@ kubectl get pods -n nettrap
 kubectl get svc -n nettrap
 ```
 
-For a remote cluster, push the image to your registry and replace `image` in
-`deploy/kubernetes/deployment.yaml` with that immutable tag or digest.
+The checked-in deployment contains a non-existent zero digest so it fails closed.
+Release automation replaces it with the published GHCR manifest digest. For a
+private mirror, replace the generated `image` value with the mirror's digest,
+never a mutable tag.
 
 ## Verify Health
 
@@ -54,16 +57,6 @@ Edit the ConfigMap:
 kubectl edit configmap nettrap-config -n nettrap
 # Then restart pods to pick up changes:
 kubectl rollout restart deployment/nettrap -n nettrap
-```
-
-## Scaling
-
-```bash
-# Manual scaling
-kubectl scale deployment nettrap --replicas=5 -n nettrap
-
-# Auto-scaling (requires metrics-server)
-kubectl autoscale deployment nettrap --min=2 --max=20 --cpu-percent=50 -n nettrap
 ```
 
 ## Exposing to Internet

@@ -20,15 +20,20 @@ spec:
         prometheus.io/port: "9090"
         prometheus.io/path: "/metrics"
     spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
       securityContext:
         fsGroup: 10001
         runAsGroup: 10001
         runAsNonRoot: true
         runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 30
       containers:
       - name: nettrap
-        image: nettrap:0.1.0-alpha.1
-        imagePullPolicy: IfNotPresent
+        image: ghcr.io/seifreed/nettrap@sha256:0000000000000000000000000000000000000000000000000000000000000000
+        imagePullPolicy: Always
         ports:
         - containerPort: 5353
           protocol: UDP
@@ -72,8 +77,11 @@ spec:
           mountPath: /etc/nettrap
         - name: data-storage
           mountPath: /var/lib/nettrap
+        - name: tmp
+          mountPath: /tmp
         securityContext:
           allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
           capabilities:
             drop:
             - ALL
@@ -84,6 +92,9 @@ spec:
       - name: data-storage
         persistentVolumeClaim:
           claimName: nettrap-data
+      - name: tmp
+        emptyDir:
+          sizeLimit: 64Mi
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

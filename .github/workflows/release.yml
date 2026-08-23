@@ -9,6 +9,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  IMAGE: ghcr.io/seifreed/nettrap
   RUST_BACKTRACE: 1
 
 jobs:
@@ -164,9 +165,87 @@ jobs:
           if-no-files-found: error
           archive: false
 
+  image:
+    name: Build OCI image (${{ matrix.platform }})
+    needs: e2e
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            suffix: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            suffix: arm64
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GHCR_TOKEN" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
+
+      - name: Build and push architecture image
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ${{ env.IMAGE }}:${{ github.ref_name }}-${{ matrix.suffix }}
+          provenance: mode=max
+          sbom: true
+
+  image-manifest:
+    name: Publish OCI manifest
+    needs: image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GHCR_TOKEN" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
+
+      - name: Publish multi-architecture manifest
+        run: |
+          docker buildx imagetools create \
+            --tag "$IMAGE:$GITHUB_REF_NAME" \
+            "$IMAGE:$GITHUB_REF_NAME-amd64" \
+            "$IMAGE:$GITHUB_REF_NAME-arm64"
+          digest="$(docker buildx imagetools inspect "$IMAGE:$GITHUB_REF_NAME" --format '{{.Manifest.Digest}}')"
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Invalid OCI digest: $digest" >&2
+            exit 1
+          fi
+          printf '%s@%s\n' "$IMAGE" "$digest" > nettrap-oci-image.txt
+          sed "s|ghcr.io/seifreed/nettrap@sha256:0000000000000000000000000000000000000000000000000000000000000000|$IMAGE@$digest|" \
+            deploy/kubernetes/deployment.yaml > nettrap-kubernetes-deployment.yaml
+          grep -Fq "$IMAGE@$digest" nettrap-kubernetes-deployment.yaml
+
+      - name: Upload OCI metadata
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: nettrap-oci-metadata
+          path: |
+            nettrap-oci-image.txt
+            nettrap-kubernetes-deployment.yaml
+          if-no-files-found: error
+          archive: false
+
   publish:
     name: Publish Draft Release
-    needs: [build, e2e]
+    needs: [build, e2e, image-manifest]
     runs-on: ubuntu-latest
     permissions:
       artifact-metadata: write
@@ -192,6 +271,8 @@ jobs:
           test -f releases/nettrap-macos-aarch64.tar.gz
           test -f releases/nettrap-windows-x86_64.zip
           test -f releases/nettrap-windows-aarch64.zip
+          test -f releases/nettrap-oci-image.txt
+          test -f releases/nettrap-kubernetes-deployment.yaml
 
       - name: Create draft prerelease
         env:

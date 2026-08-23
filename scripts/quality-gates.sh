@@ -62,6 +62,7 @@ run_quick() {
     run cargo audit
     run cargo deny check
     run scripts/check-architecture.sh
+    run scripts/check-deployment.sh
     validate_lockfile_resolution
     run cargo check --all-targets --all-features
     run git diff --check
