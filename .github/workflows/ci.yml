@@ -175,15 +175,15 @@ jobs:
 
       - name: Run integration tests
         run: |
-          set -e
+          set -euo pipefail
           ./target/${{ matrix.target }}/release/nettrap run -c /tmp/nettrap_config.toml &
           NETTRAP_PID=$!
-          trap 'kill $NETTRAP_PID 2>/dev/null || true' EXIT
+          trap 'kill "$NETTRAP_PID" 2>/dev/null || true' EXIT
           sleep 3
 
           echo "=== macOS Integration Tests ==="
           dig @127.0.0.1 -p 53530 example.com A +short | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
-          curl --fail --silent http://127.0.0.1:8088/ | grep -i "NetTrap"
+          curl --fail --silent --header 'Host: example.test' http://127.0.0.1:8088/ | grep -F 'It Works!'
 
           kill $NETTRAP_PID
           wait $NETTRAP_PID || true
@@ -257,7 +257,6 @@ jobs:
 
       - name: Run clippy
         run: cargo clippy --all-targets --all-features --target ${{ matrix.target }} -- -D warnings
-        continue-on-error: ${{ matrix.target == 'aarch64-pc-windows-msvc' }}
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
