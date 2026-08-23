@@ -37,7 +37,7 @@ pub(super) fn init_tls_ca(
                         ca = ca.with_cert_dir(dir);
                     }
                     ca = ca.with_now(crate::faketime::fake_now);
-                    tracing::info!("TLS MITM using mkcert trusted CA — SSL inspection active");
+                    tracing::info!("Local TLS termination using the trusted mkcert CA");
                     return Ok(Some(Arc::new(ca)));
                 }
                 Err(err) => {

@@ -1,11 +1,14 @@
 # WinDivert Binaries for NetTrap
 
-This directory is a staging location for the WinDivert binaries required for
-Windows x64/x86 packet interception. The files are external runtime/build
-artifacts and are intentionally ignored by Git. Windows ARM64 uses native Npcap
-capture instead and does not use these files.
+This directory is reserved for future WinDivert development. NetTrap
+`0.1.0-alpha.1` rejects `--intercept` on Windows and release archives do not
+include WinDivert binaries or drivers. Adding these files does not enable a
+supported interception path.
 
-## Required Files
+Windows listener mode does not need WinDivert. Experimental Windows capture
+uses an externally installed Npcap runtime.
+
+## Development Files
 
 Download WinDivert from: https://reqrypt.org/windivert.html
 
@@ -15,14 +18,12 @@ Extract and place the following files:
 - `WinDivert.dll` - Main library
 - `WinDivert64.sys` - Kernel driver (x86_64)
 
-### 32-bit Windows (x86)
-- `WinDivert.dll` - Main library  
-- `WinDivert32.sys` - Kernel driver (x86)
+Windows x86 is not a CI or release target.
 
 ## Download
 
 ```powershell
-# Download WinDivert 2.2 (latest stable)
+# Download the development version pinned by this example
 Invoke-WebRequest -Uri "https://reqrypt.org/download/WinDivert-2.2.2-A.zip" -OutFile "WinDivert.zip"
 Expand-Archive -Path "WinDivert.zip" -DestinationPath "WinDivert"
 Copy-Item "WinDivert/WinDivert-2.2.2-A/x64/WinDivert.dll" -Destination "windivert/"

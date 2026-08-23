@@ -5,7 +5,7 @@
 <h1 align="center">NetTrap</h1>
 
 <p align="center">
-  <strong>Network Interception, Emulation & Deception Engine</strong>
+  <strong>Network Service Emulation & Behavioral Capture Engine</strong>
 </p>
 
 <p align="center">
@@ -26,104 +26,51 @@
 
 ## Overview
 
-**NetTrap** is a high-performance network interception and deception engine written in Rust. It registers 35 protocol detectors, including 33 runtime service/fallback handlers plus TLS and internal dummy detection, to detect malicious activity, capture malware C2 communications, and create honeypots. It supports TLS MITM, distributed deployment, and multiple platforms.
+**NetTrap** is a late-alpha network service emulation and behavioral capture engine written in Rust. Direct listener mode is the primary supported path. Linux transparent redirection is experimental; Windows and macOS transparent interception are not supported. The 35 registered detectors have different fidelity levels and do not represent 35 complete protocol servers.
 
 ### Why NetTrap?
 
-- **35 protocol detectors** — 33 runtime service/fallback handlers from DNS/HTTP to Telnet/SSH/SMB/RDP/Redis/MQTT, plus TLS and dummy detection
-- **TLS MITM with JA3/JA4** — decrypt HTTPS traffic and fingerprint malware TLS stacks
+- **35 protocol detectors** — traffic classification plus partial service emulation; see the verified matrix
+- **Local TLS termination with JA3/JA4** — inspect inbound TLS for configured listeners
 - **mkcert integration** — one command to install trusted CA for full SSL inspection
 - **Distributed mode** — multi-node fleet with event shipping to Elasticsearch, Kafka, Splunk, Syslog
 - **Database storage** — SQLite (standalone) or PostgreSQL (distributed)
 - **5 output formats** — JSONL, JSON, SARIF v2.1.0, TOON, CSV
-- **Cross-platform** — Linux, macOS, Windows (x64/x86 with WinDivert; ARM64 with Npcap capture)
+- **Cross-platform listener mode** — packaged for Linux, macOS, and Windows x86_64/ARM64
 - **Async Rust** — built on Tokio, 52 modular crates
 
 ---
 
-## Supported Protocols
+## Protocol Coverage
 
-### Tier 1 — Core Protocols
-
-| Protocol | Port | Use Case |
-|----------|------|----------|
-| DNS | 53 | Domain resolution honeypot (A/AAAA/MX/TXT/NS/CNAME/SOA, NXDomains, NCSI) |
-| HTTP/HTTPS | 80/443 | Web honeypot with TLS MITM, custom responses, webroot serving |
-| SMTP | 25 | Email server (EHLO, MAIL, DATA, Exchange commands) |
-| FTP | 21 | File server (30+ FTP commands, 90+ banner presets, PASV, file serving) |
-| SSH | 22 | SSH brute-force capture (banner exchange, KEX emulation) |
-| Telnet | 23 | IoT malware capture (Mirai-style shell, command logging) |
-| POP3 | 110 | Email client honeypot (USER, PASS, STAT, LIST, RETR) |
-| IRC | 6667 | Bot C2 capture (NICK, JOIN, PRIVMSG, MOTD) |
-| TFTP | 69 | Firmware/payload capture (RRQ/WRQ, block transfer) |
-
-### Tier 2 — Enterprise & Cloud
-
-| Protocol | Port | Use Case |
-|----------|------|----------|
-| SMB | 445 | Ransomware lateral movement detection (SMB1/2/3, NTLM capture) |
-| RDP | 3389 | Ransomware initial access (X.224, cookie/username extraction) |
-| Redis | 6379 | Cloud exploitation (RESP protocol, CONFIG SET/SLAVEOF/MODULE detection) |
-| MySQL | 3306 | Database honeypot (handshake, login capture, query logging) |
-| LDAP | 389 | AD attacks & Log4Shell capture (Bind, Search, JNDI) |
-| PostgreSQL | 5432 | Database exploitation (startup, query logging) |
-| MQTT | 1883 | IoT C2 detection (CONNECT, PUBLISH, SUBSCRIBE) |
-| SOCKS | 1080 | Proxy malware detection (SOCKS4/5 handshake, CONNECT logging) |
-| Memcached | 11211 | DDoS amplification & data theft (text + binary protocol) |
-
-### Tier 3 — Specialized
-
-| Protocol | Port | Use Case |
-|----------|------|----------|
-| SNMP | 161 | Network recon (community string capture, GetRequest/SetRequest) |
-| SIP | 5060 | VoIP fraud detection (REGISTER, INVITE) |
-| UPnP/SSDP | 1900 | IoT discovery & port mapping (M-SEARCH, AddPortMapping) |
-| NTP | 123 | Amplification detection (server response) |
-| CoAP | 5683 | IoT constrained devices (ACK response) |
-| NKN | 30001 | NKAbuse malware (JSON-RPC, P2P detection) |
-| QUIC | 443 | HTTP/3 detection (long header, version detection) |
-| Raw | any | Catch-all (echo, static, base64, file, silent modes) |
-
-### Tier 4 — Legacy & Diagnostic
-
-| Protocol | Port | Use Case |
-|----------|------|----------|
-| Finger | 79 | User enumeration recon (query/response logging) |
-| Ident | 113 | Identity lookup recon (RFC 1413 USERID response) |
-| Daytime | 13 | Diagnostic banner (RFC 867 human-readable date) |
-| Time | 37 | Diagnostic timestamp (RFC 868 32-bit epoch) |
-| Chargen | 19 | Amplification/DoS bait (RFC 864 character generator) |
-| QOTD | 17 | Quote-of-the-day banner (RFC 865) |
-| Syslog | 514 | Inbound syslog capture (RFC 3164/5424 message logging) |
-
-> Any protocol can run on any port. The taste-based protocol router auto-detects by content, not just port number.
+NetTrap combines taste-based detection with partial service emulation. Required
+real-client CI currently covers DNS with `dig` and HTTP with `curl`; the other
+handlers are covered primarily by Rust tests and have explicit fidelity limits.
+See [Protocol Support](PROTOCOL_SUPPORT.md) before relying on a handler.
 
 ---
 
-## TLS MITM & SSL Inspection
+## Experimental TLS Termination
 
-NetTrap performs full TLS man-in-the-middle to decrypt HTTPS malware traffic:
+NetTrap can terminate inbound TLS for a configured local listener:
 
 - **Dynamic certificate generation** per SNI hostname
 - **JA3 fingerprinting** — identify malware by TLS client fingerprint
 - **JA4 fingerprinting** — next-gen TLS fingerprint (FoxIO spec)
-- **mkcert integration** — trusted CA for system-wide SSL inspection
+- **mkcert integration** — optional local CA installation
 
 ```bash
 # Install mkcert (one time)
 nettrap tls install-mkcert
 nettrap tls install          # Install CA in system trust store
 
-# Run — HTTPS traffic is now fully decrypted
+# Run a configured TLS listener
 nettrap run -c config.toml
 ```
 
-**What you see in decrypted HTTPS:**
-```
-TLS FINGERPRINT:  JA3=a0a70c27edcfbed9c5dd17b4cc10d6c0  JA4=t13d4907_h2_...
-DECRYPTED HTTPS:  POST /exfil/upload  Host: exfil.malware.io  Body: 163 bytes
-DECRYPTED HTTPS:  GET /payload.exe    Host: cdn.malware.net
-```
+This path does not establish an upstream connection, implement selective
+passthrough, or bypass certificate pinning. It is not a general transparent
+TLS MITM proxy.
 
 ---
 
@@ -151,12 +98,11 @@ cargo build --release
 ### Docker
 
 ```bash
-docker build -t nettrap:latest .
+docker build -t nettrap:0.1.0-alpha.1 .
 docker run -d --name nettrap \
-  --cap-add=NET_ADMIN --cap-add=NET_RAW \
-  -p 53:5353/udp -p 80:8080 -p 443:8443 \
-  -p 22:2222 -p 23:2323 -p 25:2525 \
-  nettrap:latest
+  -p 1053:5353/udp -p 8080:8080 -p 2222:2222 -p 2323:2323 \
+  -v nettrap-logs:/var/log/nettrap \
+  nettrap:0.1.0-alpha.1
 ```
 
 ---
@@ -328,12 +274,14 @@ Supports `<RAW-DATE>` substitution and `{{variable}}` templates.
 
 ## Platform Support
 
-| Platform | Architecture | Interceptor | Status |
-|----------|-------------|-------------|--------|
-| **Linux** | x86_64, i686, ARM64, ARM | NFQUEUE + iptables, PCAP | ✅ Full |
-| **macOS** | x86_64 (Intel), ARM64 (Apple Silicon) | PCAP | ✅ Full |
-| **Windows** | x86_64, i686 | WinDivert | ✅ Full |
-| **Windows** | ARM64 | Npcap | ⚠️ Capture only |
+| Platform | Release targets | Listener mode | Transparent redirection |
+|----------|-----------------|---------------|-------------------------|
+| **Linux** | x86_64, ARM64 | Supported | Experimental |
+| **macOS** | x86_64, ARM64 | Supported | Not supported |
+| **Windows** | x86_64, ARM64 | Supported | Disabled/not supported |
+
+See [Platform Support](PLATFORM_SUPPORT.md) for CI evidence, capture caveats,
+and unsupported targets.
 
 ---
 
@@ -393,8 +341,8 @@ brew install libpcap
 nettrap-cli             # Binary entry point + engine orchestration
 ├── nettrap-core        # Shared types (Packet, FiveTuple, Error)
 ├── nettrap-proxy       # Protocol taste router (content detectors)
-├── nettrap-tls-mitm    # TLS MITM, CA management, JA3/JA4
-├── nettrap-interceptor # PCAP, NFQUEUE, WinDivert
+├── nettrap-tls-mitm    # Local TLS termination, CA management, JA3/JA4
+├── nettrap-interceptor # PCAP and platform redirection adapters
 ├── nettrap-attribution # Process-to-connection mapping
 ├── nettrap-pcap        # Binary PCAP recording
 ├── nettrap-proto-*     # 33 runtime service/fallback handlers
@@ -415,7 +363,8 @@ nettrap-cli             # Binary entry point + engine orchestration
 | [Distributed Deployment](docs/distributed.md) | Multi-node fleet management |
 | [Kubernetes Deployment](docs/kubernetes.md) | K8s manifests & Helm |
 | [Configuration Reference](docs/configuration.md) | All config options |
-| [Protocol Handlers](docs/protocols.md) | Protocol details & customization |
+| [Protocol Support](PROTOCOL_SUPPORT.md) | Verified fidelity and E2E coverage matrix |
+| [Platform Support](PLATFORM_SUPPORT.md) | Release targets and mode boundaries |
 | [Output Formats](docs/output-formats.md) | JSONL, JSON, SARIF, TOON, CSV |
 | [Architecture](docs/architecture.md) | Internal design & crate structure |
 

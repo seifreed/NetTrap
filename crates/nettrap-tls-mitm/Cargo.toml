@@ -1,6 +1,6 @@
 [package]
 name = "nettrap-tls-mitm"
-description = "TLS MITM and dynamic certificate generation for NetTrap"
+description = "Local TLS termination and dynamic certificate generation for NetTrap"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

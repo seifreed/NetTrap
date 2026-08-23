@@ -11,7 +11,7 @@ nettrap config --defaults > config.toml
 |--------|------|---------|-------------|
 | `attribution_enabled` | bool | `true` | Enable process-to-connection tracking |
 | `attribution_timeout_ms` | u64 | `5000` | Attribution operation timeout and cache TTL |
-| `default_decision` | string | `"intercept"` | Default packet action |
+| `default_decision` | string | `"intercept"` | Reserved alpha field; only `intercept` is accepted and no per-flow policy engine is active |
 | `pcap_enabled` | bool | `false` | Enable PCAP recording |
 | `pcap_path` | string | - | PCAP output file path |
 | `pcap_prefix` | string | - | PCAP filename prefix |
@@ -58,7 +58,7 @@ nettrap config --defaults > config.toml
 | `ftproot` | string | - | FTP file serving directory |
 | `tftproot` | string | - | TFTP file serving directory |
 | `response_delay_ms` | u64 | `0` | Response delay |
-| `emulate_response` | bool | `true` | Enable protocol response emulation |
+| `emulate_response` | bool | `true` | Reserved alpha field; enabled listeners currently respond regardless of this value |
 | `timeout_ms` | u64 | `30000` | Per-connection timeout |
 | `max_connections` | u32 | `100` | Maximum concurrent connections for the listener |
 | `banner_delay_ms` | u64 | `0` | Delay before dummy/raw banners |

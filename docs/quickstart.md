@@ -35,12 +35,11 @@ cargo build --release
 ## Docker (Standalone)
 
 ```bash
-docker build -t nettrap:latest .
+docker build -t nettrap:0.1.0-alpha.1 .
 docker run -d --name nettrap \
-  --cap-add=NET_ADMIN --cap-add=NET_RAW \
-  -p 53:5353/udp -p 80:8080 -p 443:8443 \
-  -p 22:2222 -p 23:2323 -p 25:2525 \
-  nettrap:latest
+  -p 1053:5353/udp -p 8080:8080 -p 2222:2222 -p 2323:2323 \
+  -v nettrap-logs:/var/log/nettrap \
+  nettrap:0.1.0-alpha.1
 ```
 
 ## Output

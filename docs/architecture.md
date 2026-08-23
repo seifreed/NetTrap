@@ -8,8 +8,8 @@ nettrap/
 ├── nettrap-engine      # Adapter-free runtime policies and use-case entities
 ├── nettrap-cli         # Binary entry point, configuration, orchestration, listeners
 ├── nettrap-proxy       # Protocol taste router
-├── nettrap-tls-mitm    # TLS MITM + certificate generation
-├── nettrap-interceptor # PCAP/NFQUEUE/WinDivert
+├── nettrap-tls-mitm    # Local TLS termination + certificate generation
+├── nettrap-interceptor # PCAP and platform redirection adapters
 ├── nettrap-attribution # Process-to-connection mapping
 ├── nettrap-pcap        # PCAP recording
 ├── nettrap-flow        # Connection flow tracking
