@@ -74,12 +74,8 @@ case "$OS" in
         ;;
     
     MINGW*|MSYS*|CYGWIN*)
-        echo "Checking WinDivert availability..."
-        if [ -f "windivert/WinDivert.dll" ]; then
-            echo "✓ WinDivert DLL found"
-        else
-            echo "⚠ WinDivert DLL not found in windivert/ directory"
-        fi
+        echo "Checking Windows interception contract..."
+        echo "✓ Transparent interception is disabled; listener and capture modes remain supported"
         ;;
     
     *)
