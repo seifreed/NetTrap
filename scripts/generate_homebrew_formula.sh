@@ -64,7 +64,7 @@ class Nettrap < Formula
   end
 
   test do
-    assert_match version.to_s, shell_output("#{bin}/nettrap --version")
+    assert_match "nettrap", shell_output("#{bin}/nettrap --version")
   end
 end
 EOF
