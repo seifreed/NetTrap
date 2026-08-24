@@ -12,6 +12,7 @@ event contracts before `1.0.0`.
 - SHA-256 checksums, SPDX SBOM generation, and GitHub artifact attestations.
 - Explicit platform and protocol support matrices.
 - Non-root Docker image and persistent listener-mode Compose/Kubernetes examples.
+- Configuration migration command with future-schema rejection and validation.
 
 ### Changed
 

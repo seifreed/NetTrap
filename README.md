@@ -291,6 +291,7 @@ and unsupported targets.
 nettrap run [OPTIONS]           # Start the engine
 nettrap config --defaults       # Generate default config
 nettrap config --check          # Validate config file
+nettrap config --migrate -c old.toml -o config.toml  # Upgrade a config schema
 nettrap tls status              # Show mkcert/TLS status
 nettrap tls install-mkcert      # Download & install mkcert
 nettrap tls install             # Install CA in system trust store

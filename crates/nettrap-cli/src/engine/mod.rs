@@ -822,6 +822,7 @@ mod tests {
             output: Some(output_path.clone()),
             check: true,
             defaults: false,
+            migrate: false,
         };
 
         handle_config(&args, Some(config_path.clone())).expect("config check should succeed");
@@ -847,6 +848,7 @@ mod tests {
             output: None,
             check: true,
             defaults: false,
+            migrate: false,
         };
 
         let err = handle_config(&args, Some(config_path.clone()))
@@ -855,6 +857,68 @@ mod tests {
         assert!(err.to_string().contains("Configuration validation failed"));
 
         let _ = fs::remove_file(&config_path);
+    }
+
+    #[test]
+    fn handle_config_migrate_upgrades_schema_and_canonicalizes_decision() {
+        let input_path = std::env::temp_dir().join(format!(
+            "nettrap-config-migrate-input-{}.toml",
+            uuid::Uuid::new_v4()
+        ));
+        let output_path = std::env::temp_dir().join(format!(
+            "nettrap-config-migrate-output-{}.toml",
+            uuid::Uuid::new_v4()
+        ));
+        fs::write(
+            &input_path,
+            "config_version = 0\ndefault_decision = \"intercept\"\n\n[[listeners]]\nname = \"http\"\nport = 18080\nprotocol = \"tcp\"\n",
+        )
+        .expect("write legacy config");
+
+        let args = crate::cli::ConfigArgs {
+            output: Some(output_path.clone()),
+            check: false,
+            defaults: false,
+            migrate: true,
+        };
+
+        handle_config(&args, Some(input_path.clone())).expect("migration should succeed");
+
+        let migrated = fs::read_to_string(&output_path).expect("read migrated config");
+        assert!(migrated.contains("config_version = 1"));
+        assert!(migrated.contains("default_decision = \"emulate\""));
+        EngineConfig::from_file(&output_path).expect("migrated config should validate");
+
+        let _ = fs::remove_file(input_path);
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn handle_config_migrate_rejects_future_schema() {
+        let input_path = std::env::temp_dir().join(format!(
+            "nettrap-config-migrate-future-input-{}.toml",
+            uuid::Uuid::new_v4()
+        ));
+        let output_path = std::env::temp_dir().join(format!(
+            "nettrap-config-migrate-future-output-{}.toml",
+            uuid::Uuid::new_v4()
+        ));
+        fs::write(&input_path, "config_version = 2\n").expect("write future config");
+
+        let args = crate::cli::ConfigArgs {
+            output: Some(output_path.clone()),
+            check: false,
+            defaults: false,
+            migrate: true,
+        };
+
+        let error = handle_config(&args, Some(input_path.clone()))
+            .expect_err("future schema should be rejected");
+        assert!(error.to_string().contains("newer than supported"));
+        assert!(!output_path.exists());
+
+        let _ = fs::remove_file(input_path);
+        let _ = fs::remove_file(output_path);
     }
 
     #[test]

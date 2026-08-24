@@ -10,6 +10,23 @@ pub(crate) fn handle_config(
     args: &crate::cli::ConfigArgs,
     config_path: Option<std::path::PathBuf>,
 ) -> crate::Result<()> {
+    if args.migrate {
+        let input = config_path.ok_or_else(|| {
+            crate::Error::Config("--migrate requires an input config via --config".to_string())
+        })?;
+        let output = args.output.as_ref().ok_or_else(|| {
+            crate::Error::Config("--migrate requires an output path via --output".to_string())
+        })?;
+        if paths_refer_to_same_file(&input, output) {
+            return Err(crate::Error::Config(
+                "migration output must differ from the input config".to_string(),
+            ));
+        }
+        EngineConfig::migrate_file(&input, output)?;
+        println!("Config migrated to {}", output.display());
+        return Ok(());
+    }
+
     if args.defaults {
         let config = EngineConfig::default();
         if let Some(ref output) = args.output {
