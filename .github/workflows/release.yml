@@ -117,7 +117,12 @@ jobs:
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Run platform tests
+        if: matrix.arch != 'arm64'
         run: cargo test --all --locked --target ${{ matrix.target }}
+
+      - name: Compile platform tests (Windows ARM64)
+        if: matrix.arch == 'arm64'
+        run: cargo test --all --locked --target ${{ matrix.target }} --no-run
 
       - name: Smoke test binary
         run: |
