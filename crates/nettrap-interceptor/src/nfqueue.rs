@@ -441,7 +441,7 @@ impl NfqueueInterceptor {
         let families = self.managed_families.read().clone();
         let mut errors = Vec::new();
         for family in families.iter().rev() {
-            if let Err(err) = self.run_nft(family, &["delete", "table", NETTRAP_NFT_TABLE]) {
+            if let Err(err) = self.run_nft(*family, &["delete", "table", NETTRAP_NFT_TABLE]) {
                 tracing::warn!("Failed to clean nft {} table: {}", family.nft_family(), err);
                 errors.push(format!("nft {}: {}", family.nft_family(), err));
             }
