@@ -5,9 +5,6 @@ services:
       context: ..
       dockerfile: Dockerfile
     container_name: nettrap-sqlite
-    cap_add:
-      - NET_ADMIN
-      - NET_RAW
     ports:
       - "15353:5353/udp"
       - "18080:8080"
@@ -16,11 +13,13 @@ services:
     volumes:
       - ./config-sqlite.toml:/etc/nettrap/config.toml:ro
       - sqlite-data:/var/lib/nettrap
+      - nettrap-sqlite-logs:/var/log/nettrap
     networks:
       - nettrap
 
 volumes:
   sqlite-data:
+  nettrap-sqlite-logs:
 
 networks:
   nettrap:
