@@ -36,8 +36,9 @@ See [PROTOCOL_SUPPORT.md](PROTOCOL_SUPPORT.md) for the handler-by-handler matrix
 
 - The REST API has no authentication and rejects non-loopback bind addresses.
   It is not a remote administration surface.
-- Event, report, API, and configuration schemas do not yet have migration or
-  compatibility guarantees.
+- Event, report, API, and configuration schemas carry explicit version fields,
+  but migration tooling and long-term compatibility guarantees are not yet
+  provided.
 - Release binaries are not platform code-signed. GitHub release artifacts do
   include checksums, SBOMs, and provenance attestations.
 - Long-running soak, hostile load, and connection-exhaustion coverage is not yet
