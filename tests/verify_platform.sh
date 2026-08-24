@@ -7,7 +7,7 @@ cleanup() {
         kill "$NETTRAP_PID" 2>/dev/null || true
         wait "$NETTRAP_PID" 2>/dev/null || true
     fi
-    rm -f /tmp/nettrap_test_config.toml /tmp/dns_result.txt /tmp/tls_result.txt /tmp/ssh_result.txt
+    rm -f /tmp/nettrap_test_config.toml /tmp/dns_result.txt /tmp/tls_result.txt /tmp/ssh_result.txt /tmp/ldap_result.txt
     rm -rf /tmp/nettrap_smtp_test
 }
 
@@ -132,7 +132,7 @@ mkdir -p /tmp/nettrap_smtp_test
 
 cat > /tmp/nettrap_test_config.toml << 'EOF'
 attribution_enabled = false
-default_decision = "intercept"
+default_decision = "emulate"
 pcap_enabled = false
 output_format = "jsonl"
 smtp_dir = "/tmp/nettrap_smtp_test"
@@ -174,6 +174,14 @@ use_ssl = true
 name = "smtp"
 protocol = "tcp"
 port = 12525
+bind_address = "127.0.0.1"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "ldap"
+protocol = "tcp"
+port = 1389
 bind_address = "127.0.0.1"
 enabled = true
 emulate_response = true
@@ -267,6 +275,21 @@ if curl --noproxy '*' --silent --show-error --url smtp://127.0.0.1:12525 \
 else
     echo "✗ SMTP test failed"
     exit 1
+fi
+
+echo "Testing LDAP client..."
+if command -v ldapsearch >/dev/null 2>&1; then
+    if ldapsearch -x -LLL -H ldap://127.0.0.1:1389 \
+        -b dc=nettrap,dc=local -s base '(objectClass=*)' \
+        >/tmp/ldap_result.txt 2>&1; then
+        echo "✓ LDAP client test passed"
+    else
+        echo "✗ LDAP client test failed"
+        cat /tmp/ldap_result.txt
+        exit 1
+    fi
+else
+    echo "⚠ ldapsearch not installed; LDAP client test skipped"
 fi
 
 echo "Testing FTP..."

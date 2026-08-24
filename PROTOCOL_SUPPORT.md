@@ -9,10 +9,12 @@ malware-analysis labs.
 NetTrap process. Crate unit/integration tests exist beyond the two entries marked
 Yes, but they do not establish real-client compatibility.
 
-The required client contract is `dig` 9.x, `curl` 8.x, and OpenSSL 3.x or
-LibreSSL 3.x. `tests/verify_platform.sh` fails on other major versions and logs
-the exact client versions used by each runner. A new major is added only after
-the same E2E suite passes with it.
+The required client contract is `dig` 9.x, `curl` 8.x, OpenSSL 3.x or
+LibreSSL 3.x, plus `ldapsearch` when installed. `tests/verify_platform.sh`
+fails on other required-client major versions and logs the exact client
+versions used by each runner. LDAP is skipped with an explicit warning when
+the optional client is unavailable. A new major is added only after the same
+E2E suite passes with it.
 
 | Handler | Current behavior | Client E2E | Known ceiling |
 |---|---|---:|---|
@@ -32,7 +34,7 @@ the same E2E suite passes with it.
 | Redis | RESP parsing and a command-response subset | No | No persistence, replication, or full Redis semantics |
 | MySQL | Handshake, login metadata, STARTTLS handling, and query parsing | No | No SQL engine or required client compatibility gate |
 | PostgreSQL | Startup/auth/query subset | No | No SQL engine or required client compatibility gate |
-| LDAP | BER message parsing and bind/search response subset | No | Not an Active Directory implementation |
+| LDAP | BER message parsing and bind/search response subset | Yes (`ldapsearch`, when installed) | Not an Active Directory implementation |
 | MQTT | Packet parsing and CONNECT/PUBLISH/SUBSCRIBE response subset | No | Not a complete broker |
 | SNMP | BER request parsing and synthetic responses | No | Limited operations/MIB behavior |
 | SOCKS | SOCKS4/5 handshake and CONNECT logging | No | Does not provide a general upstream proxy |
