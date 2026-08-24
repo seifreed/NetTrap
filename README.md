@@ -32,7 +32,7 @@
 
 - **35 protocol detectors** — traffic classification plus partial service emulation; see the verified matrix
 - **Local TLS termination with JA3/JA4** — inspect inbound TLS for configured listeners
-- **mkcert integration** — one command to install trusted CA for full SSL inspection
+- **mkcert integration** — one command to install a trusted CA for local TLS termination tests
 - **Distributed mode** — multi-node fleet with event shipping to Elasticsearch, Kafka, Splunk, Syslog
 - **Database storage** — SQLite (standalone) or PostgreSQL (distributed)
 - **5 output formats** — JSONL, JSON, SARIF v2.1.0, TOON, CSV
@@ -44,9 +44,10 @@
 ## Protocol Coverage
 
 NetTrap combines taste-based detection with partial service emulation. Required
-real-client CI currently covers DNS with `dig` and HTTP with `curl`; the other
-handlers are covered primarily by Rust tests and have explicit fidelity limits.
-See [Protocol Support](PROTOCOL_SUPPORT.md) before relying on a handler.
+real-client CI covers DNS/HTTP, LDAP, mail, MQTT, Redis, MySQL, PostgreSQL, and
+SMB in the Docker smoke; the platform verification script additionally checks
+TLS, SMTP, FTP, SSH, and Telnet where host clients are available. See [Protocol
+Support](PROTOCOL_SUPPORT.md) before relying on a handler.
 
 ---
 
