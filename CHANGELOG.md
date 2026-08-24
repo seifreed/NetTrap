@@ -26,17 +26,23 @@ event contracts before `1.0.0`.
   PostgreSQL simple-query completion.
 - The Docker smoke now includes an `smbclient` negotiation probe against the
   synthetic SMB listener and records that file-sharing sessions remain out of scope.
+- Scheduled heavy quality gates now run a bounded HTTP/DNS runtime soak and
+  exercise every registered fuzz target.
 
 ### Changed
 
 - Direct listener mode is documented as the primary alpha execution mode.
 - TLS behavior is described as local termination rather than general upstream MITM.
 - Platform integration tests now fail closed on DNS/HTTP errors.
+- Release publication now waits for the explicit security audit and heavy
+  reusable quality gates, and creates the checksum workspace before attestation.
 
 ### Security
 
 - Windows `--intercept` now fails closed instead of opening the incomplete
   WinDivert path.
+- DNS query summaries reject non-EDNS additional records before invoking the
+  third-party parser, avoiding malformed TSIG panic paths.
 - Kubernetes and Docker examples no longer grant packet/network capabilities.
 
 ## [0.1.0-alpha.1] - Unreleased
