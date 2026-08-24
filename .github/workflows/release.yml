@@ -101,7 +101,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libpcap-dev libnetfilter-queue-dev libnfnetlink-dev dpkg-dev rpm
+          sudo apt-get install -y libpcap-dev libnetfilter-queue-dev libnfnetlink-dev dpkg-dev rpm cpio
 
       - name: Install macOS dependencies
         if: runner.os == 'macOS'
@@ -211,10 +211,21 @@ jobs:
       - name: Verify packaged Linux formats
         if: runner.os == 'Linux'
         run: |
+          clean_dir="$(mktemp -d)"
+          trap 'rm -rf "$clean_dir"' EXIT
           dpkg-deb --info "nettrap-${{ matrix.name }}.deb" >/dev/null
           dpkg-deb --contents "nettrap-${{ matrix.name }}.deb" | grep -F './usr/bin/nettrap' >/dev/null
           rpm -qpl "nettrap-${{ matrix.name }}.rpm" | grep -Fx '/usr/bin/nettrap' >/dev/null
           rpm -qpl "nettrap-${{ matrix.name }}.rpm" | grep -Fx '/etc/nettrap/config.toml' >/dev/null
+          mkdir -p "$clean_dir/deb" "$clean_dir/rpm"
+          dpkg-deb --extract "nettrap-${{ matrix.name }}.deb" "$clean_dir/deb"
+          rpm2cpio "nettrap-${{ matrix.name }}.rpm" | (cd "$clean_dir/rpm" && cpio -idm --quiet)
+          test -x "$clean_dir/deb/usr/bin/nettrap"
+          test -x "$clean_dir/rpm/usr/bin/nettrap"
+          test -s "$clean_dir/deb/etc/nettrap/config.toml"
+          test -s "$clean_dir/rpm/etc/nettrap/config.toml"
+          "$clean_dir/deb/usr/bin/nettrap" --version
+          "$clean_dir/rpm/usr/bin/nettrap" --version
 
       - name: Verify packaged Windows release in a clean directory
         if: matrix.archive == 'zip'
