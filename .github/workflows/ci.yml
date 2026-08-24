@@ -266,7 +266,12 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Run tests
+        if: matrix.arch != 'arm64'
         run: cargo test --all --target ${{ matrix.target }} -- --test-threads=1
+
+      - name: Compile tests (Windows ARM64)
+        if: matrix.arch == 'arm64'
+        run: cargo test --all --target ${{ matrix.target }} --no-run
 
       - name: Create config for testing
         run: |
