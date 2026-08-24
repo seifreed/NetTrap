@@ -306,6 +306,13 @@ jobs:
         run: |
           & "target/${{ matrix.target }}/release/nettrap.exe" --version
           & "target/${{ matrix.target }}/release/nettrap.exe" config --defaults | Out-Null
+          $interceptOutput = & "target/${{ matrix.target }}/release/nettrap.exe" run --intercept -c config.toml 2>&1 | Out-String
+          if ($LASTEXITCODE -eq 0) {
+            throw "Windows transparent interception unexpectedly succeeded"
+          }
+          if ($interceptOutput -notmatch "not supported") {
+            throw "Windows interception rejection did not report the supported-mode contract: $interceptOutput"
+          }
         shell: pwsh
 
       - name: Upload artifact
