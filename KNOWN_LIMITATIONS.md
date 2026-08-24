@@ -11,7 +11,8 @@ suite.
   chains (or a dedicated `nft` table when the iptables tools are unavailable)
   and removes stale managed state on the next startup. Abrupt shutdown can
   leave redirect rules and multi-host forwarding enabled until that restart or
-  manual cleanup. Network-namespace E2E is still pending.
+  manual cleanup. The opt-in Linux network-namespace E2E covers redirection,
+  crash recovery, and graceful cleanup.
 - Windows rejects `--intercept`; WinDivert redirection is incomplete and no
   WinDivert driver is shipped.
 - macOS has no transparent redirection implementation.
