@@ -19,6 +19,8 @@ event contracts before `1.0.0`.
   `ldapsearch` when available.
 - Kubernetes manifests and distributed fixtures now expose LDAP on port 1389
   and use canonical decision values.
+- Docker integration coverage now exercises POP3, IMAP, MQTT, and Redis with
+  their real command-line clients.
 
 ### Changed
 

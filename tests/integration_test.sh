@@ -43,13 +43,24 @@ run_bounded_http_burst() {
     done
 }
 
+run_imap_auth_probe() {
+    local output status
+    set +e
+    output="$(curl --noproxy '*' --silent --show-error \
+        --url imap://127.0.0.1:143/ --user malware:secret 2>&1)"
+    status=$?
+    set -e
+    test "$status" -eq 67
+    grep -F 'Access denied' <<< "$output"
+}
+
 echo "Starting NetTrap engine..."
 timeout 120 nettrap run -c /etc/nettrap/config.toml &
 NETTRAP_PID=$!
 sleep 3
 
 echo "Waiting for services..."
-for port in 5353 8080 1389 2222 2323; do
+for port in 5353 8080 110 143 1389 1883 2222 2323 6379; do
     ready=false
     for _ in $(seq 1 40); do
         if if [ "$port" = 5353 ]; then
@@ -102,6 +113,26 @@ echo "--- LDAP Protocol Tests ---"
 
 run_test "LDAP bind and search" \
     "ldapsearch -x -LLL -H ldap://127.0.0.1:1389 -b dc=nettrap,dc=local -s base '(objectClass=*)'"
+
+echo ""
+
+echo "--- Mail Protocol Tests ---"
+
+run_test "POP3 capability" \
+    "curl --noproxy '*' --silent --show-error --url pop3://127.0.0.1:110/ --user malware:secret | tr -d '\\r' | grep -E '^[0-9]+ [0-9]+$'"
+
+run_test "IMAP capability" \
+    run_imap_auth_probe
+
+echo ""
+
+echo "--- Message Broker Tests ---"
+
+run_test "MQTT publish" \
+    "mosquitto_pub -h 127.0.0.1 -p 1883 -i nettrap-integration -t nettrap/test -m smoke"
+
+run_test "Redis PING" \
+    "redis-cli -h 127.0.0.1 -p 6379 --raw PING | grep -Fx PONG"
 
 echo ""
 

@@ -33,6 +33,42 @@ emulate_response = true
 response_delay_ms = 0
 
 [[listeners]]
+name = "pop3"
+protocol = "tcp"
+port = 110
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+response_delay_ms = 0
+
+[[listeners]]
+name = "imap"
+protocol = "tcp"
+port = 143
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+response_delay_ms = 0
+
+[[listeners]]
+name = "mqtt"
+protocol = "tcp"
+port = 1883
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+response_delay_ms = 0
+
+[[listeners]]
+name = "redis"
+protocol = "tcp"
+port = 6379
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+response_delay_ms = 0
+
+[[listeners]]
 name = "ssh"
 protocol = "tcp"
 port = 2222
