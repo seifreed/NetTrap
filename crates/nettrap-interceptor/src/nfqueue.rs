@@ -23,8 +23,15 @@ pub struct NfqueueInterceptor {
     interface: Option<String>,
     redirect_rules: Vec<PortRedirect>,
     run_marker: String,
+    firewall_backend: FirewallBackend,
     saved_ipv4_forward: RwLock<Option<String>>,
     saved_ipv6_forward: RwLock<Option<String>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FirewallBackend {
+    Iptables,
+    Nftables,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -81,11 +88,19 @@ impl IpFamily {
             Self::V6 => "::1/128",
         }
     }
+
+    fn nft_family(self) -> &'static str {
+        match self {
+            Self::V4 => "ip",
+            Self::V6 => "ip6",
+        }
+    }
 }
 
 const IP_FAMILIES: [IpFamily; 2] = [IpFamily::V4, IpFamily::V6];
 const NETTRAP_OUTPUT_CHAIN: &str = "NETTRAP_OUTPUT";
 const NETTRAP_PREROUTING_CHAIN: &str = "NETTRAP_PREROUTING";
+const NETTRAP_NFT_TABLE: &str = "nettrap";
 const NETTRAP_JUMP_COMMENT: &str = "nettrap-managed";
 const IPV4_FORWARD_PATH: &str = "/proc/sys/net/ipv4/ip_forward";
 const IPV6_FORWARD_PATH: &str = "/proc/sys/net/ipv6/conf/all/forwarding";
@@ -174,6 +189,7 @@ impl NfqueueInterceptor {
             interface: None,
             redirect_rules: Vec::new(),
             run_marker: format!("nettrap:{}", std::process::id()),
+            firewall_backend: detect_firewall_backend(),
             saved_ipv4_forward: RwLock::new(None),
             saved_ipv6_forward: RwLock::new(None),
         })
@@ -194,8 +210,15 @@ impl NfqueueInterceptor {
         self
     }
 
-    /// Install iptables redirect rules for all listener ports
+    /// Install redirect rules for all listener ports using the available backend.
     fn install_redirect_rules(&self) -> Result<()> {
+        match self.firewall_backend {
+            FirewallBackend::Iptables => self.install_iptables_redirect_rules(),
+            FirewallBackend::Nftables => self.install_nft_redirect_rules(),
+        }
+    }
+
+    fn install_iptables_redirect_rules(&self) -> Result<()> {
         self.managed_families.write().clear();
         let (builtin_chain, managed_chain) = self.chain_names();
         for family in IP_FAMILIES {
@@ -251,6 +274,83 @@ impl NfqueueInterceptor {
             self.enable_multihost_forwarding()?;
         }
 
+        Ok(())
+    }
+
+    fn install_nft_redirect_rules(&self) -> Result<()> {
+        self.managed_families.write().clear();
+        let chain = match self.mode {
+            NetworkMode::SingleHost => NETTRAP_OUTPUT_CHAIN,
+            NetworkMode::MultiHost => NETTRAP_PREROUTING_CHAIN,
+        };
+
+        for family in IP_FAMILIES {
+            self.try_run_nft(family, &["delete", "table", NETTRAP_NFT_TABLE])?;
+            self.run_nft(family, &["add", "table", NETTRAP_NFT_TABLE])?;
+            let hook = match self.mode {
+                NetworkMode::SingleHost => "output",
+                NetworkMode::MultiHost => "prerouting",
+            };
+            self.run_nft(
+                family,
+                &[
+                    "add",
+                    "chain",
+                    NETTRAP_NFT_TABLE,
+                    chain,
+                    "{",
+                    "type",
+                    "nat",
+                    "hook",
+                    hook,
+                    "priority",
+                    "-100",
+                    ";",
+                    "policy",
+                    "accept",
+                    ";",
+                    "}",
+                ],
+            )?;
+
+            for redirect in &self.redirect_rules {
+                let proto = if redirect.is_tcp { "tcp" } else { "udp" };
+                let mut args = vec![
+                    "add".to_string(),
+                    "rule".to_string(),
+                    NETTRAP_NFT_TABLE.to_string(),
+                    chain.to_string(),
+                    family.nft_family().to_string(),
+                    "daddr".to_string(),
+                    "!=".to_string(),
+                    family.loopback_cidr().to_string(),
+                    proto.to_string(),
+                ];
+                if let Some(source_port) = redirect.source_port {
+                    args.extend(["dport".to_string(), source_port.to_string()]);
+                }
+                if self.mode == NetworkMode::SingleHost {
+                    if let Some(uid) = redirect.exclude_uid {
+                        args.extend(["skuid".to_string(), "!=".to_string(), uid.to_string()]);
+                    }
+                } else if let Some(interface) = self.interface.as_deref() {
+                    args.extend(["iifname".to_string(), interface.to_string()]);
+                }
+                args.extend([
+                    "redirect".to_string(),
+                    "to".to_string(),
+                    format!(":{}", redirect.target_port),
+                    "comment".to_string(),
+                    format!("\"{}\"", self.run_marker),
+                ]);
+                self.run_nft_args(family, &args)?;
+            }
+            self.managed_families.write().push(family);
+        }
+
+        if self.mode == NetworkMode::MultiHost {
+            self.enable_multihost_forwarding()?;
+        }
         Ok(())
     }
 
@@ -329,7 +429,31 @@ impl NfqueueInterceptor {
 
     /// Remove all installed iptables rules
     fn remove_redirect_rules(&self) -> Result<()> {
-        self.remove_redirect_rules_with(|command, args| self.run_iptables(command, args))
+        match self.firewall_backend {
+            FirewallBackend::Iptables => {
+                self.remove_redirect_rules_with(|command, args| self.run_iptables(command, args))
+            }
+            FirewallBackend::Nftables => self.remove_nft_redirect_rules(),
+        }
+    }
+
+    fn remove_nft_redirect_rules(&self) -> Result<()> {
+        let families = self.managed_families.read().clone();
+        let mut errors = Vec::new();
+        for family in families.iter().rev() {
+            if let Err(err) = self.run_nft(family, &["delete", "table", NETTRAP_NFT_TABLE]) {
+                tracing::warn!("Failed to clean nft {} table: {}", family.nft_family(), err);
+                errors.push(format!("nft {}: {}", family.nft_family(), err));
+            }
+        }
+        self.managed_families.write().clear();
+        if errors.is_empty() {
+            return Ok(());
+        }
+        Err(Error::Interception(format!(
+            "failed to remove nftables rules: {}",
+            errors.join("; ")
+        )))
     }
 
     fn remove_redirect_rules_with<F>(&self, mut delete_rule: F) -> Result<()>
@@ -401,6 +525,65 @@ impl NfqueueInterceptor {
         }
         Ok(None)
     }
+
+    fn run_nft(&self, family: IpFamily, args: &[&str]) -> Result<()> {
+        let args = args
+            .iter()
+            .map(|arg| (*arg).to_string())
+            .collect::<Vec<_>>();
+        self.run_nft_args(family, &args)
+    }
+
+    fn run_nft_args(&self, family: IpFamily, args: &[String]) -> Result<()> {
+        if let Some(stderr) = self.run_nft_command(family, args)? {
+            let label = command_invocation_label("nft", args);
+            return Err(Error::Interception(format!("{} failed: {}", label, stderr)));
+        }
+        Ok(())
+    }
+
+    fn try_run_nft(&self, family: IpFamily, args: &[&str]) -> Result<bool> {
+        let args = args
+            .iter()
+            .map(|arg| (*arg).to_string())
+            .collect::<Vec<_>>();
+        Ok(self.run_nft_command(family, &args)?.is_none())
+    }
+
+    fn run_nft_command(&self, family: IpFamily, args: &[String]) -> Result<Option<String>> {
+        let mut process = Command::new("nft");
+        process.arg(family.nft_family()).args(args);
+        let label = command_invocation_label("nft", args);
+        let output = run_command_with_limited_output(
+            process,
+            &label,
+            MAX_COMMAND_ERROR_BYTES,
+            MAX_COMMAND_ERROR_BYTES,
+        )?;
+        if !output.status.success() {
+            let stderr = render_command_output(&output.stderr);
+            tracing::debug!("{} did not apply: {}", label, stderr);
+            return Ok(Some(stderr));
+        }
+        Ok(None)
+    }
+}
+
+fn detect_firewall_backend() -> FirewallBackend {
+    if command_available("iptables") && command_available("ip6tables") {
+        FirewallBackend::Iptables
+    } else {
+        FirewallBackend::Nftables
+    }
+}
+
+fn command_available(command: &str) -> bool {
+    Command::new(command)
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 fn build_jump_rule_args(builtin_chain: &str, managed_chain: &str, insert: bool) -> Vec<String> {

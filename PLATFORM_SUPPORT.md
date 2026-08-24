@@ -6,8 +6,8 @@ the release workflow; it does not imply transparent interception support.
 
 | Platform target | Release asset | Listener mode | Transparent redirection | Current CI contract |
 |---|---|---|---|---|
-| Linux x86_64 | Yes | Supported | Experimental `iptables`/`ip6tables` redirection | Native Rust gates and Docker DNS/HTTP E2E |
-| Linux ARM64 | Yes | Supported | Experimental `iptables`/`ip6tables` redirection | Native Rust build and tests |
+| Linux x86_64 | Yes | Supported | Experimental `iptables`/`ip6tables` or direct `nft` redirection | Native Rust gates and Docker DNS/HTTP E2E |
+| Linux ARM64 | Yes | Supported | Experimental `iptables`/`ip6tables` or direct `nft` redirection | Native Rust build and tests |
 | macOS x86_64 | Yes | Supported | Not supported | Native Rust gates plus `dig` and `curl` E2E |
 | macOS ARM64 | Yes | Supported | Not supported | Native Rust gates plus `dig` and `curl` E2E |
 | Windows x86_64 | Yes | Supported | Disabled; `--intercept` fails closed | Native Rust gates and binary/config smoke tests |
@@ -20,10 +20,11 @@ the release workflow; it does not imply transparent interception support.
 - Listener mode binds configured TCP/UDP ports and emulates the selected
   service directly.
 - Linux transparent redirection changes host firewall rules and requires
-  privileges. It isolates redirects in dedicated NetTrap chains and removes
-  stale managed chains on the next startup. `iptables-nft` compatibility is
-  supported through the system wrapper; direct `nft` and network-namespace E2E
-  remain pending.
+  privileges. It isolates redirects in dedicated NetTrap chains or the
+  `nettrap` nftables table and removes stale managed state on the next startup.
+  `iptables-nft` compatibility is supported through the system wrapper; direct
+  nftables uses the same port and interface restrictions. Network-namespace E2E
+  remains pending.
 - macOS has no transparent redirection implementation.
 - Windows rejects `--intercept`. Release archives do not include WinDivert
   binaries or drivers.
