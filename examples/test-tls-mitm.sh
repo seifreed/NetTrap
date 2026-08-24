@@ -22,7 +22,7 @@ docker build --quiet --tag "$IMAGE" .
 
 cat > "$CONFIG" <<'TOML'
 attribution_enabled = false
-default_decision = "intercept"
+default_decision = "emulate"
 pcap_enabled = false
 output_format = "jsonl"
 output_path = "/var/log/nettrap/events.jsonl"

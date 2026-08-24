@@ -175,11 +175,11 @@ kubectl scale deployment nettrap --replicas=10
 
 For multiple nodes on the same host, use different port mappings:
 
-| Node | DNS | HTTP | SSH | Telnet | Metrics |
-|------|-----|------|-----|--------|---------|
-| 1 | 5353 | 8080 | 2222 | 2323 | 9091 |
-| 2 | 5354 | 8081 | 2223 | 2324 | 9092 |
-| 3 | 5355 | 8082 | 2224 | 2325 | 9093 |
+| Node | DNS | HTTP | LDAP | SSH | Telnet | Metrics |
+|------|-----|------|------|-----|--------|---------|
+| 1 | 5353 | 8080 | 1389 | 2222 | 2323 | 9091 |
+| 2 | 5354 | 8081 | 1389 | 2223 | 2324 | 9092 |
+| 3 | 5355 | 8082 | 1389 | 2224 | 2325 | 9093 |
 
 ### Cloud Auto-Scaling
 

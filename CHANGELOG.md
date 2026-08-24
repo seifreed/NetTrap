@@ -17,6 +17,8 @@ event contracts before `1.0.0`.
   source, and attributed-process decisions.
 - Docker and platform smoke tests now exercise LDAP bind/search with
   `ldapsearch` when available.
+- Kubernetes manifests and distributed fixtures now expose LDAP on port 1389
+  and use canonical decision values.
 
 ### Changed
 

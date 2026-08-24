@@ -15,6 +15,10 @@ spec:
     targetPort: 8080
     protocol: TCP
     name: http
+  - port: 1389
+    targetPort: 1389
+    protocol: TCP
+    name: ldap
   - port: 22
     targetPort: 2222
     protocol: TCP
