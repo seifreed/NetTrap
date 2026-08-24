@@ -24,6 +24,7 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     curl \
     dnsutils \
+    ldap-utils \
     netcat-openbsd \
     procps \
     iproute2 \
@@ -40,7 +41,7 @@ COPY tests/integration_test.sh /app/integration_test.sh
 RUN mkdir -p /var/log/nettrap /var/lib/nettrap/pcap \
     && chown -R nettrap:nettrap /var/log/nettrap /var/lib/nettrap
 
-EXPOSE 5353/udp 8080 2222 2323 9090 9091
+EXPOSE 5353/udp 8080 1389 2222 2323 9090 9091
 
 USER nettrap
 

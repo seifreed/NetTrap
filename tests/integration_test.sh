@@ -49,7 +49,7 @@ NETTRAP_PID=$!
 sleep 3
 
 echo "Waiting for services..."
-for port in 5353 8080 2222 2323; do
+for port in 5353 8080 1389 2222 2323; do
     ready=false
     for _ in $(seq 1 40); do
         if if [ "$port" = 5353 ]; then
@@ -95,6 +95,13 @@ run_test "HTTP HEADERS" \
     "curl --resolve example.test:8080:127.0.0.1 -s -I http://example.test:8080/ | grep -i 'content-type'"
 
 run_test "HTTP bounded burst" run_bounded_http_burst
+
+echo ""
+
+echo "--- LDAP Protocol Tests ---"
+
+run_test "LDAP bind and search" \
+    "ldapsearch -x -LLL -H ldap://127.0.0.1:1389 -b dc=nettrap,dc=local -s base '(objectClass=*)'"
 
 echo ""
 

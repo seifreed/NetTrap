@@ -15,6 +15,8 @@ event contracts before `1.0.0`.
 - Configuration migration command with future-schema rejection and validation.
 - Ordered first-match flow policy rules for listener, protocol, destination,
   source, and attributed-process decisions.
+- Docker and platform smoke tests now exercise LDAP bind/search with
+  `ldapsearch` when available.
 
 ### Changed
 
