@@ -135,7 +135,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libpcap-dev libnetfilter-queue-dev libnfnetlink-dev
+          sudo apt-get install -y libpcap-dev libnetfilter-queue-dev libnfnetlink-dev curl dnsutils
 
       - name: Install stable Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -193,6 +193,14 @@ jobs:
           for target in $(cargo +nightly fuzz list); do
             cargo +nightly fuzz run "$target" -- -max_total_time=10
           done
+
+      - name: Build release binary for soak test
+        run: cargo build --release --locked -p nettrap-cli
+
+      - name: Run bounded runtime soak
+        env:
+          NETTRAP_SOAK_SECONDS: "60"
+        run: bash tests/soak_test.sh
 
       - name: Run benchmarks
         run: |
