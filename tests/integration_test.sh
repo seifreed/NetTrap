@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 echo "========================================"
 echo "NetTrap Complete Test Suite"
@@ -8,6 +8,16 @@ echo ""
 
 FAILED=0
 PASSED=0
+
+cleanup() {
+    if [ -n "${NETTRAP_PID:-}" ]; then
+        kill "$NETTRAP_PID" 2>/dev/null || true
+        wait "$NETTRAP_PID" 2>/dev/null || true
+    fi
+    rm -f /tmp/test_output.txt
+}
+
+trap cleanup EXIT
 
 run_test() {
     local name=$1
@@ -33,7 +43,18 @@ sleep 3
 
 echo "Waiting for services..."
 for port in 5353 8080 2222 2323; do
-    nc -z 127.0.0.1 $port 2>/dev/null || sleep 0.5
+    ready=false
+    for _ in $(seq 1 40); do
+        if nc -z 127.0.0.1 "$port" 2>/dev/null; then
+            ready=true
+            break
+        fi
+        sleep 0.25
+    done
+    if [ "$ready" != true ]; then
+        echo "Service on port $port did not become ready" >&2
+        exit 1
+    fi
 done
 echo "All services started"
 echo ""
@@ -73,8 +94,6 @@ run_test "Telnet port open" \
     "nc -z 127.0.0.1 2323"
 
 echo ""
-
-kill $NETTRAP_PID 2>/dev/null || true
 
 echo ""
 echo "========================================"
