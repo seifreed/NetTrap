@@ -77,35 +77,46 @@ ip netns exec "$namespace" ip addr add 198.18.0.2/24 dev "$peer_veth"
 ip netns exec "$namespace" ip link set "$peer_veth" up
 ip netns exec "$namespace" ip route add default via 198.18.0.1
 
-"$NETTRAP_BIN" run --intercept -c "$config_file" >"$log_file" 2>&1 &
-nettrap_pid=$!
+start_nettrap() {
+    "$NETTRAP_BIN" run --intercept -c "$config_file" >"$log_file" 2>&1 &
+    nettrap_pid=$!
 
-ready=false
-for _ in $(seq 1 40); do
-    if (echo >/dev/tcp/127.0.0.1/18080) >/dev/null 2>&1; then
-        ready=true
-        break
-    fi
-    if ! kill -0 "$nettrap_pid" 2>/dev/null; then
-        break
-    fi
-    sleep 0.25
-done
+    for _ in $(seq 1 40); do
+        if (echo >/dev/tcp/127.0.0.1/18080) >/dev/null 2>&1; then
+            return 0
+        fi
+        if ! kill -0 "$nettrap_pid" 2>/dev/null; then
+            break
+        fi
+        sleep 0.25
+    done
 
-if [[ "$ready" != true ]]; then
     echo "FAIL: NetTrap HTTP listener did not become ready" >&2
     cat "$log_file" >&2
-    exit 1
-fi
+    return 1
+}
 
-status="$(ip netns exec "$namespace" curl --noproxy '*' --silent --show-error \
-    --max-time 10 --output "$body_file" --write-out '%{http_code}' \
-    http://198.18.0.1:18081/)"
-if [[ "$status" != "200" ]] || ! grep -Fq "It Works!" "$body_file"; then
-    echo "FAIL: namespace traffic was not redirected to the HTTP listener (status=$status)" >&2
-    cat "$log_file" >&2
-    exit 1
-fi
+assert_redirected_request() {
+    local status
+    status="$(ip netns exec "$namespace" curl --noproxy '*' --silent --show-error \
+        --max-time 10 --output "$body_file" --write-out '%{http_code}' \
+        http://198.18.0.1:18081/)"
+    if [[ "$status" != "200" ]] || ! grep -Fq "It Works!" "$body_file"; then
+        echo "FAIL: namespace traffic was not redirected to the HTTP listener (status=$status)" >&2
+        cat "$log_file" >&2
+        return 1
+    fi
+}
+
+start_nettrap
+assert_redirected_request
+
+kill -KILL "$nettrap_pid"
+wait "$nettrap_pid" 2>/dev/null || true
+nettrap_pid=""
+
+start_nettrap
+assert_redirected_request
 
 kill -TERM "$nettrap_pid"
 wait "$nettrap_pid"
@@ -121,4 +132,4 @@ if iptables -t nat -S NETTRAP_PREROUTING >/dev/null 2>&1 \
     exit 1
 fi
 
-echo "PASS: namespace traffic was redirected, emulated, and cleaned up"
+echo "PASS: namespace traffic was redirected, crash-recovered, emulated, and cleaned up"
