@@ -66,10 +66,14 @@ jobs:
             name: linux-x86_64
             runner: ubuntu-latest
             archive: tar
+            deb_arch: amd64
+            rpm_arch: x86_64
           - target: aarch64-unknown-linux-gnu
             name: linux-aarch64
             runner: ubuntu-24.04-arm
             archive: tar
+            deb_arch: arm64
+            rpm_arch: aarch64
           - target: x86_64-apple-darwin
             name: macos-x86_64
             runner: macos-15-intel
@@ -97,7 +101,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libpcap-dev libnetfilter-queue-dev libnfnetlink-dev
+          sudo apt-get install -y libpcap-dev libnetfilter-queue-dev libnfnetlink-dev dpkg-dev rpm
 
       - name: Install macOS dependencies
         if: runner.os == 'macOS'
@@ -165,6 +169,16 @@ jobs:
           "target/${{ matrix.target }}/release/nettrap" config --defaults > package/config.toml
           tar -czf "nettrap-${{ matrix.name }}.tar.gz" -C package .
 
+      - name: Package Linux formats
+        if: runner.os == 'Linux'
+        run: |
+          scripts/package_linux.sh \
+            "target/${{ matrix.target }}/release/nettrap" \
+            "${{ matrix.name }}" \
+            "$GITHUB_REF_NAME" \
+            "${{ matrix.deb_arch }}" \
+            "${{ matrix.rpm_arch }}"
+
       - name: Package Windows release
         if: matrix.archive == 'zip'
         run: |
@@ -194,6 +208,14 @@ jobs:
           "$clean_dir/nettrap" --version
           "$clean_dir/nettrap" config --defaults > /dev/null
 
+      - name: Verify packaged Linux formats
+        if: runner.os == 'Linux'
+        run: |
+          dpkg-deb --info "nettrap-${{ matrix.name }}.deb" >/dev/null
+          dpkg-deb --contents "nettrap-${{ matrix.name }}.deb" | grep -F './usr/bin/nettrap' >/dev/null
+          rpm -qpl "nettrap-${{ matrix.name }}.rpm" | grep -Fx '/usr/bin/nettrap' >/dev/null
+          rpm -qpl "nettrap-${{ matrix.name }}.rpm" | grep -Fx '/etc/nettrap/config.toml' >/dev/null
+
       - name: Verify packaged Windows release in a clean directory
         if: matrix.archive == 'zip'
         run: |
@@ -213,7 +235,10 @@ jobs:
         uses: actions/upload-artifact@v7.0.1
         with:
           name: nettrap-${{ matrix.name }}
-          path: nettrap-${{ matrix.name }}.${{ matrix.archive == 'tar' && 'tar.gz' || 'zip' }}
+          path: |
+            nettrap-${{ matrix.name }}.${{ matrix.archive == 'tar' && 'tar.gz' || 'zip' }}
+            nettrap-${{ matrix.name }}.deb
+            nettrap-${{ matrix.name }}.rpm
           if-no-files-found: error
           archive: false
 
@@ -319,6 +344,10 @@ jobs:
         run: |
           test -f releases/nettrap-linux-x86_64.tar.gz
           test -f releases/nettrap-linux-aarch64.tar.gz
+          test -f releases/nettrap-linux-x86_64.deb
+          test -f releases/nettrap-linux-aarch64.deb
+          test -f releases/nettrap-linux-x86_64.rpm
+          test -f releases/nettrap-linux-aarch64.rpm
           test -f releases/nettrap-macos-x86_64.tar.gz
           test -f releases/nettrap-macos-aarch64.tar.gz
           test -f releases/nettrap-windows-x86_64.zip
@@ -352,8 +381,16 @@ jobs:
       - name: Generate checksums
         run: |
           mkdir -p target
-          sha256sum releases/nettrap-*.tar.gz releases/nettrap-*.zip > target/release-subjects.sha256
-          sha256sum releases/nettrap-* > releases/SHA256SUMS
+          sha256sum releases/nettrap-*.tar.gz releases/nettrap-*.zip \
+            releases/nettrap-*.deb releases/nettrap-*.rpm > target/release-subjects.sha256
+          (cd releases && sha256sum nettrap-*) > releases/SHA256SUMS
+
+      - name: Generate Homebrew formula
+        run: |
+          scripts/generate_homebrew_formula.sh \
+            "$GITHUB_REF_NAME" releases/SHA256SUMS releases/nettrap.rb
+          test -s releases/nettrap.rb
+          (cd releases && sha256sum nettrap-*) > releases/SHA256SUMS
 
       - name: Attest build provenance
         uses: actions/attest@v4
@@ -368,7 +405,8 @@ jobs:
 
       - name: Verify release attestations
         run: |
-          for archive in releases/nettrap-*.tar.gz releases/nettrap-*.zip; do
+          for archive in releases/nettrap-*.tar.gz releases/nettrap-*.zip \
+              releases/nettrap-*.deb releases/nettrap-*.rpm; do
             gh attestation verify "$archive" --repo "$GITHUB_REPOSITORY"
           done
         env:

@@ -10,6 +10,8 @@ event contracts before `1.0.0`.
 
 - Six-target release workflow for Linux, macOS, and Windows x86_64/ARM64.
 - SHA-256 checksums, SPDX SBOM generation, and GitHub artifact attestations.
+- Linux release jobs now package `.deb` and `.rpm` artifacts and generate a
+  Homebrew formula for the macOS/Linux tarballs.
 - Explicit platform and protocol support matrices.
 - Non-root Docker image and persistent listener-mode Compose/Kubernetes examples.
 - Configuration migration command with future-schema rejection and validation.

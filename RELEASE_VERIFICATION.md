@@ -1,13 +1,15 @@
 # Release Verification
 
-Every NetTrap release archive is covered by a GitHub artifact attestation and
-an SBOM attestation. The draft release is not published unless GitHub CLI can
-verify every Linux/macOS `.tar.gz` and Windows `.zip` against this repository.
+Every NetTrap release archive and Linux package is covered by a GitHub artifact
+attestation and an SBOM attestation. The draft release is not published unless
+GitHub CLI can verify every Linux/macOS `.tar.gz`, Linux `.deb`/`.rpm`, and
+Windows `.zip` against this repository. A Homebrew formula is generated from
+the checksums for the four macOS/Linux tarballs.
 
 Verify a downloaded archive with:
 
 ```bash
-gh attestation verify nettrap-linux-x64.tar.gz --repo seifreed/NetTrap
+gh attestation verify nettrap-linux-x86_64.tar.gz --repo seifreed/NetTrap
 sha256sum --check SHA256SUMS
 ```
 
