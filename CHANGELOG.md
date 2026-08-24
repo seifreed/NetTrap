@@ -12,6 +12,8 @@ event contracts before `1.0.0`.
 - SHA-256 checksums, SPDX SBOM generation, and GitHub artifact attestations.
 - Linux release jobs now package `.deb` and `.rpm` artifacts and generate a
   Homebrew formula for the macOS/Linux tarballs.
+- Windows release jobs now package attested ZIP and MSI assets;
+  MSI verification extracts the installer into a clean directory before smoke tests.
 - Explicit platform and protocol support matrices.
 - Non-root Docker image and persistent listener-mode Compose/Kubernetes examples.
 - Configuration migration command with future-schema rejection and validation.

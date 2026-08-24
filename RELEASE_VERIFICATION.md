@@ -1,9 +1,10 @@
 # Release Verification
 
-Every NetTrap release archive and Linux package is covered by a GitHub artifact
-attestation and an SBOM attestation. The draft release is not published unless
-GitHub CLI can verify every Linux/macOS `.tar.gz`, Linux `.deb`/`.rpm`, and
-Windows `.zip` against this repository. A Homebrew formula is generated from
+Every NetTrap release archive, Linux package, and Windows MSI is covered by a
+GitHub artifact attestation and an SBOM attestation. The draft release is not
+published unless GitHub CLI can verify every Linux/macOS `.tar.gz`, Linux
+`.deb`/`.rpm`, and Windows `.zip`/`.msi` against this repository. A Homebrew
+formula is generated from
 the checksums for the four macOS/Linux tarballs.
 
 Verify a downloaded archive with:

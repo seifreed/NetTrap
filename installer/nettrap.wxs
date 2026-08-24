@@ -1,0 +1,37 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="NetTrap"
+    Manufacturer="NetTrap contributors"
+    Version="$(var.ProductVersion)"
+    UpgradeCode="8e1a6b0c-9b3e-4f55-8b6d-4b3cc7e9a11f">
+    <SummaryInformation Description="NetTrap network interception and emulation engine" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of NetTrap is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <StandardDirectory Id="ProgramFiles6432Folder">
+      <Directory Id="INSTALLFOLDER" Name="NetTrap">
+        <Component Id="MainFiles" Guid="*">
+          <File Id="NettrapExecutable" Source="$(var.BinaryPath)" KeyPath="yes" />
+          <File Id="NettrapConfig" Source="$(var.ConfigPath)" />
+        </Component>
+        <Directory Id="DOCFOLDER" Name="docs">
+          <Component Id="Documentation" Guid="*">
+            <File Id="License" Source="$(var.LicensePath)" KeyPath="yes" />
+            <File Id="Readme" Source="$(var.ReadmePath)" />
+            <File Id="Changelog" Source="$(var.ChangelogPath)" />
+            <File Id="Security" Source="$(var.SecurityPath)" />
+            <File Id="KnownLimitations" Source="$(var.KnownLimitationsPath)" />
+            <File Id="ThirdPartyNotices" Source="$(var.ThirdPartyNoticesPath)" />
+            <File Id="PlatformSupport" Source="$(var.PlatformSupportPath)" />
+            <File Id="ProtocolSupport" Source="$(var.ProtocolSupportPath)" />
+          </Component>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="MainFeature" Title="NetTrap" Level="1">
+      <ComponentRef Id="MainFiles" />
+      <ComponentRef Id="Documentation" />
+    </Feature>
+  </Package>
+</Wix>

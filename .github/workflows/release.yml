@@ -194,6 +194,37 @@ jobs:
           Compress-Archive -Path package/* -DestinationPath "nettrap-${{ matrix.name }}.zip"
         shell: pwsh
 
+      - name: Install WiX Toolset
+        if: runner.os == 'Windows'
+        run: dotnet tool install --global wix --version 4.0.5
+        shell: pwsh
+
+      - name: Package Windows MSI
+        if: runner.os == 'Windows'
+        run: |
+          $env:PATH = "$env:USERPROFILE\.dotnet\tools;$env:PATH"
+          $version = "${env:GITHUB_REF_NAME}".TrimStart('v')
+          $msiVersion = ($version -split '-', 2)[0]
+          $defines = @(
+            "BinaryPath=$((Resolve-Path "target/${{ matrix.target }}/release/nettrap.exe").Path)",
+            "ConfigPath=$((Resolve-Path "package/config.toml").Path)",
+            "ProductVersion=$msiVersion",
+            "LicensePath=$((Resolve-Path "LICENSE").Path)",
+            "ReadmePath=$((Resolve-Path "README.md").Path)",
+            "ChangelogPath=$((Resolve-Path "CHANGELOG.md").Path)",
+            "SecurityPath=$((Resolve-Path "SECURITY.md").Path)",
+            "KnownLimitationsPath=$((Resolve-Path "KNOWN_LIMITATIONS.md").Path)",
+            "ThirdPartyNoticesPath=$((Resolve-Path "THIRD_PARTY_NOTICES.md").Path)",
+            "PlatformSupportPath=$((Resolve-Path "PLATFORM_SUPPORT.md").Path)",
+            "ProtocolSupportPath=$((Resolve-Path "PROTOCOL_SUPPORT.md").Path)"
+          )
+          $wixArgs = @('build', 'installer/nettrap.wxs', '-arch', "${{ matrix.arch }}")
+          foreach ($define in $defines) { $wixArgs += @('-d', $define) }
+          $wixArgs += @('-o', "nettrap-${{ matrix.name }}.msi")
+          & wix @wixArgs
+          if ($LASTEXITCODE -ne 0) { throw "WiX failed with exit code $LASTEXITCODE" }
+        shell: pwsh
+
       - name: Verify packaged Unix release in a clean directory
         if: matrix.archive == 'tar'
         run: |
@@ -242,12 +273,32 @@ jobs:
           & "$cleanDir/nettrap.exe" config --defaults | Out-Null
         shell: pwsh
 
+      - name: Verify packaged Windows MSI in a clean directory
+        if: runner.os == 'Windows'
+        run: |
+          $cleanDir = Join-Path $env:RUNNER_TEMP "nettrap-msi-clean-${{ matrix.name }}"
+          Remove-Item $cleanDir -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $cleanDir | Out-Null
+          $msiexec = Start-Process -FilePath msiexec.exe -ArgumentList @(
+            '/a', (Resolve-Path "nettrap-${{ matrix.name }}.msi").Path,
+            '/qn', "TARGETDIR=$cleanDir"
+          ) -Wait -PassThru
+          if ($msiexec.ExitCode -ne 0) { throw "MSI administrative extraction failed: $($msiexec.ExitCode)" }
+          $installed = Get-ChildItem -Path $cleanDir -Filter nettrap.exe -Recurse | Select-Object -First 1
+          if ($null -eq $installed) { throw "MSI extraction did not contain nettrap.exe" }
+          $config = Get-ChildItem -Path $cleanDir -Filter config.toml -Recurse | Select-Object -First 1
+          if ($null -eq $config) { throw "MSI extraction did not contain config.toml" }
+          & $installed.FullName --version
+          & $installed.FullName config --defaults | Out-Null
+        shell: pwsh
+
       - name: Upload packaged release
         uses: actions/upload-artifact@v7.0.1
         with:
           name: nettrap-${{ matrix.name }}
           path: |
             nettrap-${{ matrix.name }}.${{ matrix.archive == 'tar' && 'tar.gz' || 'zip' }}
+            nettrap-${{ matrix.name }}.msi
             nettrap-${{ matrix.name }}.deb
             nettrap-${{ matrix.name }}.rpm
           if-no-files-found: error
@@ -363,6 +414,8 @@ jobs:
           test -f releases/nettrap-macos-aarch64.tar.gz
           test -f releases/nettrap-windows-x86_64.zip
           test -f releases/nettrap-windows-aarch64.zip
+          test -f releases/nettrap-windows-x86_64.msi
+          test -f releases/nettrap-windows-aarch64.msi
           test -f releases/nettrap-oci-image.txt
           test -f releases/nettrap-kubernetes-deployment.yaml
 
@@ -393,7 +446,7 @@ jobs:
         run: |
           mkdir -p target
           sha256sum releases/nettrap-*.tar.gz releases/nettrap-*.zip \
-            releases/nettrap-*.deb releases/nettrap-*.rpm > target/release-subjects.sha256
+            releases/nettrap-*.msi releases/nettrap-*.deb releases/nettrap-*.rpm > target/release-subjects.sha256
           (cd releases && sha256sum nettrap-*) > releases/SHA256SUMS
 
       - name: Generate Homebrew formula
@@ -417,7 +470,7 @@ jobs:
       - name: Verify release attestations
         run: |
           for archive in releases/nettrap-*.tar.gz releases/nettrap-*.zip \
-              releases/nettrap-*.deb releases/nettrap-*.rpm; do
+              releases/nettrap-*.msi releases/nettrap-*.deb releases/nettrap-*.rpm; do
             gh attestation verify "$archive" --repo "$GITHUB_REPOSITORY"
           done
         env:
