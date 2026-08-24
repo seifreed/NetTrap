@@ -6,7 +6,8 @@ mod runtime;
 
 pub use health::RuntimeHealth;
 pub use policy::{
-    FlowDecision, FlowPolicy, FlowPolicyResolution, FlowPolicyRule, ParseFlowDecisionError,
+    ConfiguredFlowPolicy, FlowDecision, FlowPolicy, FlowPolicyContext, FlowPolicyResolution,
+    FlowPolicyRule, FlowPolicyRuleSpec, ParseFlowDecisionError,
 };
 pub use runtime::{RuntimeHost, RuntimeRunner};
 

@@ -37,6 +37,26 @@ pub(crate) async fn run_tcp_listener_with_policy(
     output_path: Option<&std::path::Path>,
     policy: nettrap_engine::FlowPolicyResolution,
 ) -> crate::Result<()> {
+    run_tcp_listener_with_flow_policy(
+        ctx,
+        listener,
+        output_path,
+        Arc::new(nettrap_engine::ConfiguredFlowPolicy::new(
+            policy.decision(),
+            Vec::new(),
+        )),
+        true,
+    )
+    .await
+}
+
+pub(crate) async fn run_tcp_listener_with_flow_policy(
+    ctx: Arc<ListenerContext>,
+    listener: TcpListener,
+    output_path: Option<&std::path::Path>,
+    policy: Arc<nettrap_engine::ConfiguredFlowPolicy>,
+    emulate_response: bool,
+) -> crate::Result<()> {
     let addr = listener.local_addr()?;
     let active_connections = Arc::new(AtomicU32::new(0));
 
@@ -126,6 +146,7 @@ pub(crate) async fn run_tcp_listener_with_policy(
 
                 let ctx_clone = Arc::clone(&ctx);
                 let out = output_path.map(|p| p.to_path_buf());
+                let policy_clone = Arc::clone(&policy);
                 connection_tasks.spawn(async move {
                     let _slot = slot;
                     if !apply_tcp_process_filter(&ctx_clone, &peer, &destination).await {
@@ -142,13 +163,30 @@ pub(crate) async fn run_tcp_listener_with_policy(
                         return;
                     }
 
+                    let process_name = ctx_clone
+                        .runtime
+                        .session_tracker
+                        .get_process(&peer, "TCP", &destination)
+                        .and_then(|(name, _)| name);
+                    let source_host = peer.ip().to_string();
+                    let configured = policy_clone.resolve_for_context(
+                        nettrap_engine::FlowPolicyContext {
+                            listener: ctx_clone.name(),
+                            protocol: "tcp",
+                            source_host: Some(&source_host),
+                            destination_host: Some(destination.ip()),
+                            destination_port: Some(destination.port()),
+                            process_name: process_name.as_deref(),
+                        },
+                        emulate_response,
+                    );
                     let result = handle_tcp_connection_with_policy(
                         Arc::clone(&ctx_clone),
                         stream,
                         peer,
                         destination.clone(),
                         out.as_deref(),
-                        policy,
+                        configured,
                     )
                     .await;
                     ctx_clone.remove_session(&peer, "TCP", &destination);

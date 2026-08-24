@@ -13,6 +13,8 @@ event contracts before `1.0.0`.
 - Explicit platform and protocol support matrices.
 - Non-root Docker image and persistent listener-mode Compose/Kubernetes examples.
 - Configuration migration command with future-schema rejection and validation.
+- Ordered first-match flow policy rules for listener, protocol, destination,
+  source, and attributed-process decisions.
 
 ### Changed
 

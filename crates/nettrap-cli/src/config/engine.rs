@@ -26,6 +26,7 @@ const MAX_DNS_FLUSH_COMMAND_BYTES: usize = 512;
 const MAX_LISTENER_TIMEOUT_MS: u64 = 60 * 60 * 1000;
 const MAX_LISTENER_DELAY_MS: u64 = 60 * 60 * 1000;
 const MAX_LISTENER_PASV_PORT_RANGE: u16 = 1000;
+const MAX_FLOW_POLICY_RULES: usize = 256;
 
 mod validation;
 
@@ -85,6 +86,7 @@ impl EngineConfig {
         )?;
         validate_output_format_setting(&self.output_format)?;
         normalize_default_decision(&mut self.default_decision)?;
+        self.validate_flow_rules()?;
         normalize_restrict_interface(&mut self.restrict_interface)?;
         normalize_report_language(&mut self.report_language)?;
         normalize_optional_identifier("database.node_id", &mut self.database.node_id)?;
@@ -125,6 +127,69 @@ impl EngineConfig {
         }
 
         Ok(())
+    }
+
+    fn validate_flow_rules(&mut self) -> crate::Result<()> {
+        if self.flow_rules.len() > MAX_FLOW_POLICY_RULES {
+            return Err(crate::Error::Config(format!(
+                "flow_rules has too many entries ({} > {})",
+                self.flow_rules.len(),
+                MAX_FLOW_POLICY_RULES
+            )));
+        }
+
+        for (index, rule) in self.flow_rules.iter_mut().enumerate() {
+            validate_flow_rule_matcher(index, "listener", rule.listener.as_ref())?;
+            validate_flow_rule_matcher(index, "protocol", rule.protocol.as_ref())?;
+            validate_flow_rule_matcher(index, "source_host", rule.source_host.as_ref())?;
+            validate_flow_rule_matcher(index, "destination_host", rule.destination_host.as_ref())?;
+            validate_flow_rule_matcher(index, "process_name", rule.process_name.as_ref())?;
+
+            if let Some(protocol) = rule.protocol.as_mut() {
+                protocol.make_ascii_lowercase();
+                if !matches!(protocol.as_str(), "tcp" | "udp") {
+                    return Err(crate::Error::Config(format!(
+                        "flow_rules entry {} has unsupported protocol '{}'",
+                        index, protocol
+                    )));
+                }
+            }
+
+            let decision = rule
+                .decision
+                .parse::<nettrap_engine::FlowDecision>()
+                .map_err(|_| {
+                    crate::Error::Config(format!(
+                        "flow_rules entry {} has unsupported decision '{}'",
+                        index, rule.decision
+                    ))
+                })?;
+            rule.decision = decision.to_string();
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn flow_policy_rules(
+        &self,
+    ) -> crate::Result<Vec<nettrap_engine::FlowPolicyRuleSpec>> {
+        self.flow_rules
+            .iter()
+            .map(|rule| {
+                Ok(nettrap_engine::FlowPolicyRuleSpec {
+                    listener: rule.listener.clone(),
+                    protocol: rule.protocol.clone(),
+                    source_host: rule.source_host.clone(),
+                    destination_host: rule.destination_host.clone(),
+                    destination_port: rule.destination_port,
+                    process_name: rule.process_name.clone(),
+                    decision: rule
+                        .decision
+                        .parse()
+                        .map_err(|_| crate::Error::Config("invalid flow rule decision".into()))?,
+                })
+            })
+            .collect()
     }
 
     pub(crate) fn validate_runtime_file_prefixes(&self) -> crate::Result<()> {
@@ -341,6 +406,33 @@ impl EngineConfig {
             other => other,
         }
     }
+}
+
+fn validate_flow_rule_matcher(
+    index: usize,
+    field: &str,
+    value: Option<&String>,
+) -> crate::Result<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+
+    if value.is_empty() || value.trim_matches([' ', '\t']) != value {
+        return Err(crate::Error::Config(format!(
+            "flow_rules entry {} {} must not be blank or padded",
+            index, field
+        )));
+    }
+    if value
+        .chars()
+        .any(|character| character.is_control() || (character.is_whitespace() && character != ' '))
+    {
+        return Err(crate::Error::Config(format!(
+            "flow_rules entry {} {} contains control characters or unicode whitespace",
+            index, field
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

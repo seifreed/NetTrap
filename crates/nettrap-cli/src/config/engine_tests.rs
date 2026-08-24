@@ -1,5 +1,6 @@
 use std::fs;
 
+use super::model::FlowRuleConfig;
 use super::{
     CONFIG_VERSION, EngineConfig, MAX_DISTRIBUTED_EVENT_SINKS,
     MAX_DISTRIBUTED_HTTP_SINK_BATCH_SIZE, MAX_DISTRIBUTED_NODE_TAG_BYTES,
@@ -2401,4 +2402,72 @@ fn from_file_declarative_preserves_port_range_form() {
     assert_eq!(loaded.listeners.len(), 1);
     assert_eq!(loaded.listeners[0].name, "http");
     assert_eq!(loaded.listeners[0].port_range.as_deref(), Some("80,81"));
+}
+
+#[test]
+fn flow_rules_normalize_and_compile_ordered_policy() {
+    let mut config = EngineConfig {
+        flow_rules: vec![FlowRuleConfig {
+            listener: Some("http".to_string()),
+            protocol: Some("TCP".to_string()),
+            source_host: Some("127.0.0.1".to_string()),
+            destination_host: None,
+            destination_port: Some(443),
+            process_name: Some("curl".to_string()),
+            decision: "intercept".to_string(),
+        }],
+        ..EngineConfig::default()
+    };
+
+    config
+        .validate_global_settings()
+        .expect("valid ordered flow rule should pass validation");
+    let rules = config
+        .flow_policy_rules()
+        .expect("validated flow rules should compile");
+
+    assert_eq!(config.flow_rules[0].protocol.as_deref(), Some("tcp"));
+    assert_eq!(config.flow_rules[0].decision, "emulate");
+    assert_eq!(rules[0].destination_port, Some(443));
+    assert_eq!(rules[0].process_name.as_deref(), Some("curl"));
+}
+
+#[test]
+fn flow_rules_reject_unknown_decision() {
+    let mut config = EngineConfig {
+        flow_rules: vec![FlowRuleConfig {
+            listener: Some("http".to_string()),
+            protocol: None,
+            source_host: None,
+            destination_host: None,
+            destination_port: None,
+            process_name: None,
+            decision: "drop".to_string(),
+        }],
+        ..EngineConfig::default()
+    };
+
+    let error = config
+        .validate_global_settings()
+        .expect_err("unknown flow decision should fail validation");
+    assert!(error.to_string().contains("unsupported decision"));
+}
+
+#[test]
+fn from_file_loads_ordered_flow_rules() {
+    let path = std::env::temp_dir().join(format!(
+        "nettrap-flow-rules-config-{}.toml",
+        uuid::Uuid::new_v4()
+    ));
+    fs::write(
+        &path,
+        "config_version = 1\ndefault_decision = \"emulate\"\n\n[[listeners]]\nname = \"http\"\nport = 18080\nprotocol = \"tcp\"\n\n[[flow_rules]]\nlistener = \"http\"\ndestination_port = 443\ndecision = \"block\"\n",
+    )
+    .expect("write flow rule config");
+
+    let config = EngineConfig::from_file(&path).expect("flow rule config should load");
+    let _ = fs::remove_file(path);
+
+    assert_eq!(config.flow_rules.len(), 1);
+    assert_eq!(config.flow_rules[0].decision, "block");
 }

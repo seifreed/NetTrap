@@ -40,6 +40,24 @@ pub enum NetworkMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct FlowRuleConfig {
+    #[serde(default)]
+    pub(crate) listener: Option<String>,
+    #[serde(default)]
+    pub(crate) protocol: Option<String>,
+    #[serde(default)]
+    pub(crate) source_host: Option<String>,
+    #[serde(default)]
+    pub(crate) destination_host: Option<String>,
+    #[serde(default)]
+    pub(crate) destination_port: Option<u16>,
+    #[serde(default)]
+    pub(crate) process_name: Option<String>,
+    pub(crate) decision: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EngineConfig {
     #[serde(default = "current_config_version")]
     pub config_version: u32,
@@ -79,6 +97,9 @@ pub struct EngineConfig {
     pub blacklist_ports_udp: Vec<u16>,
     #[serde(default)]
     pub blacklist_ids_icmp: Vec<u16>,
+    /// Ordered first-match flow policy rules.
+    #[serde(default)]
+    pub(crate) flow_rules: Vec<FlowRuleConfig>,
     #[serde(default)]
     pub redirect_all_traffic: bool,
     #[serde(default)]
@@ -160,6 +181,7 @@ impl Default for EngineConfig {
             blacklist_ports_tcp: Vec::new(),
             blacklist_ports_udp: Vec::new(),
             blacklist_ids_icmp: Vec::new(),
+            flow_rules: Vec::new(),
             redirect_all_traffic: false,
             default_tcp_listener: None,
             default_udp_listener: None,

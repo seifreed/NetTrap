@@ -58,10 +58,10 @@ pub(crate) async fn handle_tcp_connection_with_policy(
     let (decision, rule) = if super::forward::is_forward_listener(conn.ctx.name()) {
         (
             nettrap_engine::FlowDecision::Pass,
-            "listener.protocol=forward",
+            "listener.protocol=forward".to_string(),
         )
     } else {
-        (configured.decision(), configured.rule().as_str())
+        (configured.decision(), configured.rule_label())
     };
     log_event(
         output_path,

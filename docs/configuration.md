@@ -24,6 +24,7 @@ nettrap config --defaults > config.toml
 | `blacklist_ports_tcp` | [u16] | `[]` | TCP ports excluded from interception/listening |
 | `blacklist_ports_udp` | [u16] | `[]` | UDP ports excluded from interception/listening |
 | `blacklist_ids_icmp` | [u16] | `[]` | ICMP type/ID values excluded on Windows |
+| `flow_rules` | table array | `[]` | Ordered first-match flow actions; match on listener, protocol, source/destination host, destination port, and attributed process |
 | `redirect_all_traffic` | bool | `false` | Redirect unbound ports to the configured default listener |
 | `default_tcp_listener` | string | - | Listener used for redirected TCP traffic |
 | `default_udp_listener` | string | - | Listener used for redirected UDP traffic |
@@ -44,9 +45,28 @@ nettrap config --defaults > config.toml
 
 Version 1 is the only current schema. Existing unversioned configuration files
 remain valid and are interpreted as version 1. NetTrap fails closed on unknown
-versions instead of applying a partial configuration. A future incompatible
-schema will ship with an explicit migration command before version 2 is
-accepted.
+versions instead of applying a partial configuration. Use
+`nettrap config --migrate -c old.toml -o config.toml` to stamp an older schema,
+normalize legacy decisions, and validate the result; future versions are
+rejected until their migration is implemented.
+
+### Ordered Flow Rules
+
+Rules are evaluated in declaration order and the first rule whose populated
+matchers all match wins:
+
+```toml
+[[flow_rules]]
+listener = "http"
+protocol = "tcp"
+destination_port = 443
+process_name = "curl"
+decision = "capture"
+```
+
+Supported decisions are `pass`, `capture`, `emulate`, `sinkhole`, and `block`.
+An omitted matcher matches any value; a process or destination matcher cannot
+match until attribution or original-destination metadata is available.
 
 ## Listener Options (`[[listeners]]`)
 

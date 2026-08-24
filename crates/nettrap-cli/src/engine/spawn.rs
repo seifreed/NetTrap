@@ -9,7 +9,7 @@ use super::send_fatal_runtime_error;
 use crate::config::EngineConfig;
 use crate::engine::startup::StartupContext;
 use crate::engine::startup::build_listener_context;
-use crate::listeners::{run_tcp_listener_with_policy, run_udp_listener_with_policy};
+use crate::listeners::{run_tcp_listener_with_flow_policy, run_udp_listener_with_flow_policy};
 
 pub(super) fn has_spawnable_listeners(config: &EngineConfig) -> bool {
     config
@@ -37,7 +37,8 @@ enum PreparedListener {
         name: String,
         listener: TcpListener,
         ctx: Arc<crate::listener_context::ListenerContext>,
-        policy: nettrap_engine::FlowPolicyResolution,
+        policy: Arc<nettrap_engine::ConfiguredFlowPolicy>,
+        emulate_response: bool,
         output_path: Option<PathBuf>,
     },
     Udp {
@@ -45,7 +46,8 @@ enum PreparedListener {
         socket: UdpSocket,
         bind_addr: std::net::IpAddr,
         ctx: Box<crate::listener_context::ListenerContext>,
-        policy: nettrap_engine::FlowPolicyResolution,
+        policy: Arc<nettrap_engine::ConfiguredFlowPolicy>,
+        emulate_response: bool,
         output_path: Option<PathBuf>,
     },
 }
@@ -115,7 +117,10 @@ pub(super) async fn spawn_listeners(
             config.default_decision
         ))
     })?;
-    let flow_policy = nettrap_engine::FlowPolicy::new(default_decision);
+    let flow_policy = Arc::new(nettrap_engine::ConfiguredFlowPolicy::new(
+        default_decision,
+        config.flow_policy_rules()?,
+    ));
 
     for listener in &config.listeners {
         let is_default_target = listener_is_default_target(config, listener);
@@ -200,7 +205,8 @@ pub(super) async fn spawn_listeners(
                     socket,
                     bind_addr,
                     ctx: Box::new(listener_ctx),
-                    policy: flow_policy.resolve(listener.emulate_response),
+                    policy: Arc::clone(&flow_policy),
+                    emulate_response: listener.emulate_response,
                     output_path,
                 });
             }
@@ -220,7 +226,8 @@ pub(super) async fn spawn_listeners(
                     name: listener.name.clone(),
                     listener: tcp_listener,
                     ctx,
-                    policy: flow_policy.resolve(listener.emulate_response),
+                    policy: Arc::clone(&flow_policy),
+                    emulate_response: listener.emulate_response,
                     output_path,
                 });
             }
@@ -253,17 +260,19 @@ pub(super) async fn spawn_listeners(
                 bind_addr,
                 ctx,
                 policy,
+                emulate_response,
                 output_path,
             } => {
                 let runtime_health = Arc::clone(&runtime_health);
                 let fatal_runtime_tx = fatal_runtime_tx.clone();
                 handles.push(tokio::spawn(async move {
-                    let result = run_udp_listener_with_policy(
+                    let result = run_udp_listener_with_flow_policy(
                         *ctx,
                         socket,
                         bind_addr,
                         output_path.as_deref(),
                         policy,
+                        emulate_response,
                     )
                     .await;
                     let message = format!("UDP listener '{}' stopped unexpectedly", name);
@@ -287,14 +296,20 @@ pub(super) async fn spawn_listeners(
                 listener,
                 ctx,
                 policy,
+                emulate_response,
                 output_path,
             } => {
                 let runtime_health = Arc::clone(&runtime_health);
                 let fatal_runtime_tx = fatal_runtime_tx.clone();
                 handles.push(tokio::spawn(async move {
-                    let result =
-                        run_tcp_listener_with_policy(ctx, listener, output_path.as_deref(), policy)
-                            .await;
+                    let result = run_tcp_listener_with_flow_policy(
+                        ctx,
+                        listener,
+                        output_path.as_deref(),
+                        policy,
+                        emulate_response,
+                    )
+                    .await;
                     let message = format!("TCP listener '{}' stopped unexpectedly", name);
                     match &result {
                         Ok(()) => {

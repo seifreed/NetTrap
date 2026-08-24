@@ -22,9 +22,10 @@ suite.
 ## Policy and Protocols
 
 - TCP and UDP apply `pass`, `capture`, `emulate`, `sinkhole`, and `block`
-  decisions and audit the selected rule. Policy matching is currently based on
-  listener configuration plus host/process filters; richer ordered per-flow
-  rules are still pending.
+  decisions and audit the selected rule. Ordered first-match `flow_rules` can
+  match listener, protocol, source/original destination, destination port, and
+  attributed process; a rule requiring unavailable attribution metadata cannot
+  match.
 - Protocol handlers have uneven fidelity. DNS, HTTP(S), TLS, SMTP, and FTP have
   required external-client E2E in the baseline CI contract.
 - SSH does not complete a normal OpenSSH authentication session; SMB is not a
@@ -39,8 +40,8 @@ See [PROTOCOL_SUPPORT.md](PROTOCOL_SUPPORT.md) for the handler-by-handler matrix
 - The REST API has no authentication and rejects non-loopback bind addresses.
   It is not a remote administration surface.
 - Event, report, API, and configuration schemas carry explicit version fields,
-  but migration tooling and long-term compatibility guarantees are not yet
-  provided.
+  and `config --migrate` handles older configuration versions; long-term
+  compatibility guarantees are not yet provided.
 - Release binaries are not platform code-signed. GitHub release artifacts do
   include checksums, SBOMs, and provenance attestations.
 - Long-running soak, hostile load, and connection-exhaustion coverage is not yet

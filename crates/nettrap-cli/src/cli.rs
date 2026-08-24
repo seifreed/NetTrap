@@ -91,12 +91,8 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub check: bool,
 
-    #[arg(short = 'd', long)]
+    #[arg(short = 'd', long, visible_alias = "migrate", conflicts_with = "check")]
     pub defaults: bool,
-
-    /// Migrate a versioned config into the current schema.
-    #[arg(long, conflicts_with_all = ["check", "defaults"])]
-    pub migrate: bool,
 }
 
 #[derive(Parser, Debug)]

@@ -822,7 +822,6 @@ mod tests {
             output: Some(output_path.clone()),
             check: true,
             defaults: false,
-            migrate: false,
         };
 
         handle_config(&args, Some(config_path.clone())).expect("config check should succeed");
@@ -848,7 +847,6 @@ mod tests {
             output: None,
             check: true,
             defaults: false,
-            migrate: false,
         };
 
         let err = handle_config(&args, Some(config_path.clone()))
@@ -879,10 +877,9 @@ mod tests {
             output: Some(output_path.clone()),
             check: false,
             defaults: false,
-            migrate: true,
         };
 
-        handle_config(&args, Some(input_path.clone())).expect("migration should succeed");
+        handle_config_migrate(&args, Some(input_path.clone())).expect("migration should succeed");
 
         let migrated = fs::read_to_string(&output_path).expect("read migrated config");
         assert!(migrated.contains("config_version = 1"));
@@ -909,10 +906,9 @@ mod tests {
             output: Some(output_path.clone()),
             check: false,
             defaults: false,
-            migrate: true,
         };
 
-        let error = handle_config(&args, Some(input_path.clone()))
+        let error = handle_config_migrate(&args, Some(input_path.clone()))
             .expect_err("future schema should be rejected");
         assert!(error.to_string().contains("newer than supported"));
         assert!(!output_path.exists());

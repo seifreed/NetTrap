@@ -44,6 +44,28 @@ pub(crate) async fn run_udp_listener_with_policy(
     output_path: Option<&std::path::Path>,
     policy: nettrap_engine::FlowPolicyResolution,
 ) -> crate::Result<()> {
+    run_udp_listener_with_flow_policy(
+        ctx,
+        socket,
+        bind_addr,
+        output_path,
+        Arc::new(nettrap_engine::ConfiguredFlowPolicy::new(
+            policy.decision(),
+            Vec::new(),
+        )),
+        true,
+    )
+    .await
+}
+
+pub(crate) async fn run_udp_listener_with_flow_policy(
+    ctx: ListenerContext,
+    socket: UdpSocket,
+    bind_addr: std::net::IpAddr,
+    output_path: Option<&std::path::Path>,
+    policy: Arc<nettrap_engine::ConfiguredFlowPolicy>,
+    emulate_response: bool,
+) -> crate::Result<()> {
     let addr = socket.local_addr()?;
     let destination_capture = match configure_udp_destination_capture(&socket, bind_addr) {
         Ok(capture) => capture,
@@ -119,6 +141,7 @@ pub(crate) async fn run_udp_listener_with_policy(
                 let socket_clone = Arc::clone(&socket);
                 let out_clone = output_path.clone();
                 let sem = Arc::clone(&udp_semaphore);
+                let policy_clone = Arc::clone(&policy);
 
                 let permit = match sem.try_acquire_owned() {
                     Ok(permit) => permit,
@@ -143,6 +166,24 @@ pub(crate) async fn run_udp_listener_with_policy(
                         return;
                     }
 
+                    let source_host = src.ip().to_string();
+                    let configured = policy_clone.resolve_for_context(
+                        nettrap_engine::FlowPolicyContext {
+                            listener: ctx_clone.name(),
+                            protocol: "udp",
+                            source_host: Some(&source_host),
+                            destination_host: Some(destination.ip()),
+                            destination_port: Some(destination.port()),
+                            process_name: ctx_clone
+                                .runtime
+                                .session_tracker
+                                .get_process(&src, "UDP", &destination)
+                                .and_then(|(name, _)| name)
+                                .as_deref(),
+                        },
+                        emulate_response,
+                    );
+
                     if is_new_session {
                         log_event(
                             out_clone.as_deref(),
@@ -151,8 +192,8 @@ pub(crate) async fn run_udp_listener_with_policy(
                             "policy_decision",
                             &format!(
                                 "decision={} rule={}",
-                                policy.decision(),
-                                policy.rule().as_str()
+                                configured.decision(),
+                                configured.rule_label()
                             ),
                         )
                         .await;
@@ -169,7 +210,7 @@ pub(crate) async fn run_udp_listener_with_policy(
                         tracing::debug!("Hexdump:\n{}", crate::hexdump::hexdump(&query_data, 256));
                     }
 
-                    match policy.decision() {
+                    match configured.decision() {
                         nettrap_engine::FlowDecision::Pass
                         | nettrap_engine::FlowDecision::Capture => {
                             if let Err(error) = forward_udp_datagram(
@@ -178,7 +219,10 @@ pub(crate) async fn run_udp_listener_with_policy(
                                 &query_data,
                                 &src,
                                 &destination,
-                                matches!(policy.decision(), nettrap_engine::FlowDecision::Capture),
+                                matches!(
+                                    configured.decision(),
+                                    nettrap_engine::FlowDecision::Capture
+                                ),
                             )
                             .await
                             {

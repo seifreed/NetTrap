@@ -26,10 +26,35 @@ impl FlowPolicyRule {
     }
 }
 
+/// Attributes available to ordered flow-policy rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlowPolicyContext<'a> {
+    pub listener: &'a str,
+    pub protocol: &'a str,
+    pub source_host: Option<&'a str>,
+    pub destination_host: Option<&'a str>,
+    pub destination_port: Option<u16>,
+    pub process_name: Option<&'a str>,
+}
+
+/// One ordered policy rule. All populated matchers must match; rules are
+/// evaluated in declaration order and the first match wins.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowPolicyRuleSpec {
+    pub listener: Option<String>,
+    pub protocol: Option<String>,
+    pub source_host: Option<String>,
+    pub destination_host: Option<String>,
+    pub destination_port: Option<u16>,
+    pub process_name: Option<String>,
+    pub decision: FlowDecision,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FlowPolicyResolution {
     decision: FlowDecision,
     rule: FlowPolicyRule,
+    rule_index: Option<usize>,
 }
 
 impl FlowPolicyResolution {
@@ -39,6 +64,17 @@ impl FlowPolicyResolution {
 
     pub const fn rule(self) -> FlowPolicyRule {
         self.rule
+    }
+
+    pub const fn rule_index(self) -> Option<usize> {
+        self.rule_index
+    }
+
+    pub fn rule_label(self) -> String {
+        self.rule_index.map_or_else(
+            || self.rule.as_str().to_string(),
+            |index| format!("flow_rules[{}]", index + 1),
+        )
     }
 }
 
@@ -57,13 +93,82 @@ impl FlowPolicy {
             return FlowPolicyResolution {
                 decision: FlowDecision::Capture,
                 rule: FlowPolicyRule::ListenerEmulationDisabled,
+                rule_index: None,
             };
         }
 
         FlowPolicyResolution {
             decision: self.default_decision,
             rule: FlowPolicyRule::Default,
+            rule_index: None,
         }
+    }
+}
+
+/// Runtime policy that combines the stable default policy with ordered rules.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfiguredFlowPolicy {
+    default: FlowPolicy,
+    rules: Vec<FlowPolicyRuleSpec>,
+}
+
+impl ConfiguredFlowPolicy {
+    pub fn new(default_decision: FlowDecision, rules: Vec<FlowPolicyRuleSpec>) -> Self {
+        Self {
+            default: FlowPolicy::new(default_decision),
+            rules,
+        }
+    }
+
+    pub fn resolve_for_context(
+        &self,
+        context: FlowPolicyContext<'_>,
+        emulate_response: bool,
+    ) -> FlowPolicyResolution {
+        if let Some((index, rule)) = self
+            .rules
+            .iter()
+            .enumerate()
+            .find(|(_, rule)| rule.matches(context))
+        {
+            return FlowPolicyResolution {
+                decision: rule.decision,
+                rule: FlowPolicyRule::Default,
+                rule_index: Some(index),
+            };
+        }
+
+        self.default.resolve(emulate_response)
+    }
+}
+
+impl FlowPolicyRuleSpec {
+    fn matches(&self, context: FlowPolicyContext<'_>) -> bool {
+        self.listener
+            .as_deref()
+            .is_none_or(|value| value.eq_ignore_ascii_case(context.listener))
+            && self
+                .protocol
+                .as_deref()
+                .is_none_or(|value| value.eq_ignore_ascii_case(context.protocol))
+            && self.source_host.as_deref().is_none_or(|value| {
+                context
+                    .source_host
+                    .is_some_and(|candidate| value.eq_ignore_ascii_case(candidate))
+            })
+            && self.destination_host.as_deref().is_none_or(|value| {
+                context
+                    .destination_host
+                    .is_some_and(|candidate| value.eq_ignore_ascii_case(candidate))
+            })
+            && self
+                .destination_port
+                .is_none_or(|value| context.destination_port == Some(value))
+            && self.process_name.as_deref().is_none_or(|value| {
+                context
+                    .process_name
+                    .is_some_and(|candidate| value.eq_ignore_ascii_case(candidate))
+            })
     }
 }
 
@@ -132,9 +237,83 @@ mod tests {
         let disabled = FlowPolicy::new(FlowDecision::Emulate).resolve(false);
         assert_eq!(disabled.decision(), FlowDecision::Capture);
         assert_eq!(disabled.rule(), FlowPolicyRule::ListenerEmulationDisabled);
+        assert_eq!(disabled.rule_index(), None);
 
         let blocked = FlowPolicy::new(FlowDecision::Block).resolve(false);
         assert_eq!(blocked.decision(), FlowDecision::Block);
         assert_eq!(blocked.rule(), FlowPolicyRule::Default);
+    }
+
+    #[test]
+    fn test_flow_policy_uses_first_matching_ordered_rule() {
+        let policy = ConfiguredFlowPolicy::new(
+            FlowDecision::Emulate,
+            vec![
+                FlowPolicyRuleSpec {
+                    listener: Some("http".to_string()),
+                    protocol: Some("tcp".to_string()),
+                    source_host: None,
+                    destination_host: None,
+                    destination_port: Some(443),
+                    process_name: None,
+                    decision: FlowDecision::Block,
+                },
+                FlowPolicyRuleSpec {
+                    listener: Some("http".to_string()),
+                    protocol: None,
+                    source_host: None,
+                    destination_host: None,
+                    destination_port: None,
+                    process_name: None,
+                    decision: FlowDecision::Capture,
+                },
+            ],
+        );
+        let resolution = policy.resolve_for_context(
+            FlowPolicyContext {
+                listener: "HTTP",
+                protocol: "TCP",
+                source_host: Some("127.0.0.1"),
+                destination_host: Some("10.0.0.1"),
+                destination_port: Some(443),
+                process_name: None,
+            },
+            true,
+        );
+
+        assert_eq!(resolution.decision(), FlowDecision::Block);
+        assert_eq!(resolution.rule(), FlowPolicyRule::Default);
+        assert_eq!(resolution.rule_index(), Some(0));
+        assert_eq!(resolution.rule_label(), "flow_rules[1]");
+    }
+
+    #[test]
+    fn test_flow_policy_requires_all_populated_matchers() {
+        let policy = ConfiguredFlowPolicy::new(
+            FlowDecision::Emulate,
+            vec![FlowPolicyRuleSpec {
+                listener: Some("http".to_string()),
+                protocol: None,
+                source_host: None,
+                destination_host: None,
+                destination_port: None,
+                process_name: Some("curl".to_string()),
+                decision: FlowDecision::Sinkhole,
+            }],
+        );
+        let unmatched = policy.resolve_for_context(
+            FlowPolicyContext {
+                listener: "http",
+                protocol: "tcp",
+                source_host: None,
+                destination_host: None,
+                destination_port: Some(80),
+                process_name: None,
+            },
+            true,
+        );
+
+        assert_eq!(unmatched.decision(), FlowDecision::Emulate);
+        assert_eq!(unmatched.rule(), FlowPolicyRule::Default);
     }
 }

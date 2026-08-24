@@ -261,6 +261,17 @@ dns_response_ip = "192.168.100.1"
 dns_nxdomains = 3         # Ignore first 3 queries (C2 failover testing)
 ```
 
+Ordered flow actions can match the listener, protocol, source/original
+destination, port, and attributed process. The first matching rule wins:
+
+```toml
+[[flow_rules]]
+listener = "http"
+protocol = "tcp"
+destination_port = 443
+decision = "capture"
+```
+
 ### Custom Responses
 
 ```toml
