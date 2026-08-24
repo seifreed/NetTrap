@@ -36,6 +36,13 @@ run_test() {
     fi
 }
 
+run_bounded_http_burst() {
+    for _ in $(seq 1 32); do
+        test "$(curl --resolve example.test:8080:127.0.0.1 -s -o /dev/null \
+            -w '%{http_code}' http://example.test:8080/)" = "200"
+    done
+}
+
 echo "Starting NetTrap engine..."
 timeout 120 nettrap run -c /etc/nettrap/config.toml &
 NETTRAP_PID=$!
@@ -45,7 +52,11 @@ echo "Waiting for services..."
 for port in 5353 8080 2222 2323; do
     ready=false
     for _ in $(seq 1 40); do
-        if nc -z 127.0.0.1 "$port" 2>/dev/null; then
+        if if [ "$port" = 5353 ]; then
+            dig @127.0.0.1 -p "$port" example.com A +short >/dev/null 2>&1
+        else
+            nc -z 127.0.0.1 "$port" 2>/dev/null
+        fi; then
             ready=true
             break
         fi
@@ -82,6 +93,8 @@ run_test "HTTP POST" \
 
 run_test "HTTP HEADERS" \
     "curl --resolve example.test:8080:127.0.0.1 -s -I http://example.test:8080/ | grep -i 'content-type'"
+
+run_test "HTTP bounded burst" run_bounded_http_burst
 
 echo ""
 
