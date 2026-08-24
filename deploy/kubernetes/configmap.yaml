@@ -6,7 +6,7 @@ data:
   config.toml: |
     attribution_enabled = true
     attribution_timeout_ms = 5000
-    default_decision = "intercept"
+    default_decision = "emulate"
     pcap_enabled = true
     pcap_path = "/var/lib/nettrap/pcap/capture.pcap"
     output_format = "jsonl"
