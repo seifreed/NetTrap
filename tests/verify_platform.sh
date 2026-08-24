@@ -7,7 +7,7 @@ cleanup() {
         kill "$NETTRAP_PID" 2>/dev/null || true
         wait "$NETTRAP_PID" 2>/dev/null || true
     fi
-    rm -f /tmp/nettrap_test_config.toml /tmp/dns_result.txt /tmp/tls_result.txt
+    rm -f /tmp/nettrap_test_config.toml /tmp/dns_result.txt /tmp/tls_result.txt /tmp/ssh_result.txt
     rm -rf /tmp/nettrap_smtp_test
 }
 
@@ -186,6 +186,22 @@ bind_address = "127.0.0.1"
 enabled = true
 emulate_response = true
 pasv_ports = "30100-30105"
+
+[[listeners]]
+name = "ssh"
+protocol = "tcp"
+port = 12222
+bind_address = "127.0.0.1"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "telnet"
+protocol = "tcp"
+port = 12323
+bind_address = "127.0.0.1"
+enabled = true
+emulate_response = true
 EOF
 
 echo "Starting NetTrap..."
@@ -260,6 +276,36 @@ if [ "$FTP_RESULT" = "NetTrap default text file" ]; then
     echo "✓ FTP test passed"
 else
     echo "✗ FTP test returned unexpected content"
+    exit 1
+fi
+
+echo "Testing SSH client handshake..."
+if command -v ssh >/dev/null 2>&1; then
+    ssh -vv -o BatchMode=yes -o ConnectTimeout=5 -o ConnectionAttempts=1 \
+        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -p 12222 127.0.0.1 </dev/null >/tmp/ssh_result.txt 2>&1 || true
+    if grep -q "Remote protocol version 2.0" /tmp/ssh_result.txt; then
+        echo "✓ SSH client handshake test passed"
+    else
+        echo "✗ SSH client handshake test failed"
+        cat /tmp/ssh_result.txt
+        exit 1
+    fi
+else
+    echo "✗ ssh is required for the SSH integration test"
+    exit 1
+fi
+
+echo "Testing Telnet listener negotiation..."
+if command -v nc >/dev/null 2>&1; then
+    if printf '\377\375\001' | nc -w 3 127.0.0.1 12323 | od -An -t x1 | grep -q 'ff'; then
+        echo "✓ Telnet negotiation test passed"
+    else
+        echo "✗ Telnet negotiation test failed"
+        exit 1
+    fi
+else
+    echo "✗ nc is required for the Telnet integration test"
     exit 1
 fi
 
