@@ -30,7 +30,7 @@ new major is added only after the same E2E suite passes with it.
 | TFTP | RRQ/WRQ block handling and configured file root | No | No required real-client transfer E2E |
 | Telnet | Negotiation/prompt responses and command capture | No | Port-open smoke only; not a full terminal server |
 | SSH | Banner and partial KEX/authentication responses | No | Does not complete a normal OpenSSH authentication session |
-| SMB | SMB1/SMB2 parsing and synthetic negotiation | No | Fixed partial SMB2 behavior; not full SMB2/SMB3 file sharing |
+| SMB | SMB1/SMB2 parsing and synthetic negotiation | Yes (`smbclient`, negotiation probe) | Fixed partial SMB2 behavior; the client does not establish file sharing or a full SMB2/SMB3 session |
 | RDP | X.224/Cookie parsing and synthetic negotiation data | No | No complete RDP security or desktop session |
 | Redis | RESP parsing and a command-response subset | Yes (`redis-cli`, PING) | No persistence, replication, or full Redis semantics |
 | MySQL | Handshake, login metadata, STARTTLS handling, and query parsing | Yes (`mariadb`, client handshake) | No SQL engine; query attempt closes with the protocol client's lost-connection error |

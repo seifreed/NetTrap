@@ -24,6 +24,8 @@ event contracts before `1.0.0`.
 - The same smoke image now exercises MariaDB and PostgreSQL clients against the
   emulated database listeners, covering MySQL handshake/query rejection and
   PostgreSQL simple-query completion.
+- The Docker smoke now includes an `smbclient` negotiation probe against the
+  synthetic SMB listener and records that file-sharing sessions remain out of scope.
 
 ### Changed
 

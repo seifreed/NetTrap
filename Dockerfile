@@ -31,6 +31,7 @@ RUN apt-get update && apt-get install -y \
     postgresql-client \
     procps \
     redis-tools \
+    smbclient \
     iproute2 \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 10001 nettrap \
@@ -45,7 +46,7 @@ COPY tests/integration_test.sh /app/integration_test.sh
 RUN mkdir -p /var/log/nettrap /var/lib/nettrap/pcap \
     && chown -R nettrap:nettrap /var/log/nettrap /var/lib/nettrap
 
-EXPOSE 5353/udp 8080 110 143 1389 1883 2222 2323 3306 5432 6379 9090 9091
+EXPOSE 445 5353/udp 8080 110 143 1389 1883 2222 2323 3306 5432 6379 9090 9091
 
 USER nettrap
 

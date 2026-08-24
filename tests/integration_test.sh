@@ -71,13 +71,23 @@ run_postgres_simple_query() {
         -Atqc 'SELECT 1' >/dev/null
 }
 
+run_smb_negotiate_probe() {
+    local output status
+    set +e
+    output="$(timeout 8 smbclient -L //127.0.0.1 -N -p 445 2>&1)"
+    status=$?
+    set -e
+    test "$status" -ne 0
+    grep -Eiq 'protocol|NT_STATUS|failed|error' <<< "$output"
+}
+
 echo "Starting NetTrap engine..."
 timeout 120 nettrap run -c /etc/nettrap/config.toml &
 NETTRAP_PID=$!
 sleep 3
 
 echo "Waiting for services..."
-for port in 5353 8080 110 143 1389 1883 2222 2323 3306 5432 6379; do
+for port in 445 5353 8080 110 143 1389 1883 2222 2323 3306 5432 6379; do
     ready=false
     for _ in $(seq 1 40); do
         if if [ "$port" = 5353 ]; then
@@ -158,6 +168,8 @@ echo "--- Database Client Tests ---"
 run_test "MySQL client handshake" run_mysql_handshake_probe
 
 run_test "PostgreSQL simple query" run_postgres_simple_query
+
+run_test "SMB client negotiation" run_smb_negotiate_probe
 
 echo ""
 

@@ -33,6 +33,15 @@ emulate_response = true
 response_delay_ms = 0
 
 [[listeners]]
+name = "smb"
+protocol = "tcp"
+port = 445
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+response_delay_ms = 0
+
+[[listeners]]
 name = "pop3"
 protocol = "tcp"
 port = 110
