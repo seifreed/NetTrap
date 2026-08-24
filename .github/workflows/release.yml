@@ -330,7 +330,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft | grep -qx true; then
+          if gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft >/tmp/nettrap-release-draft; then
+            if ! grep -qx true /tmp/nettrap-release-draft; then
+              echo "Release $GITHUB_REF_NAME already exists and is not a draft" >&2
+              exit 1
+            fi
             echo "Reusing existing draft release $GITHUB_REF_NAME"
           else
             gh release create "$GITHUB_REF_NAME" --draft --prerelease --verify-tag --generate-notes --title "$GITHUB_REF_NAME"
