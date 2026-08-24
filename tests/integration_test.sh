@@ -43,6 +43,13 @@ run_bounded_http_burst() {
     done
 }
 
+run_concurrent_http_burst() {
+    local output
+    output="$(seq 1 64 | xargs -P 8 -I{} curl --resolve example.test:8080:127.0.0.1 \
+        -s -o /dev/null -w '%{http_code}\n' http://example.test:8080/)"
+    test "$(grep -c '^200$' <<< "$output")" -eq 64
+}
+
 run_imap_auth_probe() {
     local output status
     set +e
@@ -133,6 +140,7 @@ run_test "HTTP HEADERS" \
     "curl --resolve example.test:8080:127.0.0.1 -s -I http://example.test:8080/ | grep -i 'content-type'"
 
 run_test "HTTP bounded burst" run_bounded_http_burst
+run_test "HTTP concurrent burst" run_concurrent_http_burst
 
 echo ""
 
