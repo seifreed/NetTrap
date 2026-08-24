@@ -199,7 +199,7 @@ jobs:
 
       - name: Run bounded runtime soak
         env:
-          NETTRAP_SOAK_SECONDS: "60"
+          NETTRAP_SOAK_SECONDS: ${{ github.event_name == 'schedule' && '600' || '60' }}
         run: bash tests/soak_test.sh
 
       - name: Run benchmarks

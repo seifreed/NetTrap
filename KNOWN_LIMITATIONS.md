@@ -45,8 +45,8 @@ See [PROTOCOL_SUPPORT.md](PROTOCOL_SUPPORT.md) for the handler-by-handler matrix
 - Release binaries are not platform code-signed. GitHub release artifacts do
   include checksums, SBOMs, and provenance attestations.
 - Release gates include a bounded 60-second HTTP/DNS soak and a 128-socket
-  connection-exhaustion smoke; sustained hostile load beyond those bounded runs
-  is not yet a release gate.
+  connection-exhaustion smoke. The scheduled weekly gate extends the soak to
+  10 minutes; sustained hostile load beyond those runs is not yet a release gate.
 - Real malware samples and private captures are not part of default regression
   tests; runtime behavior is sample-agnostic.
 

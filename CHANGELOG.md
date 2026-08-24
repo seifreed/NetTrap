@@ -26,8 +26,9 @@ event contracts before `1.0.0`.
   PostgreSQL simple-query completion.
 - The Docker smoke now includes an `smbclient` negotiation probe against the
   synthetic SMB listener and records that file-sharing sessions remain out of scope.
-- Scheduled heavy quality gates now run a bounded HTTP/DNS runtime soak and
-  exercise every registered fuzz target.
+- Scheduled heavy quality gates now run a 10-minute HTTP/DNS runtime soak and
+  exercise every registered fuzz target; release calls retain a bounded
+  60-second soak.
 - Docker smoke now holds 128 concurrent HTTP sockets and verifies that a normal
   request remains available after the listener limit is reached.
 
