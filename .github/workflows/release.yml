@@ -162,6 +162,35 @@ jobs:
           Compress-Archive -Path package/* -DestinationPath "nettrap-${{ matrix.name }}.zip"
         shell: pwsh
 
+      - name: Verify packaged Unix release in a clean directory
+        if: matrix.archive == 'tar'
+        run: |
+          clean_dir="$(mktemp -d)"
+          trap 'rm -rf "$clean_dir"' EXIT
+          tar -xzf "nettrap-${{ matrix.name }}.tar.gz" -C "$clean_dir"
+          test -x "$clean_dir/nettrap"
+          test -s "$clean_dir/config.toml"
+          for document in LICENSE README.md CHANGELOG.md SECURITY.md KNOWN_LIMITATIONS.md THIRD_PARTY_NOTICES.md PLATFORM_SUPPORT.md PROTOCOL_SUPPORT.md; do
+            test -s "$clean_dir/$document"
+          done
+          "$clean_dir/nettrap" --version
+          "$clean_dir/nettrap" config --defaults > /dev/null
+
+      - name: Verify packaged Windows release in a clean directory
+        if: matrix.archive == 'zip'
+        run: |
+          $cleanDir = Join-Path $env:RUNNER_TEMP "nettrap-clean-${{ matrix.name }}"
+          Remove-Item $cleanDir -Recurse -Force -ErrorAction SilentlyContinue
+          Expand-Archive -Path "nettrap-${{ matrix.name }}.zip" -DestinationPath $cleanDir
+          if (-not (Test-Path "$cleanDir/nettrap.exe")) { throw "Missing nettrap.exe" }
+          if (-not (Test-Path "$cleanDir/config.toml")) { throw "Missing config.toml" }
+          foreach ($document in @("LICENSE", "README.md", "CHANGELOG.md", "SECURITY.md", "KNOWN_LIMITATIONS.md", "THIRD_PARTY_NOTICES.md", "PLATFORM_SUPPORT.md", "PROTOCOL_SUPPORT.md")) {
+            if (-not (Test-Path "$cleanDir/$document")) { throw "Missing $document" }
+          }
+          & "$cleanDir/nettrap.exe" --version
+          & "$cleanDir/nettrap.exe" config --defaults | Out-Null
+        shell: pwsh
+
       - name: Upload packaged release
         uses: actions/upload-artifact@v7.0.1
         with:
