@@ -21,6 +21,9 @@ event contracts before `1.0.0`.
   and use canonical decision values.
 - Docker integration coverage now exercises POP3, IMAP, MQTT, and Redis with
   their real command-line clients.
+- The same smoke image now exercises MariaDB and PostgreSQL clients against the
+  emulated database listeners, covering MySQL handshake/query rejection and
+  PostgreSQL simple-query completion.
 
 ### Changed
 

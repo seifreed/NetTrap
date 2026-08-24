@@ -54,13 +54,30 @@ run_imap_auth_probe() {
     grep -F 'Access denied' <<< "$output"
 }
 
+run_mysql_handshake_probe() {
+    local output status
+    set +e
+    output="$(mariadb --protocol TCP --connect-timeout=5 \
+        -h 127.0.0.1 -P 3306 -u root -e 'SELECT 1' 2>&1)"
+    status=$?
+    set -e
+    test "$status" -eq 1
+    grep -Eq 'ERROR 2013|Lost connection to server during query' <<< "$output"
+}
+
+run_postgres_simple_query() {
+    PGPASSWORD=secret psql --no-psqlrc \
+        'postgresql://user:secret@127.0.0.1:5432/postgres?connect_timeout=5' \
+        -Atqc 'SELECT 1' >/dev/null
+}
+
 echo "Starting NetTrap engine..."
 timeout 120 nettrap run -c /etc/nettrap/config.toml &
 NETTRAP_PID=$!
 sleep 3
 
 echo "Waiting for services..."
-for port in 5353 8080 110 143 1389 1883 2222 2323 6379; do
+for port in 5353 8080 110 143 1389 1883 2222 2323 3306 5432 6379; do
     ready=false
     for _ in $(seq 1 40); do
         if if [ "$port" = 5353 ]; then
@@ -133,6 +150,14 @@ run_test "MQTT publish" \
 
 run_test "Redis PING" \
     "redis-cli -h 127.0.0.1 -p 6379 --raw PING | grep -Fx PONG"
+
+echo ""
+
+echo "--- Database Client Tests ---"
+
+run_test "MySQL client handshake" run_mysql_handshake_probe
+
+run_test "PostgreSQL simple query" run_postgres_simple_query
 
 echo ""
 

@@ -33,8 +33,8 @@ new major is added only after the same E2E suite passes with it.
 | SMB | SMB1/SMB2 parsing and synthetic negotiation | No | Fixed partial SMB2 behavior; not full SMB2/SMB3 file sharing |
 | RDP | X.224/Cookie parsing and synthetic negotiation data | No | No complete RDP security or desktop session |
 | Redis | RESP parsing and a command-response subset | Yes (`redis-cli`, PING) | No persistence, replication, or full Redis semantics |
-| MySQL | Handshake, login metadata, STARTTLS handling, and query parsing | No | No SQL engine or required client compatibility gate |
-| PostgreSQL | Startup/auth/query subset | No | No SQL engine or required client compatibility gate |
+| MySQL | Handshake, login metadata, STARTTLS handling, and query parsing | Yes (`mariadb`, client handshake) | No SQL engine; query attempt closes with the protocol client's lost-connection error |
+| PostgreSQL | Startup/auth/query subset | Yes (`psql`, simple query) | No SQL engine or broad SQL compatibility; synthetic completion has no result rows |
 | LDAP | BER message parsing and bind/search response subset | Yes (`ldapsearch`, when installed) | Not an Active Directory implementation |
 | MQTT | Packet parsing and CONNECT/PUBLISH/SUBSCRIBE response subset | Yes (`mosquitto_pub`) | Not a complete broker |
 | SNMP | BER request parsing and synthetic responses | No | Limited operations/MIB behavior |
