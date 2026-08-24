@@ -8,6 +8,7 @@ use parking_lot::RwLock;
 use crate::prelude::*;
 
 const MAX_DNS_QUERY_ADDITIONALS: u16 = 1;
+const DNS_RECORD_TYPE_OPT: u16 = 41;
 
 fn dns_section_counts(data: &[u8]) -> Option<[u16; 4]> {
     let counts = data.get(4..12)?;
@@ -19,16 +20,54 @@ fn dns_section_counts(data: &[u8]) -> Option<[u16; 4]> {
     ])
 }
 
+fn dns_name_end(data: &[u8], mut offset: usize) -> Option<usize> {
+    loop {
+        let label = *data.get(offset)?;
+        if label == 0 {
+            return offset.checked_add(1);
+        }
+        if label & 0xc0 == 0xc0 {
+            return offset.checked_add(2).filter(|end| *end <= data.len());
+        }
+        if label & 0xc0 != 0 {
+            return None;
+        }
+        offset = offset.checked_add(1 + label as usize)?;
+        if offset > data.len() {
+            return None;
+        }
+    }
+}
+
+fn has_only_edns_additional(data: &[u8], counts: [u16; 4]) -> bool {
+    if counts[3] == 0 {
+        return true;
+    }
+    let Some(question_name_end) = dns_name_end(data, 12) else {
+        return false;
+    };
+    let Some(question_end) = question_name_end.checked_add(4) else {
+        return false;
+    };
+    let Some(additional_name_end) = dns_name_end(data, question_end) else {
+        return false;
+    };
+    data.get(additional_name_end..additional_name_end.saturating_add(2))
+        .is_some_and(|record_type| {
+            u16::from_be_bytes([record_type[0], record_type[1]]) == DNS_RECORD_TYPE_OPT
+        })
+}
+
 /// Safely parse a DNS message from raw bytes, catching panics from the
 /// hickory-proto library (e.g. integer-overflow in TSIG RDATA error
 /// formatting on malformed input). Returns `None` when the underlying
 /// parser panics, so callers' `?` / `map_err` paths degrade to a normal
 /// protocol error instead of crashing the honeypot process.
 fn safe_message_from_vec(data: &[u8]) -> Option<Message> {
-    if !matches!(
-        dns_section_counts(data),
-        Some([1, 0, 0, additionals]) if additionals <= MAX_DNS_QUERY_ADDITIONALS
-    ) {
+    let counts = dns_section_counts(data)?;
+    if !matches!(counts, [1, 0, 0, additionals] if additionals <= MAX_DNS_QUERY_ADDITIONALS)
+        || !has_only_edns_additional(data, counts)
+    {
         return None;
     }
 
@@ -918,6 +957,16 @@ mod tests {
         let query = message.to_vec().expect("EDNS query should serialize");
 
         assert!(safe_message_from_vec(&query).is_some());
+    }
+
+    #[test]
+    fn test_safe_message_from_vec_rejects_non_edns_additional() {
+        let packet = [
+            0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+            0x01, 0x00, 0x01, 0x00, 0xfa, 0x00, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+
+        assert!(safe_message_from_vec(&packet).is_none());
     }
 
     #[test]
