@@ -19,8 +19,10 @@ suite.
 
 ## Policy and Protocols
 
-- TCP applies `pass`, `capture`, `emulate`, `sinkhole`, and `block` decisions
-  and audits the selected rule. UDP policy actions are not yet applied.
+- TCP and UDP apply `pass`, `capture`, `emulate`, `sinkhole`, and `block`
+  decisions and audit the selected rule. Policy matching is currently based on
+  listener configuration plus host/process filters; richer ordered per-flow
+  rules are still pending.
 - Protocol handlers have uneven fidelity. DNS, HTTP(S), TLS, SMTP, and FTP have
   required external-client E2E in the baseline CI contract.
 - SSH does not complete a normal OpenSSH authentication session; SMB is not a

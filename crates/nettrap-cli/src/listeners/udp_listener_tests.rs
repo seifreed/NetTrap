@@ -309,6 +309,85 @@ fn flow_bytes(
 }
 
 #[test]
+fn udp_forward_target_rejects_self_and_invalid_destinations() {
+    let listener: SocketAddr = "127.0.0.1:5353".parse().expect("listener address");
+    let self_destination = SessionDestination::new_unchecked("127.0.0.1", 5353);
+    let other_destination = SessionDestination::new_unchecked("127.0.0.1", 5354);
+    let unspecified = SessionDestination::new_unchecked("0.0.0.0", 5354);
+
+    assert_eq!(
+        resolve_udp_forward_target(&self_destination, listener),
+        None
+    );
+    assert_eq!(
+        resolve_udp_forward_target(&other_destination, listener),
+        Some("127.0.0.1:5354".parse().expect("target address"))
+    );
+    assert_eq!(resolve_udp_forward_target(&unspecified, listener), None);
+}
+
+#[tokio::test]
+async fn udp_forward_relay_returns_upstream_response_to_client() {
+    let listener_socket = UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener socket");
+    let client_socket = UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind client socket");
+    let upstream_socket = UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind upstream socket");
+    let client_addr = client_socket.local_addr().expect("client address");
+    let upstream_addr = upstream_socket.local_addr().expect("upstream address");
+    let ctx = udp_test_context(
+        listener_socket
+            .local_addr()
+            .expect("listener address")
+            .port(),
+        Arc::new(nettrap_proxy::ProtocolRouter::new()),
+        None,
+    );
+    let destination =
+        SessionDestination::new_unchecked(upstream_addr.ip().to_string(), upstream_addr.port());
+
+    let upstream_task = tokio::spawn(async move {
+        let mut query = [0_u8; 32];
+        let (length, peer) = upstream_socket
+            .recv_from(&mut query)
+            .await
+            .expect("receive forwarded query");
+        assert_eq!(&query[..length], b"ping");
+        upstream_socket
+            .send_to(b"pong", peer)
+            .await
+            .expect("send upstream response");
+    });
+
+    forward_udp_datagram(
+        &ctx,
+        &listener_socket,
+        b"ping",
+        &client_addr,
+        &destination,
+        false,
+    )
+    .await
+    .expect("forward datagram");
+
+    let mut response = [0_u8; 32];
+    let (length, peer) = client_socket
+        .recv_from(&mut response)
+        .await
+        .expect("receive forwarded response");
+    assert_eq!(&response[..length], b"pong");
+    assert_eq!(
+        peer,
+        listener_socket.local_addr().expect("listener address")
+    );
+    upstream_task.await.expect("upstream task");
+}
+
+#[test]
 fn explicit_udp_protocol_names_require_exact_or_separator_match() {
     assert_eq!(explicit_udp_protocol_name("daytime-alt"), Some("daytime"));
     assert_eq!(explicit_udp_protocol_name("time_37"), Some("time"));

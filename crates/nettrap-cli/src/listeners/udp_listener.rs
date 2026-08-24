@@ -2,8 +2,10 @@ use nettrap_proto_dns::handler::DnsHandlerTrait;
 use nettrap_protocols::handlers::*;
 use std::collections::HashMap;
 #[cfg(test)]
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::Ipv4Addr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
@@ -24,6 +26,23 @@ pub async fn run_udp_listener(
     socket: UdpSocket,
     bind_addr: std::net::IpAddr,
     output_path: Option<&std::path::Path>,
+) -> crate::Result<()> {
+    run_udp_listener_with_policy(
+        ctx,
+        socket,
+        bind_addr,
+        output_path,
+        nettrap_engine::FlowPolicy::new(nettrap_engine::FlowDecision::Emulate).resolve(true),
+    )
+    .await
+}
+
+pub(crate) async fn run_udp_listener_with_policy(
+    ctx: ListenerContext,
+    socket: UdpSocket,
+    bind_addr: std::net::IpAddr,
+    output_path: Option<&std::path::Path>,
+    policy: nettrap_engine::FlowPolicyResolution,
 ) -> crate::Result<()> {
     let addr = socket.local_addr()?;
     let destination_capture = match configure_udp_destination_capture(&socket, bind_addr) {
@@ -73,6 +92,14 @@ pub async fn run_udp_listener(
             Ok((len, src, packet_destination)) => {
                 if !ctx.is_host_allowed(&canonical_socket_ip_string(&src)) {
                     tracing::debug!("Host {} blocked by filter on {}", src.ip(), ctx.name());
+                    log_event(
+                        output_path.as_deref(),
+                        ctx.name(),
+                        &src,
+                        "policy_decision",
+                        "decision=block rule=host_filter",
+                    )
+                    .await;
                     continue;
                 }
 
@@ -105,7 +132,30 @@ pub async fn run_udp_listener(
                     let _permit = permit; // held until task completes
                     if !apply_udp_process_filter(&ctx_clone, &src, &destination).await {
                         tracing::debug!("UDP process blocked by filter on {}", ctx_clone.name());
+                        log_event(
+                            out_clone.as_deref(),
+                            ctx_clone.name(),
+                            &src,
+                            "policy_decision",
+                            "decision=block rule=process_filter",
+                        )
+                        .await;
                         return;
+                    }
+
+                    if is_new_session {
+                        log_event(
+                            out_clone.as_deref(),
+                            ctx_clone.name(),
+                            &src,
+                            "policy_decision",
+                            &format!(
+                                "decision={} rule={}",
+                                policy.decision(),
+                                policy.rule().as_str()
+                            ),
+                        )
+                        .await;
                     }
 
                     tracing::debug!(
@@ -119,7 +169,53 @@ pub async fn run_udp_listener(
                         tracing::debug!("Hexdump:\n{}", crate::hexdump::hexdump(&query_data, 256));
                     }
 
-                    ctx_clone.write_pcap_event_udp_for_destination(&query_data, &src, &destination);
+                    match policy.decision() {
+                        nettrap_engine::FlowDecision::Pass
+                        | nettrap_engine::FlowDecision::Capture => {
+                            if let Err(error) = forward_udp_datagram(
+                                &ctx_clone,
+                                &socket_clone,
+                                &query_data,
+                                &src,
+                                &destination,
+                                matches!(policy.decision(), nettrap_engine::FlowDecision::Capture),
+                            )
+                            .await
+                            {
+                                tracing::debug!("UDP forward from {} failed: {}", src, error);
+                            }
+                            if is_new_session {
+                                ctx_clone.fire_execute_cmd_for_session(&src, "UDP", &destination);
+                            }
+                            return;
+                        }
+                        nettrap_engine::FlowDecision::Sinkhole => {
+                            ctx_clone.write_pcap_event_udp_for_destination(
+                                &query_data,
+                                &src,
+                                &destination,
+                            );
+                            ctx_clone.update_session_bytes(
+                                &src,
+                                "UDP",
+                                &destination,
+                                len as u64,
+                                0,
+                            );
+                            if is_new_session {
+                                ctx_clone.fire_execute_cmd_for_session(&src, "UDP", &destination);
+                            }
+                            return;
+                        }
+                        nettrap_engine::FlowDecision::Block => return,
+                        nettrap_engine::FlowDecision::Emulate => {
+                            ctx_clone.write_pcap_event_udp_for_destination(
+                                &query_data,
+                                &src,
+                                &destination,
+                            );
+                        }
+                    }
 
                     let packet = UdpPacket {
                         output_path: out_clone.as_deref(),
@@ -168,6 +264,88 @@ pub async fn run_udp_listener(
                 tracing::warn!("UDP recv_from error: {}", e);
             }
         }
+    }
+}
+
+async fn forward_udp_datagram(
+    ctx: &ListenerContext,
+    listener_socket: &UdpSocket,
+    query: &[u8],
+    src: &SocketAddr,
+    destination: &SessionDestination,
+    capture: bool,
+) -> crate::Result<()> {
+    let local_addr = listener_socket.local_addr()?;
+    let target = resolve_udp_forward_target(destination, local_addr).ok_or_else(|| {
+        crate::Error::Other(format!(
+            "no usable UDP original destination {}:{}",
+            destination.ip(),
+            destination.port()
+        ))
+    })?;
+    let bind_addr = match target.ip() {
+        IpAddr::V4(_) => "0.0.0.0:0",
+        IpAddr::V6(_) => "[::]:0",
+    };
+    let upstream = UdpSocket::bind(bind_addr).await?;
+    upstream.connect(target).await?;
+    let mut response = [0_u8; u16::MAX as usize];
+    let response_length = tokio::time::timeout(Duration::from_millis(ctx.timeout_ms()), async {
+        upstream.send(query).await?;
+        upstream.recv(&mut response).await
+    })
+    .await
+    .map_err(|_| {
+        crate::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "UDP forward response timed out",
+        ))
+    })??;
+
+    if capture {
+        ctx.write_pcap_event_udp_for_destination(query, src, destination);
+        ctx.write_pcap_response_udp_for_destination(&response[..response_length], src, destination);
+    }
+    listener_socket
+        .send_to(&response[..response_length], src)
+        .await?;
+    ctx.update_session_bytes(
+        src,
+        "UDP",
+        destination,
+        query.len() as u64,
+        response_length as u64,
+    );
+    Ok(())
+}
+
+fn resolve_udp_forward_target(
+    destination: &SessionDestination,
+    listener_addr: SocketAddr,
+) -> Option<SocketAddr> {
+    if destination.port() == 0 {
+        return None;
+    }
+    let ip = normalize_udp_forward_ip(destination.ip().parse().ok()?);
+    let unusable = match ip {
+        IpAddr::V4(ip) => ip.is_unspecified() || ip.is_multicast() || ip.is_broadcast(),
+        IpAddr::V6(ip) => ip.is_unspecified() || ip.is_multicast(),
+    };
+    if unusable {
+        return None;
+    }
+    let target = SocketAddr::new(ip, destination.port());
+    let listener_addr = SocketAddr::new(
+        normalize_udp_forward_ip(listener_addr.ip()),
+        listener_addr.port(),
+    );
+    (target != listener_addr).then_some(target)
+}
+
+fn normalize_udp_forward_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(ip) => IpAddr::V4(ip),
+        IpAddr::V6(ip) => ip.to_ipv4_mapped().map_or(IpAddr::V6(ip), IpAddr::V4),
     }
 }
 

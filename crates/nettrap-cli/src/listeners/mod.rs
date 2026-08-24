@@ -23,3 +23,4 @@ pub use tcp_handler::{
 pub use tcp_listener::run_tcp_listener;
 pub(crate) use tcp_listener::run_tcp_listener_with_policy;
 pub use udp_listener::run_udp_listener;
+pub(crate) use udp_listener::run_udp_listener_with_policy;

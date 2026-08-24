@@ -9,7 +9,7 @@ use super::send_fatal_runtime_error;
 use crate::config::EngineConfig;
 use crate::engine::startup::StartupContext;
 use crate::engine::startup::build_listener_context;
-use crate::listeners::{run_tcp_listener_with_policy, run_udp_listener};
+use crate::listeners::{run_tcp_listener_with_policy, run_udp_listener_with_policy};
 
 pub(super) fn has_spawnable_listeners(config: &EngineConfig) -> bool {
     config
@@ -45,6 +45,7 @@ enum PreparedListener {
         socket: UdpSocket,
         bind_addr: std::net::IpAddr,
         ctx: Box<crate::listener_context::ListenerContext>,
+        policy: nettrap_engine::FlowPolicyResolution,
         output_path: Option<PathBuf>,
     },
 }
@@ -199,6 +200,7 @@ pub(super) async fn spawn_listeners(
                     socket,
                     bind_addr,
                     ctx: Box::new(listener_ctx),
+                    policy: flow_policy.resolve(listener.emulate_response),
                     output_path,
                 });
             }
@@ -250,13 +252,20 @@ pub(super) async fn spawn_listeners(
                 socket,
                 bind_addr,
                 ctx,
+                policy,
                 output_path,
             } => {
                 let runtime_health = Arc::clone(&runtime_health);
                 let fatal_runtime_tx = fatal_runtime_tx.clone();
                 handles.push(tokio::spawn(async move {
-                    let result =
-                        run_udp_listener(*ctx, socket, bind_addr, output_path.as_deref()).await;
+                    let result = run_udp_listener_with_policy(
+                        *ctx,
+                        socket,
+                        bind_addr,
+                        output_path.as_deref(),
+                        policy,
+                    )
+                    .await;
                     let message = format!("UDP listener '{}' stopped unexpectedly", name);
                     match &result {
                         Ok(()) => {
