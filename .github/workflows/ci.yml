@@ -43,6 +43,9 @@ jobs:
           if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
             sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
           fi
+          if [ "${{ matrix.target }}" = "x86_64-unknown-linux-gnu" ]; then
+            sudo apt-get install -y iproute2 iptables nftables
+          fi
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -89,6 +92,14 @@ jobs:
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: |
           docker run --rm --entrypoint /bin/bash nettrap:test /app/integration_test.sh
+
+      - name: Run network namespace interception E2E (x64 only)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          sudo env \
+            NETTRAP_NAMESPACE_E2E=1 \
+            NETTRAP_BIN="$GITHUB_WORKSPACE/target/${{ matrix.target }}/release/nettrap" \
+            bash tests/network_namespace_e2e.sh
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7.0.1
