@@ -28,6 +28,8 @@ event contracts before `1.0.0`.
   synthetic SMB listener and records that file-sharing sessions remain out of scope.
 - Scheduled heavy quality gates now run a bounded HTTP/DNS runtime soak and
   exercise every registered fuzz target.
+- Docker smoke now holds 128 concurrent HTTP sockets and verifies that a normal
+  request remains available after the listener limit is reached.
 
 ### Changed
 

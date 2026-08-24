@@ -50,6 +50,20 @@ run_concurrent_http_burst() {
     test "$(grep -c '^200$' <<< "$output")" -eq 64
 }
 
+run_connection_exhaustion_probe() {
+    local -a pids=()
+    for _ in $(seq 1 128); do
+        (exec 3<>/dev/tcp/127.0.0.1/8080; sleep 2) &
+        pids+=("$!")
+    done
+    sleep 1
+    test "$(curl --resolve example.test:8080:127.0.0.1 -s -o /dev/null \
+        -w '%{http_code}' http://example.test:8080/)" = "200"
+    for pid in "${pids[@]}"; do
+        wait "$pid" 2>/dev/null || true
+    done
+}
+
 run_imap_auth_probe() {
     local output status
     set +e
@@ -141,6 +155,7 @@ run_test "HTTP HEADERS" \
 
 run_test "HTTP bounded burst" run_bounded_http_burst
 run_test "HTTP concurrent burst" run_concurrent_http_burst
+run_test "HTTP connection exhaustion" run_connection_exhaustion_probe
 
 echo ""
 
