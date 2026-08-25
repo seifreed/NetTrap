@@ -105,7 +105,7 @@ fn spawnable_default_listeners<'a>(
     })
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 fn find_spawnable_default_listener<'a>(
     config: &'a EngineConfig,
     listener_name: &'a str,
@@ -123,7 +123,7 @@ fn same_listener_name(left: &str, right: &str) -> bool {
     left.to_lowercase() == right.to_lowercase()
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 pub(crate) fn resolve_default_listener_port(
     config: &EngineConfig,
     listener_name: &str,

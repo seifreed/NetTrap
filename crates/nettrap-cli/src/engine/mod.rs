@@ -25,7 +25,7 @@ pub(crate) use config_load::validate_adapter_configuration;
 #[cfg(test)]
 use config_load::{apply_cli_overrides, load_api_config};
 pub use runtime::Engine;
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 pub(crate) use spawn::listener_should_spawn;
 #[cfg(test)]
 use spawn::validate_listener_presence;

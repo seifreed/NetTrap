@@ -271,6 +271,7 @@ fn build_windows_interceptor(
 
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     let redirects = build_windows_redirect_rules(config, &port_forward_table);
+    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     let interceptor = builder
         .mode(InterceptionMode::WinDivert)
         .build_windivert()
