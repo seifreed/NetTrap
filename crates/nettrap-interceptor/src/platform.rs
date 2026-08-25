@@ -163,7 +163,7 @@ pub mod windivert {
         }
 
         fn touch(&mut self, key: &FlowKey, now: Instant) {
-            if self.entries.get(key).is_none() {
+            if !self.entries.contains_key(key) {
                 return;
             }
             if let Some(flow) = self.entries.get_mut(key) {
