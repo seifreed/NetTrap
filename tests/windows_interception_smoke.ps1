@@ -17,6 +17,7 @@ attribution_enabled = false
 default_decision = "emulate"
 redirect_all_traffic = true
 default_tcp_listener = "http-smoke"
+default_udp_listener = "dns-smoke"
 pcap_enabled = false
 output_format = "jsonl"
 
@@ -24,6 +25,14 @@ output_format = "jsonl"
 name = "http-smoke"
 protocol = "tcp"
 port = 18088
+bind_address = "127.0.0.1"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "dns-smoke"
+protocol = "udp"
+port = 53539
 bind_address = "127.0.0.1"
 enabled = true
 emulate_response = true
@@ -64,10 +73,15 @@ try {
         throw "WinDivert interception did not redirect the HTTP request. $stderr"
     }
 
+    $dnsAnswer = Resolve-DnsName -Name "example.test" -Type A -Server "198.18.0.1" -DnsOnly -QuickTimeout
+    if (-not ($dnsAnswer | Where-Object { $_.IPAddress -match '^\d+(\.\d+){3}$' })) {
+        throw "WinDivert interception did not redirect the UDP DNS request"
+    }
+
     if ($process.HasExited) {
         throw "NetTrap exited after interception smoke (code $($process.ExitCode))"
     }
-    Write-Host "PASS: Windows WinDivert TCP interception smoke"
+    Write-Host "PASS: Windows WinDivert TCP/UDP interception smoke"
 } finally {
     Stop-NetTrap
 }
