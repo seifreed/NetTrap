@@ -210,6 +210,7 @@ jobs:
             THIRD_PARTY_NOTICES.md PLATFORM_SUPPORT.md PROTOCOL_SUPPORT.md package/
           "target/${{ matrix.target }}/release/nettrap" config --defaults > package/config.toml
           tar -czf "nettrap-${{ matrix.name }}.tar.gz" -C package .
+          cp "target/${{ matrix.target }}/release/nettrap" "nettrap-${{ matrix.name }}.binary"
 
       - name: Package Linux formats
         if: runner.os == 'Linux'
@@ -282,6 +283,7 @@ jobs:
           $wixArgs += @('-o', "nettrap-${{ matrix.name }}.msi")
           & wix @wixArgs
           if ($LASTEXITCODE -ne 0) { throw "WiX failed with exit code $LASTEXITCODE" }
+          Copy-Item "target/${{ matrix.target }}/release/nettrap.exe" "nettrap-${{ matrix.name }}.binary"
         shell: pwsh
 
       - name: Verify packaged Unix release in a clean directory
@@ -297,6 +299,8 @@ jobs:
           done
           "$clean_dir/nettrap" --version
           "$clean_dir/nettrap" config --defaults > /dev/null
+          test -x "nettrap-${{ matrix.name }}.binary"
+          "nettrap-${{ matrix.name }}.binary" --version
 
       - name: Verify packaged Linux formats
         if: runner.os == 'Linux'
@@ -335,6 +339,7 @@ jobs:
           }
           & "$cleanDir/nettrap.exe" --version
           & "$cleanDir/nettrap.exe" config --defaults | Out-Null
+          if ((Get-Item "nettrap-${{ matrix.name }}.binary").Length -le 0) { throw "Empty raw binary" }
         shell: pwsh
 
       - name: Verify packaged Windows MSI in a clean directory
@@ -368,6 +373,7 @@ jobs:
           name: nettrap-${{ matrix.name }}
           path: |
             nettrap-${{ matrix.name }}.${{ matrix.archive == 'tar' && 'tar.gz' || 'zip' }}
+            nettrap-${{ matrix.name }}.binary
             nettrap-${{ matrix.name }}.msi
             nettrap-${{ matrix.name }}.deb
             nettrap-${{ matrix.name }}.rpm
@@ -486,6 +492,12 @@ jobs:
           test -f releases/nettrap-windows-aarch64.zip
           test -f releases/nettrap-windows-x86_64.msi
           test -f releases/nettrap-windows-aarch64.msi
+          test -f releases/nettrap-linux-x86_64.binary
+          test -f releases/nettrap-linux-aarch64.binary
+          test -f releases/nettrap-macos-x86_64.binary
+          test -f releases/nettrap-macos-aarch64.binary
+          test -f releases/nettrap-windows-x86_64.binary
+          test -f releases/nettrap-windows-aarch64.binary
           test -f releases/nettrap-oci-image.txt
           test -f releases/nettrap-kubernetes-deployment.yaml
 
@@ -516,7 +528,8 @@ jobs:
         run: |
           mkdir -p target
           sha256sum releases/nettrap-*.tar.gz releases/nettrap-*.zip \
-            releases/nettrap-*.msi releases/nettrap-*.deb releases/nettrap-*.rpm > target/release-subjects.sha256
+            releases/nettrap-*.binary releases/nettrap-*.msi \
+            releases/nettrap-*.deb releases/nettrap-*.rpm > target/release-subjects.sha256
           (cd releases && sha256sum nettrap-*) > releases/SHA256SUMS
 
       - name: Generate Homebrew formula
@@ -534,7 +547,8 @@ jobs:
           COSIGN_EXPERIMENTAL: "1"
         run: |
           for artifact in releases/nettrap-*.tar.gz releases/nettrap-*.zip \
-              releases/nettrap-*.msi releases/nettrap-*.deb releases/nettrap-*.rpm; do
+              releases/nettrap-*.binary releases/nettrap-*.msi \
+              releases/nettrap-*.deb releases/nettrap-*.rpm; do
             cosign sign-blob --yes --bundle "${artifact}.sigstore.json" "$artifact"
           done
 
@@ -544,7 +558,8 @@ jobs:
           COSIGN_IDENTITY: "https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/tags/${{ github.ref_name }}"
         run: |
           for artifact in releases/nettrap-*.tar.gz releases/nettrap-*.zip \
-              releases/nettrap-*.msi releases/nettrap-*.deb releases/nettrap-*.rpm; do
+              releases/nettrap-*.binary releases/nettrap-*.msi \
+              releases/nettrap-*.deb releases/nettrap-*.rpm; do
             cosign verify-blob \
               --bundle "${artifact}.sigstore.json" \
               --certificate-identity "$COSIGN_IDENTITY" \
@@ -566,7 +581,8 @@ jobs:
       - name: Verify release attestations
         run: |
           for archive in releases/nettrap-*.tar.gz releases/nettrap-*.zip \
-              releases/nettrap-*.msi releases/nettrap-*.deb releases/nettrap-*.rpm; do
+              releases/nettrap-*.binary releases/nettrap-*.msi \
+              releases/nettrap-*.deb releases/nettrap-*.rpm; do
             gh attestation verify "$archive" --repo "$GITHUB_REPOSITORY"
           done
         env:
