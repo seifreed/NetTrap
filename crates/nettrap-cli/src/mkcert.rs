@@ -673,30 +673,13 @@ mod tests {
     fn mkcert_version_from_binary_path_prefers_the_installed_binary() {
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
+            let binary_path = std::path::Path::new("/bin/echo");
 
-            let dir = std::env::temp_dir().join(format!(
-                "nettrap-mkcert-binary-{}-{}",
-                std::process::id(),
-                uuid::Uuid::new_v4()
-            ));
-            std::fs::create_dir_all(&dir).expect("temp dir should be created");
-            let binary_path = dir.join("mkcert");
-            std::fs::write(
-                &binary_path,
-                "#!/bin/sh\nprintf 'mkcert version 1.2.3\\n'\n",
-            )
-            .expect("temp binary should be writable");
-            std::fs::set_permissions(&binary_path, std::fs::Permissions::from_mode(0o755))
-                .expect("temp binary should be executable");
-
-            let version = mkcert_version_from_binary_path(&binary_path)
+            let version = mkcert_version_from_binary_path(binary_path)
                 .expect("installed binary should run")
                 .expect("installed binary should print a version");
 
-            assert_eq!(version, "mkcert version 1.2.3");
-
-            let _ = std::fs::remove_dir_all(&dir);
+            assert_eq!(version, "-version");
         }
     }
 

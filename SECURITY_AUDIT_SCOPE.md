@@ -37,10 +37,15 @@ actionlint .github/workflows/*.yml
 bash tests/verify_platform.sh
 # On a privileged Windows x86_64 runner with WinDivert files installed:
 pwsh -File tests/windows_interception_smoke.ps1 -BinaryPath .\nettrap.exe
+# Requires authenticated gh CLI; writes only to target/.
+bash scripts/security-evidence.sh
 ```
 
 The scheduled security workflow repeats OpenSSF Scorecard, CodeQL for Rust,
-and dependency audits.
+dependency audits, and pinned-action checks. `security-evidence.sh` also
+captures the repository branch-protection contract and current Code Scanning
+alert set for an auditor handoff; generated files are intentionally kept under
+`target/security-audit/`.
 The release workflow verifies Sigstore bundles, GitHub artifact attestations,
 SBOMs, and checksums before publishing.
 
