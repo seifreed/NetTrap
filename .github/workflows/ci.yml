@@ -313,7 +313,8 @@ jobs:
           "@ | Out-File -FilePath "config.toml" -Encoding utf8
         shell: pwsh
 
-      - name: Smoke test binary
+      - name: Smoke test runnable binary
+        if: matrix.arch != 'arm64'
         run: |
           & "target/${{ matrix.target }}/release/nettrap.exe" --version
           if ($LASTEXITCODE -ne 0) {
