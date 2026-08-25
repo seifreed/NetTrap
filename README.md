@@ -110,7 +110,8 @@ docker run -d --name nettrap \
 
 GitHub releases publish Linux `.deb` and `.rpm` packages, macOS/Linux tarballs,
 Windows ZIP/MSI installers, and a Homebrew formula generated from the release
-checksums. Verify downloaded assets with `SHA256SUMS` and the commands in
+checksums. Verify downloaded assets with `SHA256SUMS`, the adjacent
+`.sigstore.json` bundles, and the commands in
 [RELEASE_VERIFICATION.md](RELEASE_VERIFICATION.md).
 
 ---

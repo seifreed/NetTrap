@@ -456,6 +456,32 @@ jobs:
           test -s releases/nettrap.rb
           (cd releases && sha256sum nettrap-*) > releases/SHA256SUMS
 
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign release artifacts
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          for artifact in releases/nettrap-*.tar.gz releases/nettrap-*.zip \
+              releases/nettrap-*.msi releases/nettrap-*.deb releases/nettrap-*.rpm; do
+            cosign sign-blob --yes --bundle "${artifact}.sigstore.json" "$artifact"
+          done
+
+      - name: Verify release artifact signatures
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+          COSIGN_IDENTITY: "https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/tags/${{ github.ref_name }}"
+        run: |
+          for artifact in releases/nettrap-*.tar.gz releases/nettrap-*.zip \
+              releases/nettrap-*.msi releases/nettrap-*.deb releases/nettrap-*.rpm; do
+            cosign verify-blob \
+              --bundle "${artifact}.sigstore.json" \
+              --certificate-identity "$COSIGN_IDENTITY" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              "$artifact"
+          done
+
       - name: Attest build provenance
         uses: actions/attest@v4
         with:

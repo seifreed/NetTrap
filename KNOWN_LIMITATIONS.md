@@ -42,7 +42,8 @@ See [PROTOCOL_SUPPORT.md](PROTOCOL_SUPPORT.md) for the handler-by-handler matrix
 - Event, report, API, and configuration schemas carry explicit version fields,
   and `config --migrate` handles older configuration versions; long-term
   compatibility guarantees are not yet provided.
-- Release binaries are not platform code-signed. GitHub release artifacts do
+- Release binaries are not platform code-signed for Windows, macOS, or Linux.
+  GitHub release artifacts are keylessly signed with Sigstore bundles and also
   include checksums, SBOMs, and provenance attestations.
 - Release gates include a bounded 60-second HTTP/DNS soak and a 128-socket
   connection-exhaustion smoke. The scheduled weekly gate extends the soak to
