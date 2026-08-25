@@ -43,3 +43,10 @@ Run NetTrap only in an isolated analysis lab. The REST API rejects non-loopback
 binds while it is unauthenticated. Do not use Linux transparent redirection on
 a production host or install the generated CA into a production trust store. See
 [PLATFORM_SUPPORT.md](PLATFORM_SUPPORT.md) for platform-specific boundaries.
+
+## Audit Status
+
+Continuous CodeQL and dependency auditing run in
+`.github/workflows/security-analysis.yml`. An independent third-party audit is
+not yet complete; its required scope and acceptance criteria are documented in
+[SECURITY_AUDIT_SCOPE.md](SECURITY_AUDIT_SCOPE.md).
