@@ -1,4 +1,4 @@
-FROM rust:1.97.1-slim-bookworm AS builder
+FROM rust:1.97.1-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcbc3f2132ac71a704bcdd3 AS builder
 
 WORKDIR /app
 
@@ -14,7 +14,7 @@ COPY crates ./crates
 
 RUN cargo build --release
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
 
 WORKDIR /app
 
