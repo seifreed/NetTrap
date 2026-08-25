@@ -317,10 +317,21 @@ jobs:
         run: |
           & "target/${{ matrix.target }}/release/nettrap.exe" --version
           & "target/${{ matrix.target }}/release/nettrap.exe" config --defaults | Out-Null
-          $interceptOutput = & "target/${{ matrix.target }}/release/nettrap.exe" run --intercept -c config.toml 2>&1 | Out-String
-          if ($LASTEXITCODE -eq 0) {
+          $stdoutPath = Join-Path $env:RUNNER_TEMP "nettrap-intercept.stdout"
+          $stderrPath = Join-Path $env:RUNNER_TEMP "nettrap-intercept.stderr"
+          $process = Start-Process `
+            -FilePath "target/${{ matrix.target }}/release/nettrap.exe" `
+            -ArgumentList @("run", "--intercept", "-c", "config.toml") `
+            -Wait -PassThru -NoNewWindow `
+            -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath
+          if ($process.ExitCode -eq 0) {
             throw "Windows transparent interception unexpectedly succeeded"
           }
+          $interceptOutput = @(
+            if (Test-Path $stdoutPath) { Get-Content $stdoutPath -Raw }
+            if (Test-Path $stderrPath) { Get-Content $stderrPath -Raw }
+          ) -join [Environment]::NewLine
           if ($interceptOutput -notmatch "not supported") {
             throw "Windows interception rejection did not report the supported-mode contract: $interceptOutput"
           }

@@ -170,7 +170,7 @@ jobs:
       - name: Run coverage report
         run: |
           mkdir -p target/quality-gates/coverage
-          cargo tarpaulin --fail-under 70 --out Xml --out Html --output-dir target/quality-gates/coverage
+          cargo tarpaulin --fail-under 70 --out Xml --out Html --output-dir target/quality-gates/coverage -- --test-threads=1
 
       - name: Upload coverage reports
         uses: actions/upload-artifact@v7.0.1
