@@ -3,6 +3,8 @@
 set -euo pipefail
 
 duration="${NETTRAP_SOAK_SECONDS:-60}"
+concurrency="${NETTRAP_SOAK_CONCURRENCY:-8}"
+connection_churn="${NETTRAP_SOAK_CONNECTION_CHURN:-64}"
 binary="${NETTRAP_BIN:-./target/release/nettrap}"
 workdir="$(mktemp -d)"
 config="$workdir/config.toml"
@@ -21,6 +23,14 @@ trap cleanup EXIT
 
 if [[ ! "$duration" =~ ^[1-9][0-9]*$ ]]; then
     echo "NETTRAP_SOAK_SECONDS must be a positive integer" >&2
+    exit 1
+fi
+if [[ ! "$concurrency" =~ ^[1-9][0-9]*$ ]] || (( concurrency > 64 )); then
+    echo "NETTRAP_SOAK_CONCURRENCY must be between 1 and 64" >&2
+    exit 1
+fi
+if [[ ! "$connection_churn" =~ ^[1-9][0-9]*$ ]] || (( connection_churn > 256 )); then
+    echo "NETTRAP_SOAK_CONNECTION_CHURN must be between 1 and 256" >&2
     exit 1
 fi
 if [[ ! -x "$binary" ]]; then
@@ -76,11 +86,39 @@ deadline=$((SECONDS + duration))
 http_requests=0
 dns_requests=0
 while (( SECONDS < deadline )); do
+    pids=()
+    for _ in $(seq 1 "$concurrency"); do
+        (
+            curl --noproxy '*' --silent --fail --max-time 2 \
+                --no-keepalive -H 'Host: soak.example.test' \
+                http://127.0.0.1:18080/ >/dev/null
+            dig @127.0.0.1 -p 18053 soak.example.test A +short \
+                | grep -Eq '^[0-9]+(\.[0-9]+){3}$'
+        ) &
+        pids+=("$!")
+    done
+    for pid in "${pids[@]}"; do
+        wait "$pid"
+    done
+
+    churn_pids=()
+    for _ in $(seq 1 "$connection_churn"); do
+        (
+            exec 3<>/dev/tcp/127.0.0.1/18080
+            sleep 0.2
+            exec 3>&-
+        ) &
+        churn_pids+=("$!")
+    done
+    sleep 0.1
     curl --noproxy '*' --silent --fail --max-time 2 \
         -H 'Host: soak.example.test' http://127.0.0.1:18080/ >/dev/null
-    dig @127.0.0.1 -p 18053 soak.example.test A +short | grep -Eq '^[0-9]+(\.[0-9]+){3}$'
-    http_requests=$((http_requests + 1))
-    dns_requests=$((dns_requests + 1))
+    for pid in "${churn_pids[@]}"; do
+        wait "$pid" 2>/dev/null || true
+    done
+
+    http_requests=$((http_requests + concurrency + 1))
+    dns_requests=$((dns_requests + concurrency))
 done
 
 if ! kill -0 "$nettrap_pid" 2>/dev/null; then
@@ -88,4 +126,4 @@ if ! kill -0 "$nettrap_pid" 2>/dev/null; then
     exit 1
 fi
 
-echo "PASS: ${duration}s soak completed (${http_requests} HTTP, ${dns_requests} DNS requests)"
+echo "PASS: ${duration}s concurrent soak completed (${http_requests} HTTP, ${dns_requests} DNS requests, ${connection_churn}-connection churn)"
