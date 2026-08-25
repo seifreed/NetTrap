@@ -357,7 +357,6 @@ jobs:
         shell: pwsh
 
       - name: Run Windows listener parity smoke
-        if: matrix.arch != 'arm64'
         run: ./tests/windows_listener_smoke.ps1 -BinaryPath "${{ github.workspace }}\target\${{ matrix.target }}\release\nettrap.exe"
         shell: pwsh
 

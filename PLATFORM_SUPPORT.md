@@ -11,7 +11,7 @@ the release workflow; it does not imply transparent interception support.
 | macOS x86_64 | Yes | Supported | Not supported | Native Rust gates plus `dig` and `curl` E2E |
 | macOS ARM64 | Yes | Supported | Not supported | Native Rust gates plus `dig` and `curl` E2E |
 | Windows x86_64 | Yes | Supported | Experimental WinDivert TCP/UDP NAT redirection | Native Rust gates, binary/config smoke, listener parity, and verified WinDivert HTTP redirect smoke |
-| Windows ARM64 | Yes | Supported | Not supported; Npcap capture is experimental | Native Rust gates and binary/config smoke tests |
+| Windows ARM64 | Yes | Supported | Not supported; Npcap capture is experimental | Native Rust gates, binary/config smoke, and TCP/UDP listener parity smoke |
 | Linux x86/ARM32 | No | Not supported | Not supported | No CI target or release asset |
 | Windows x86 | No | Not supported | Not supported | No CI target or release asset |
 
