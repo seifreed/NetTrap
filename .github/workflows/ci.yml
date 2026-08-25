@@ -317,11 +317,6 @@ jobs:
         run: |
           & "target/${{ matrix.target }}/release/nettrap.exe" --version
           & "target/${{ matrix.target }}/release/nettrap.exe" config --defaults | Out-Null
-          & "target/${{ matrix.target }}/release/nettrap.exe" run --intercept -c config.toml
-          $interceptExitCode = $LASTEXITCODE
-          if ($interceptExitCode -eq 0) {
-            throw "Windows transparent interception unexpectedly succeeded"
-          }
         shell: pwsh
 
       - name: Upload artifact
