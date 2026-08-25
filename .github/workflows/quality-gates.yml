@@ -135,7 +135,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libpcap-dev libnetfilter-queue-dev libnfnetlink-dev curl dnsutils
+          sudo apt-get install -y libpcap-dev libnetfilter-queue-dev libnfnetlink-dev curl dnsutils netcat-openbsd python3
 
       - name: Install stable Rust toolchain
         uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable (2026-08-25)
@@ -201,6 +201,12 @@ jobs:
         env:
           NETTRAP_SOAK_SECONDS: ${{ github.event_name == 'schedule' && '600' || '60' }}
         run: bash tests/soak_test.sh
+
+      - name: Run repeated protocol matrix soak
+        env:
+          NETTRAP_BIN: ./target/release/nettrap
+          NETTRAP_MATRIX_REPEAT: ${{ github.event_name == 'schedule' && '10' || '2' }}
+        run: bash tests/protocol_matrix_smoke.sh
 
       - name: Run benchmarks
         run: |

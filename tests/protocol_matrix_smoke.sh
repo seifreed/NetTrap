@@ -7,6 +7,7 @@ workdir="$(mktemp -d)"
 config="$workdir/config.toml"
 log="$workdir/nettrap.log"
 nettrap_pid=""
+repeat="${NETTRAP_MATRIX_REPEAT:-1}"
 
 tcp_names=(
     dns http smtp ftp pop3 imap irc telnet finger ident daytime time chargen
@@ -18,6 +19,11 @@ udp_names=(dns tftp snmp sip upnp ntp coap quic daytime time chargen quotd syslo
 # These handlers intentionally record traffic without synthesizing a wire response.
 tcp_capture_only=(syslogrecv tls dummy upnp)
 udp_capture_only=(quic syslogrecv upnp)
+
+if [[ ! "$repeat" =~ ^[1-9][0-9]*$ ]] || (( repeat > 32 )); then
+    echo "NETTRAP_MATRIX_REPEAT must be between 1 and 32" >&2
+    exit 1
+fi
 
 contains_name() {
     local needle=$1
@@ -150,6 +156,34 @@ PY
 
 tcp_responses=0
 udp_responses=0
+fd_baseline=""
+rss_baseline_kb=""
+if [[ -d "/proc/$nettrap_pid/fd" ]]; then
+    fd_baseline="$(find "/proc/$nettrap_pid/fd" -mindepth 1 -maxdepth 1 -type l | wc -l | tr -d ' ')"
+    rss_baseline_kb="$(awk '/^VmRSS:/ {print $2; exit}' "/proc/$nettrap_pid/status")"
+fi
+
+assert_resource_bounds() {
+    local fd_count rss_kb
+    if [[ -n "$fd_baseline" ]]; then
+        fd_count="$(find "/proc/$nettrap_pid/fd" -mindepth 1 -maxdepth 1 -type l | wc -l | tr -d ' ')"
+        if (( fd_count > fd_baseline + 256 )); then
+            echo "TCP/UDP protocol matrix exceeded file-descriptor bound ($fd_count, baseline $fd_baseline)" >&2
+            tail -40 "$log" >&2
+            exit 1
+        fi
+    fi
+    if [[ -n "$rss_baseline_kb" ]]; then
+        rss_kb="$(awk '/^VmRSS:/ {print $2; exit}' "/proc/$nettrap_pid/status")"
+        if [[ -n "$rss_kb" ]] && (( rss_kb > rss_baseline_kb + 131072 )); then
+            echo "TCP/UDP protocol matrix exceeded RSS bound (${rss_kb}KB, baseline ${rss_baseline_kb}KB)" >&2
+            tail -40 "$log" >&2
+            exit 1
+        fi
+    fi
+}
+
+for round in $(seq 1 "$repeat"); do
 for index in "${!tcp_ports[@]}"; do
     name=${tcp_names[$index]}
     request="$workdir/tcp-$name.request"
@@ -206,9 +240,20 @@ for index in "${!udp_ports[@]}"; do
     fi
 done
 
+    malformed_http="$workdir/malformed-http-$round.request"
+    {
+        printf 'GET /'
+        head -c 4096 /dev/zero | tr '\0' 'A'
+        printf ' HTTP/1.1\r\nHost: matrix.test\r\n\r\n'
+    } >"$malformed_http"
+    timeout 2 nc 127.0.0.1 "${tcp_ports[1]}" <"$malformed_http" >/dev/null 2>&1 || true
+    printf '\xff\x00\xff\x00' | timeout 2 nc -u -w 1 127.0.0.1 "${udp_ports[0]}" >/dev/null 2>&1 || true
+    assert_resource_bounds
+done
+
 if ! kill -0 "$nettrap_pid" 2>/dev/null; then
     cat "$log" >&2
     exit 1
 fi
 
-echo "PASS: protocol matrix smoke exercised ${#tcp_names[@]} TCP and ${#udp_names[@]} UDP handlers (${tcp_responses} TCP, ${udp_responses} UDP responses)"
+echo "PASS: protocol matrix smoke exercised ${#tcp_names[@]} TCP and ${#udp_names[@]} UDP handlers for ${repeat} round(s) (${tcp_responses} TCP, ${udp_responses} UDP responses)"
