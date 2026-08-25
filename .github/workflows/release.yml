@@ -54,6 +54,9 @@ jobs:
       - name: Run integration tests
         run: docker run --rm --entrypoint /bin/bash nettrap:release-test /app/integration_test.sh
 
+      - name: Run protocol matrix smoke
+        run: docker run --rm --entrypoint /bin/bash nettrap:release-test /app/protocol_matrix_smoke.sh
+
   build:
     name: Build ${{ matrix.name }}
     needs: [quality-gates, security-audit]

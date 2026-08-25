@@ -42,6 +42,7 @@ COPY --from=builder /app/target/release/nettrap /usr/local/bin/
 COPY defaultFiles /app/defaultFiles
 COPY config/default.toml /etc/nettrap/config.toml
 COPY tests/integration_test.sh /app/integration_test.sh
+COPY tests/protocol_matrix_smoke.sh /app/protocol_matrix_smoke.sh
 
 RUN mkdir -p /var/log/nettrap /var/lib/nettrap/pcap \
     && chown -R nettrap:nettrap /var/log/nettrap /var/lib/nettrap
