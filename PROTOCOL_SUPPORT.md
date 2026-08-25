@@ -11,9 +11,13 @@ Yes, but they do not establish real-client compatibility.
 
 The CI and release Docker jobs also run `tests/protocol_matrix_smoke.sh`. It
 starts every named TCP and UDP handler, checks listener readiness, sends a
-bounded probe, and verifies that the process remains healthy. This catches
-startup, binding, dispatch, and crash regressions for the complete handler
-matrix; it is not a substitute for a real client session.
+bounded protocol-shaped wire probe, and verifies that the process remains
+healthy. It also requires non-empty responses from the handlers with a
+deterministic request/response contract. This catches startup, binding,
+dispatch, framing, and crash regressions for the complete handler matrix; it
+is not a substitute for a real client session. Handlers whose response needs a
+real peer address, multicast context, or server-first negotiation remain
+covered by the process-health and dispatch checks.
 
 The required client contract is `dig` 9.x, `curl` 8.x, OpenSSL 3.x or
 LibreSSL 3.x, plus `ldapsearch` when installed. `tests/verify_platform.sh`
