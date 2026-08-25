@@ -17,7 +17,11 @@ deterministic request/response contract. This catches startup, binding,
 dispatch, framing, and crash regressions for the complete handler matrix; it
 is not a substitute for a real client session. Handlers whose response needs a
 real peer address, multicast context, or server-first negotiation remain
-covered by the process-health and dispatch checks.
+covered by the process-health and dispatch checks. The smoke matrix explicitly
+classifies `syslogrecv`, `dummy`, TLS, QUIC, and UPnP probes as capture-only
+where their configured loopback listener cannot synthesize a response; all
+other handlers must return non-empty wire data. TLS response behavior is also
+covered by the OpenSSL client path below.
 
 The required client contract is `dig` 9.x, `curl` 8.x, OpenSSL 3.x or
 LibreSSL 3.x, plus `ldapsearch` when installed. `tests/verify_platform.sh`

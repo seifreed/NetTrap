@@ -15,6 +15,20 @@ tcp_names=(
 )
 udp_names=(dns tftp snmp sip upnp ntp coap quic daytime time chargen quotd syslogrecv raw)
 
+# These handlers intentionally record traffic without synthesizing a wire response.
+tcp_capture_only=(syslogrecv tls dummy upnp)
+udp_capture_only=(quic syslogrecv upnp)
+
+contains_name() {
+    local needle=$1
+    shift
+    local candidate
+    for candidate in "$@"; do
+        [[ "$candidate" == "$needle" ]] && return 0
+    done
+    return 1
+}
+
 cleanup() {
     if [[ -n "$nettrap_pid" ]] && kill -0 "$nettrap_pid" 2>/dev/null; then
         kill -TERM "$nettrap_pid" 2>/dev/null || true
@@ -100,13 +114,27 @@ write_tcp_probe() {
         imap) printf 'a001 CAPABILITY\r\na002 LOGOUT\r\n' >"$path" ;;
         irc) printf 'NICK matrix\r\nUSER matrix 0 * :matrix\r\n' >"$path" ;;
         telnet) printf '%b' '\xff\xfb\x01\xff\xfb\x03' >"$path" ;;
-        finger) printf '\r\n' >"$path" ;;
+        finger) printf 'root\r\n' >"$path" ;;
         ident) printf '40000 , 80\r\n' >"$path" ;;
-        daytime|time|chargen|quotd) printf '\r\n' >"$path" ;;
+        daytime) printf 'daytime\r\n' >"$path" ;;
+        time) printf 'time\r\n' >"$path" ;;
+        chargen) printf 'chargen\r\n' >"$path" ;;
+        quotd) printf 'quote\r\n' >"$path" ;;
         syslogrecv) printf '<34>1 2026-01-01T00:00:00Z host app 1 ID47 - smoke\n' >"$path" ;;
-        dummy|smb|raw) printf 'probe\r\n' >"$path" ;;
+        dummy|raw) printf 'probe\r\n' >"$path" ;;
         ssh|mysql) : >"$path" ;;
         rdp) printf '%b' '\x03\x00\x00\x13\x0e\xe0\x00\x00\x00\x00\x00\x01\x00\x08\x00\x03\x00\x00\x00' >"$path" ;;
+        smb) python3 - "$path" >"$path" <<'PY'
+import struct
+import sys
+
+smb2 = bytearray(68)
+smb2[:4] = b"\xfeSMB"
+struct.pack_into("<H", smb2, 4, 64)
+struct.pack_into("<Q", smb2, 24, 0x123456789ABCDEF0)
+sys.stdout.buffer.write(b"\x00\x00\x00\x44" + smb2)
+PY
+            ;;
         redis) printf '*1\r\n$4\r\nPING\r\n' >"$path" ;;
         ldap) printf '%b' '\x30\x0c\x02\x01\x01\x60\x07\x02\x01\x03\x04\x00\x80\x00' >"$path" ;;
         socks) printf '%b' '\x05\x01\x00' >"$path" ;;
@@ -114,7 +142,7 @@ write_tcp_probe() {
         mqtt) printf '%b' '\x10\x0c\x00\x04MQTT\x04\x02\x00\x3c\x00\x00' >"$path" ;;
         tls) printf '%b' '\x16\x03\x01\x00\x00' >"$path" ;;
         upnp) printf 'GET /desc.xml HTTP/1.1\r\nHost: matrix.test\r\nConnection: close\r\n\r\n' >"$path" ;;
-        nkn) printf '{}\n' >"$path" ;;
+        nkn) printf '%s\n' '{"jsonrpc":"2.0","method":"getnodestate","id":7}' >"$path" ;;
         postgres) printf '%b' '\x00\x00\x00\x08\x00\x03\x00\x00' >"$path" ;;
         *) printf 'probe\r\n' >"$path" ;;
     esac
@@ -127,21 +155,27 @@ for index in "${!tcp_ports[@]}"; do
     request="$workdir/tcp-$name.request"
     response="$workdir/tcp-$name.response"
     write_tcp_probe "$name" "$request"
-    timeout 2 nc 127.0.0.1 "${tcp_ports[$index]}" <"$request" >"$response" 2>/dev/null || true
+    case "$name" in
+        daytime|time|chargen|quotd)
+            timeout 2 nc 127.0.0.1 "${tcp_ports[$index]}" >"$response" 2>/dev/null || true
+            ;;
+        *)
+            timeout 2 nc 127.0.0.1 "${tcp_ports[$index]}" <"$request" >"$response" 2>/dev/null || true
+            ;;
+    esac
     if ! kill -0 "$nettrap_pid" 2>/dev/null; then
         cat "$log" >&2
         echo "TCP handler crashed after $name probe" >&2
         exit 1
     fi
-    case "$name" in
-        dns|http|smtp|ftp|pop3|imap|ssh|redis|mysql|ldap|socks|memcached|mqtt|postgres)
-            if [[ ! -s "$response" ]]; then
-                echo "TCP handler returned no response for $name" >&2
-                exit 1
-            fi
-            tcp_responses=$((tcp_responses + 1))
-            ;;
-    esac
+    if ! contains_name "$name" "${tcp_capture_only[@]}"; then
+        if [[ ! -s "$response" ]]; then
+            echo "TCP handler returned no response for $name (probe bytes=$(wc -c <"$request"), response bytes=$(wc -c <"$response"))" >&2
+            tail -20 "$log" >&2
+            exit 1
+        fi
+        tcp_responses=$((tcp_responses + 1))
+    fi
 done
 
 for index in "${!udp_ports[@]}"; do
@@ -150,25 +184,26 @@ for index in "${!udp_ports[@]}"; do
     case "$name" in
         dns) printf '%b' '\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01' >"$request" ;;
         tftp) printf '%b' '\x00\x01smoke.txt\x00octet\x00' >"$request" ;;
-        snmp) printf '%b' '\x30\x26\x02\x01\x00\x04\x06public\xa0\x19\x02\x04\x00\x00\x00\x01\x02\x01\x00\x02\x01\x00\x30\x0b\x30\x09\x06\x05\x2b\x06\x01\x02\x01\x05\x00' >"$request" ;;
-        sip) printf 'OPTIONS sip:matrix.test SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1\r\n\r\n' >"$request" ;;
+        snmp) printf '%b' '\x30\x26\x02\x01\x00\x04\x06public\xa0\x19\x02\x01\x01\x02\x01\x00\x02\x01\x00\x30\x0e\x30\x0c\x06\x08\x2b\x06\x01\x02\x01\x01\x01\x00\x05\x00' >"$request" ;;
+        sip) printf 'OPTIONS sip:matrix.test SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-matrix\r\nFrom: <sip:matrix@matrix.test>;tag=matrix\r\nTo: <sip:matrix@matrix.test>\r\nCall-ID: matrix-call\r\nCSeq: 1 OPTIONS\r\nContent-Length: 0\r\n\r\n' >"$request" ;;
         ntp) { printf '%b' '\x1b'; head -c 47 /dev/zero; } >"$request" ;;
-        coap|quic|raw) printf 'probe\n' >"$request" ;;
+        coap) printf '%b' '\x41\x01\x12\x34\xaa' >"$request" ;;
+        quic) printf '%b' '\xc0\x00\x00\x00\x01\x08\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00' >"$request" ;;
+        raw) printf 'probe\n' >"$request" ;;
         upnp) printf 'M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: "ssdp:discover"\r\nMX: 1\r\nST: ssdp:all\r\n\r\n' >"$request" ;;
         daytime|time|chargen|quotd|syslogrecv) printf '\n' >"$request" ;;
         *) printf 'probe\n' >"$request" ;;
     esac
     response="$workdir/udp-$name.response"
-    nc -u -w 1 127.0.0.1 "${udp_ports[$index]}" <"$request" >"$response" 2>/dev/null || true
-    case "$name" in
-        dns|tftp|ntp)
-            if [[ ! -s "$response" ]]; then
-                echo "UDP handler returned no response for $name" >&2
-                exit 1
-            fi
-            udp_responses=$((udp_responses + 1))
-            ;;
-    esac
+    nc -u -w 2 127.0.0.1 "${udp_ports[$index]}" <"$request" >"$response" 2>/dev/null || true
+    if ! contains_name "$name" "${udp_capture_only[@]}"; then
+        if [[ ! -s "$response" ]]; then
+            echo "UDP handler returned no response for $name (probe bytes=$(wc -c <"$request"), response bytes=$(wc -c <"$response"))" >&2
+            tail -20 "$log" >&2
+            exit 1
+        fi
+        udp_responses=$((udp_responses + 1))
+    fi
 done
 
 if ! kill -0 "$nettrap_pid" 2>/dev/null; then

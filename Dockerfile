@@ -32,6 +32,7 @@ RUN apt-get update && apt-get install -y \
     openssl \
     postgresql-client \
     procps \
+    python3 \
     redis-tools \
     smbclient \
     iproute2 \
