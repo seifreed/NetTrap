@@ -26,7 +26,7 @@
 
 ## Overview
 
-**NetTrap** is a late-alpha network service emulation and behavioral capture engine written in Rust. Direct listener mode is the primary supported path. Linux transparent redirection is experimental; Windows and macOS transparent interception are not supported. The 35 registered detectors have different fidelity levels and do not represent 35 complete protocol servers.
+**NetTrap** is a late-alpha network service emulation and behavioral capture engine written in Rust. Direct listener mode is the primary supported path. Linux and Windows x86_64 transparent redirection are experimental; macOS and Windows ARM64 remain listener/capture only. The 35 registered detectors have different fidelity levels and do not represent 35 complete protocol servers.
 
 ### Why NetTrap?
 
@@ -298,7 +298,7 @@ Supports `<RAW-DATE>` substitution and `{{variable}}` templates.
 |----------|-----------------|---------------|-------------------------|
 | **Linux** | x86_64, ARM64 | Supported | Experimental |
 | **macOS** | x86_64, ARM64 | Supported | Not supported |
-| **Windows** | x86_64, ARM64 | Supported | Disabled/not supported |
+| **Windows** | x86_64, ARM64 | Supported | x86_64 experimental; ARM64 listener/capture only |
 
 See [Platform Support](PLATFORM_SUPPORT.md) for CI evidence, capture caveats,
 and unsupported targets.

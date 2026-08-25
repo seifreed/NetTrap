@@ -74,14 +74,6 @@ pub(super) async fn build_engine(
     _verbose: bool,
     config_path: Option<std::path::PathBuf>,
 ) -> crate::Result<Engine> {
-    #[cfg(target_os = "windows")]
-    if args.intercept {
-        return Err(crate::Error::Other(
-            "Transparent interception is not supported on Windows; use listener or PCAP capture mode"
-                .to_string(),
-        ));
-    }
-
     let mut config = load_config(config_path)?;
     apply_cli_overrides(&mut config, args)?;
     config.finalize_after_cli_overrides()?;

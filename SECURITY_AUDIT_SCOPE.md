@@ -10,7 +10,8 @@ The review should cover:
 - Untrusted TCP/UDP parsing, protocol dispatch, framing, and resource limits.
 - Linux firewall redirection, nftables/iptables cleanup, privilege boundaries,
   and crash recovery.
-- Windows listener/capture adapters and the fail-closed `--intercept` path.
+- Windows listener/capture adapters and the experimental WinDivert TCP/UDP
+  NAT path used by `--intercept` on x86_64.
 - TLS certificate generation, key storage, and local termination boundaries.
 - REST/API exposure, configuration migration, filesystem writes, and reports.
 - Docker/Kubernetes manifests, release workflows, Sigstore signing, SBOMs, and
@@ -34,9 +35,12 @@ cargo deny check
 ./scripts/quality-gates.sh quick
 actionlint .github/workflows/*.yml
 bash tests/verify_platform.sh
+# On a privileged Windows x86_64 runner with WinDivert files installed:
+pwsh -File tests/windows_interception_smoke.ps1 -BinaryPath .\nettrap.exe
 ```
 
-The scheduled security workflow repeats CodeQL for Rust plus dependency audits.
+The scheduled security workflow repeats OpenSSF Scorecard, CodeQL for Rust,
+and dependency audits.
 The release workflow verifies Sigstore bundles, GitHub artifact attestations,
 SBOMs, and checksums before publishing.
 

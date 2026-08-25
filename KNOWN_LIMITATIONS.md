@@ -13,8 +13,10 @@ suite.
   leave redirect rules and multi-host forwarding enabled until that restart or
   manual cleanup. The opt-in Linux network-namespace E2E covers redirection,
   crash recovery, and graceful cleanup.
-- Windows rejects `--intercept`; WinDivert redirection is incomplete and no
-  WinDivert driver is shipped.
+- Windows x86_64 transparent redirection is experimental and currently covers
+  bounded TCP/UDP NAT flows only. WinDivert binaries and drivers are external
+  prerequisites and are not shipped in release archives. Windows ARM64 stays
+  in listener/capture mode.
 - macOS has no transparent redirection implementation.
 - Live capture and process attribution depend on OS facilities, privileges, and
   external packet-capture runtimes.

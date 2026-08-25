@@ -256,7 +256,7 @@ fn spawn_interceptor_task(
 fn build_windows_interceptor(
     interface: Option<String>,
     config: &EngineConfig,
-    _port_forward_table: Arc<crate::session::PortForwardTable>,
+    port_forward_table: Arc<crate::session::PortForwardTable>,
 ) -> crate::Result<Option<PreparedInterceptor>> {
     use nettrap_core::config::InterceptionMode;
     use nettrap_interceptor::InterceptorBuilder;
@@ -270,12 +270,12 @@ fn build_windows_interceptor(
     }
 
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+    let redirects = build_windows_redirect_rules(config, &port_forward_table);
     let interceptor = builder
         .mode(InterceptionMode::WinDivert)
-        .build()
-        .map_err(|e| {
-            crate::Error::Other(format!("Failed to build WinDivert interceptor: {}", e))
-        })?;
+        .build_windivert()
+        .map_err(|e| crate::Error::Other(format!("Failed to build WinDivert interceptor: {}", e)))?
+        .with_port_redirects(redirects);
 
     #[cfg(target_arch = "aarch64")]
     let interceptor = builder
@@ -284,16 +284,69 @@ fn build_windows_interceptor(
         .map_err(|e| crate::Error::Other(format!("Failed to build Npcap interceptor: {}", e)))?;
 
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-    let active_message = "WinDivert capture active";
+    let active_message = "WinDivert TCP/UDP NAT interception active";
 
     #[cfg(target_arch = "aarch64")]
     let active_message = "Npcap capture active";
 
+    #[cfg(target_arch = "aarch64")]
+    let _ = port_forward_table;
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+    let prepared_port_forward_table = Some(port_forward_table);
+
+    #[cfg(target_arch = "aarch64")]
+    let prepared_port_forward_table = None;
+
     Ok(Some(PreparedInterceptor {
         interceptor: Arc::new(Mutex::new(Box::new(interceptor))),
         active_message,
-        port_forward_table: None,
+        port_forward_table: prepared_port_forward_table,
     }))
+}
+
+#[cfg(target_os = "windows")]
+fn build_windows_redirect_rules(
+    config: &EngineConfig,
+    port_forward_table: &crate::session::PortForwardTable,
+) -> Vec<nettrap_interceptor::windivert::PortRedirect> {
+    use nettrap_core::prelude::Protocol;
+    use nettrap_interceptor::windivert::PortRedirect;
+
+    let mut redirects = Vec::new();
+    for listener in &config.listeners {
+        if !super::listener_should_spawn(config, listener) {
+            continue;
+        }
+        match listener.protocol {
+            Protocol::Tcp => {
+                port_forward_table.add_tcp_forward(listener.port, listener.port);
+                redirects.push(PortRedirect::new(listener.port, true, listener.port));
+            }
+            Protocol::Udp => {
+                port_forward_table.add_udp_forward(listener.port, listener.port);
+                redirects.push(PortRedirect::new(listener.port, false, listener.port))
+            }
+            _ => {}
+        }
+    }
+
+    if config.redirect_all_traffic {
+        if let Some(target_port) = config.default_tcp_listener.as_deref().and_then(|name| {
+            super::startup::resolve_default_listener_port(config, name, Protocol::Tcp)
+        }) {
+            port_forward_table.set_default_tcp_target(target_port);
+            redirects.push(PortRedirect::catch_all(true, target_port));
+        }
+        if let Some(target_port) = config.default_udp_listener.as_deref().and_then(|name| {
+            super::startup::resolve_default_listener_port(config, name, Protocol::Udp)
+        }) {
+            port_forward_table.set_default_udp_target(target_port);
+            redirects.push(PortRedirect::catch_all(false, target_port));
+        }
+    }
+
+    redirects
 }
 
 #[cfg(target_os = "linux")]
@@ -495,7 +548,37 @@ fn track_original_destination(
         );
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
+    {
+        use nettrap_core::prelude::Protocol;
+
+        if !matches!(
+            packet.direction,
+            nettrap_core::prelude::PacketDirection::Outbound
+        ) {
+            return;
+        }
+
+        let protocol = match packet.five_tuple.protocol {
+            Protocol::Tcp => "TCP",
+            Protocol::Udp => "UDP",
+            _ => return,
+        };
+        let original_dst = packet.dst();
+        let Some(listener_port) =
+            port_forward_table.resolve_redirect_target(protocol, original_dst.port())
+        else {
+            return;
+        };
+        port_forward_table.record_original_dest(
+            &packet.src(),
+            protocol,
+            listener_port,
+            &original_dst,
+        );
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     let _ = (packet, port_forward_table);
 }
 

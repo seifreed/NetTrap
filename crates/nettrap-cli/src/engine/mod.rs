@@ -1262,7 +1262,7 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[tokio::test]
-    async fn build_engine_rejects_windows_interception() {
+    async fn build_engine_enables_windows_interception() {
         let args = RunArgs {
             interface: None,
             ports: Vec::new(),
@@ -1276,11 +1276,12 @@ mod tests {
             report_format: None,
         };
 
-        let Err(err) = build_engine(&args, false, None).await else {
-            panic!("Windows interception must remain disabled");
-        };
+        let engine = build_engine(&args, false, None)
+            .await
+            .expect("Windows interception should build");
 
-        assert!(err.to_string().contains("not supported on Windows"));
+        assert!(engine.options.intercept_enabled);
+        assert!(engine.options.require_interceptor);
     }
 
     #[tokio::test]

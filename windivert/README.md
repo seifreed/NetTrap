@@ -1,9 +1,9 @@
 # WinDivert Binaries for NetTrap
 
-This directory is reserved for future WinDivert development. NetTrap
-`0.1.0-alpha.1` rejects `--intercept` on Windows and release archives do not
-include WinDivert binaries or drivers. Adding these files does not enable a
-supported interception path.
+NetTrap `0.1.0-alpha.1` uses WinDivert for experimental TCP/UDP NAT
+redirection on Windows x86_64 when `--intercept` is enabled. Release archives
+do not include WinDivert binaries or drivers; install them separately before
+running that mode.
 
 Windows listener mode does not need WinDivert. Experimental Windows capture
 uses an externally installed Npcap runtime.

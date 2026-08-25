@@ -122,6 +122,24 @@ jobs:
           "LIBPCAP_LIBDIR=$libDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
         shell: pwsh
 
+      - name: Prepare WinDivert runtime (x64)
+        if: runner.os == 'Windows' && matrix.arch == 'x64'
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP "WinDivert-2.2.2-A.zip"
+          $root = Join-Path $env:RUNNER_TEMP "WinDivert-2.2.2-A"
+          $runtime = Join-Path $env:RUNNER_TEMP "nettrap-windivert"
+          Invoke-WebRequest -Uri "https://reqrypt.org/download/WinDivert-2.2.2-A.zip" -OutFile $archive
+          $hash = (Get-FileHash -Algorithm SHA256 -Path $archive).Hash.ToLowerInvariant()
+          if ($hash -ne "63cb41763bb4b20f600b6de04e991a9c2be73279e317d4d82f237b150c5f3f15") {
+            throw "WinDivert archive SHA-256 mismatch: $hash"
+          }
+          Expand-Archive -Path $archive -DestinationPath $root -Force
+          New-Item -ItemType Directory -Force -Path $runtime | Out-Null
+          Copy-Item (Join-Path $root "WinDivert-2.2.2-A\x64\WinDivert.dll") $runtime
+          Copy-Item (Join-Path $root "WinDivert-2.2.2-A\x64\WinDivert64.sys") $runtime
+          "PATH=$runtime;$env:PATH" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        shell: pwsh
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -165,6 +183,11 @@ jobs:
       - name: Run Windows listener parity smoke
         if: runner.os == 'Windows' && matrix.arch != 'arm64'
         run: ./tests/windows_listener_smoke.ps1 -BinaryPath "${{ github.workspace }}\target\${{ matrix.target }}\release\nettrap.exe"
+        shell: pwsh
+
+      - name: Run Windows interception smoke (x64)
+        if: runner.os == 'Windows' && matrix.arch == 'x64'
+        run: ./tests/windows_interception_smoke.ps1 -BinaryPath "${{ github.workspace }}\target\${{ matrix.target }}\release\nettrap.exe"
         shell: pwsh
 
       - name: Package Unix release

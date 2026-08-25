@@ -10,7 +10,7 @@ the release workflow; it does not imply transparent interception support.
 | Linux ARM64 | Yes | Supported | Experimental `iptables`/`ip6tables` or direct `nft` redirection | Native Rust build and tests |
 | macOS x86_64 | Yes | Supported | Not supported | Native Rust gates plus `dig` and `curl` E2E |
 | macOS ARM64 | Yes | Supported | Not supported | Native Rust gates plus `dig` and `curl` E2E |
-| Windows x86_64 | Yes | Supported | Disabled; `--intercept` fails closed | Native Rust gates, binary/config smoke, and TCP/UDP listener parity smoke |
+| Windows x86_64 | Yes | Supported | Experimental WinDivert TCP/UDP NAT redirection | Native Rust gates, binary/config smoke, listener parity, and verified WinDivert HTTP redirect smoke |
 | Windows ARM64 | Yes | Supported | Not supported; Npcap capture is experimental | Native Rust gates and binary/config smoke tests |
 | Linux x86/ARM32 | No | Not supported | Not supported | No CI target or release asset |
 | Windows x86 | No | Not supported | Not supported | No CI target or release asset |
@@ -26,8 +26,9 @@ the release workflow; it does not imply transparent interception support.
   nftables uses the same port and interface restrictions. The opt-in namespace
   contract runs as `NETTRAP_NAMESPACE_E2E=1` with root privileges on Linux.
 - macOS has no transparent redirection implementation.
-- Windows rejects `--intercept`. Release archives do not include WinDivert
-  binaries or drivers.
+- Windows x86_64 `--intercept` uses WinDivert for experimental TCP/UDP NAT
+  redirection. WinDivert binaries and drivers remain an external prerequisite;
+  release archives do not bundle them.
 - Npcap is an external prerequisite for experimental live capture on Windows;
   it is not bundled.
 - Process attribution, TLS termination, and live packet capture remain

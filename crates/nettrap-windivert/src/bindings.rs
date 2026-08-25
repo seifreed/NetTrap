@@ -271,6 +271,30 @@ impl WinDivert {
         }
     }
 
+    pub fn calc_checksums(
+        &self,
+        packet: &mut [u8],
+        addr: &mut WindivertAddress,
+    ) -> Result<(), String> {
+        let lib = self.handle.as_ref().ok_or("Library not loaded")?;
+        let packet_len = windivert_buffer_len(packet.len())?;
+        let calc: libloading::Symbol<
+            unsafe extern "system" fn(*mut c_void, u32, *mut WindivertAddress, u64) -> i32,
+        > = unsafe {
+            lib.get(b"WinDivertHelperCalcChecksums\0")
+                .map_err(|e| format!("Failed to get WinDivertHelperCalcChecksums: {e}"))?
+        };
+
+        let result = unsafe { calc(packet.as_mut_ptr() as *mut c_void, packet_len, addr, 0) };
+        if result == 0 {
+            return Err(format!(
+                "WinDivertHelperCalcChecksums failed (GetLastError={})",
+                last_error()
+            ));
+        }
+        Ok(())
+    }
+
     pub fn close(&mut self, handle: HANDLE) -> Result<(), String> {
         close_handle(handle)?;
         self.handle = None;
@@ -342,6 +366,13 @@ impl WinDivert {
         _handle: HANDLE,
         _buf: &[u8],
         _addr: &WindivertAddress,
+    ) -> Result<(), String> {
+        Err("WinDivert only available on Windows".to_string())
+    }
+    pub fn calc_checksums(
+        &self,
+        _packet: &mut [u8],
+        _addr: &mut WindivertAddress,
     ) -> Result<(), String> {
         Err("WinDivert only available on Windows".to_string())
     }

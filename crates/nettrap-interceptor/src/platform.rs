@@ -27,7 +27,180 @@ pub mod windivert {
         WindivertTcpHdr, WindivertUdpHdr, close_handle,
     };
     use parking_lot::{Mutex, RwLock};
+    use std::collections::{HashMap, VecDeque};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    const MAX_REDIRECT_FLOWS: usize = 8192;
+    const MAX_REDIRECT_EXPIRY_ENTRIES: usize = MAX_REDIRECT_FLOWS * 2;
+    const REDIRECT_FLOW_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+
+    /// TCP or UDP destination-port mapping applied by the WinDivert NAT path.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct PortRedirect {
+        pub source_port: Option<u16>,
+        pub target_port: u16,
+        pub is_tcp: bool,
+    }
+
+    impl PortRedirect {
+        /// Redirect one destination port to a local listener port.
+        pub fn new(source_port: u16, is_tcp: bool, target_port: u16) -> Self {
+            Self {
+                source_port: Some(source_port),
+                target_port,
+                is_tcp,
+            }
+        }
+
+        /// Redirect all destinations for one transport protocol to a listener.
+        pub fn catch_all(is_tcp: bool, target_port: u16) -> Self {
+            Self {
+                source_port: None,
+                target_port,
+                is_tcp,
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    struct FlowKey {
+        protocol: u8,
+        client: SocketAddr,
+        original_destination: SocketAddr,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    struct ReverseFlowKey {
+        protocol: u8,
+        client: SocketAddr,
+        listener_port: u16,
+    }
+
+    #[derive(Debug, Clone)]
+    struct RedirectFlow {
+        original_destination: SocketAddr,
+        listener_port: u16,
+        last_seen: Instant,
+    }
+
+    #[derive(Debug, Default)]
+    struct RedirectFlowTable {
+        entries: HashMap<FlowKey, RedirectFlow>,
+        reverse: HashMap<ReverseFlowKey, FlowKey>,
+        expiry: VecDeque<(Instant, FlowKey)>,
+    }
+
+    impl RedirectFlowTable {
+        fn compact_expiry(&mut self) {
+            self.expiry.clear();
+            let mut entries: Vec<_> = self
+                .entries
+                .iter()
+                .map(|(key, flow)| (flow.last_seen, key.clone()))
+                .collect();
+            entries.sort_by_key(|(seen, _)| *seen);
+            self.expiry.extend(entries);
+        }
+
+        fn prune(&mut self, now: Instant) {
+            while let Some((seen, key)) = self.expiry.front().cloned() {
+                if now.duration_since(seen) < REDIRECT_FLOW_IDLE_TIMEOUT {
+                    break;
+                }
+                self.expiry.pop_front();
+                let should_remove = self
+                    .entries
+                    .get(&key)
+                    .is_some_and(|flow| flow.last_seen <= seen);
+                if should_remove {
+                    self.remove(&key);
+                }
+            }
+        }
+
+        fn remove(&mut self, key: &FlowKey) {
+            if let Some(flow) = self.entries.remove(key) {
+                let reverse = ReverseFlowKey {
+                    protocol: key.protocol,
+                    client: key.client,
+                    listener_port: flow.listener_port,
+                };
+                if self.reverse.get(&reverse) == Some(key) {
+                    self.reverse.remove(&reverse);
+                }
+            }
+        }
+
+        fn insert(&mut self, key: FlowKey, listener_port: u16, now: Instant) {
+            self.prune(now);
+            self.remove(&key);
+            while self.entries.len() >= MAX_REDIRECT_FLOWS {
+                let Some((_, oldest)) = self.expiry.pop_front() else {
+                    break;
+                };
+                self.remove(&oldest);
+            }
+
+            let reverse = ReverseFlowKey {
+                protocol: key.protocol,
+                client: key.client,
+                listener_port,
+            };
+            if let Some(previous) = self.reverse.insert(reverse, key.clone()) {
+                self.remove(&previous);
+            }
+            self.entries.insert(
+                key.clone(),
+                RedirectFlow {
+                    original_destination: key.original_destination,
+                    listener_port,
+                    last_seen: now,
+                },
+            );
+            self.expiry.push_back((now, key));
+        }
+
+        fn touch(&mut self, key: &FlowKey, now: Instant) {
+            if self.entries.get(key).is_none() {
+                return;
+            }
+            if let Some(flow) = self.entries.get_mut(key) {
+                flow.last_seen = now;
+            }
+            if self.expiry.len() >= MAX_REDIRECT_EXPIRY_ENTRIES {
+                self.compact_expiry();
+            }
+            self.expiry.push_back((now, key.clone()));
+        }
+
+        fn outbound_listener(&mut self, key: &FlowKey, now: Instant) -> Option<u16> {
+            self.prune(now);
+            let listener = self.entries.get(key).map(|flow| flow.listener_port);
+            if listener.is_some() {
+                self.touch(key, now);
+            }
+            listener
+        }
+
+        fn inbound_destination(
+            &mut self,
+            key: &ReverseFlowKey,
+            now: Instant,
+        ) -> Option<SocketAddr> {
+            self.prune(now);
+            let flow_key = self.reverse.get(key)?.clone();
+            let destination = self
+                .entries
+                .get(&flow_key)
+                .map(|flow| flow.original_destination);
+            if destination.is_some() {
+                self.touch(&flow_key, now);
+            }
+            destination
+        }
+    }
 
     pub struct WinDivertInterceptor {
         running: Arc<RwLock<bool>>,
@@ -35,6 +208,8 @@ pub mod windivert {
         handle: Arc<RwLock<Option<usize>>>,
         windivert: Arc<Mutex<Option<WinDivert>>>,
         filter: String,
+        redirects: Vec<PortRedirect>,
+        flows: Arc<Mutex<RedirectFlowTable>>,
     }
 
     impl WinDivertInterceptor {
@@ -47,7 +222,15 @@ pub mod windivert {
                 stats: Arc::new(RwLock::new(InterceptStats::default())),
                 handle: Arc::new(RwLock::new(None)),
                 windivert: Arc::new(Mutex::new(None)),
+                redirects: Vec::new(),
+                flows: Arc::new(Mutex::new(RedirectFlowTable::default())),
             })
+        }
+
+        /// Configure bounded TCP/UDP NAT mappings before startup.
+        pub fn with_port_redirects(mut self, redirects: Vec<PortRedirect>) -> Self {
+            self.redirects = redirects;
+            self
         }
 
         pub fn filter(&self) -> &str {
@@ -326,6 +509,237 @@ pub mod windivert {
                 _ => Ok(None),
             }
         }
+
+        fn packet_metadata(
+            data: &[u8],
+            len: usize,
+        ) -> Option<(bool, u8, usize, IpAddr, IpAddr, usize)> {
+            let captured_len = len.min(data.len());
+            let version = data.first().map(|byte| byte >> 4)?;
+            match version {
+                4 => {
+                    if captured_len < 20 {
+                        return None;
+                    }
+                    let ihl = usize::from(data[0] & 0x0f).checked_mul(4)?;
+                    if !(20..=60).contains(&ihl) || captured_len < ihl {
+                        return None;
+                    }
+                    let total_len = usize::from(u16::from_be_bytes([data[2], data[3]]));
+                    if total_len < ihl || total_len > captured_len {
+                        return None;
+                    }
+                    let fragment = u16::from_be_bytes([data[6], data[7]]);
+                    if fragment & 0x3fff != 0 {
+                        return None;
+                    }
+                    let src = IpAddr::V4(Ipv4Addr::new(data[12], data[13], data[14], data[15]));
+                    let dst = IpAddr::V4(Ipv4Addr::new(data[16], data[17], data[18], data[19]));
+                    let protocol = data[9];
+                    let transport_len = match protocol {
+                        IPPROTO_TCP => {
+                            if total_len < ihl + 20 {
+                                return None;
+                            }
+                            usize::from(data[ihl + 12] >> 4).checked_mul(4)?
+                        }
+                        IPPROTO_UDP => 8,
+                        _ => 0,
+                    };
+                    if protocol == IPPROTO_TCP && !(20..=60).contains(&transport_len) {
+                        return None;
+                    }
+                    if protocol == IPPROTO_TCP && total_len < ihl + transport_len {
+                        return None;
+                    }
+                    if protocol == IPPROTO_UDP && total_len < ihl + 8 {
+                        return None;
+                    }
+                    Some((false, protocol, ihl, src, dst, total_len))
+                }
+                6 => {
+                    if captured_len < 40 {
+                        return None;
+                    }
+                    let payload_len = usize::from(u16::from_be_bytes([data[4], data[5]]));
+                    let total_len = 40usize.checked_add(payload_len)?;
+                    if total_len > captured_len {
+                        return None;
+                    }
+                    let src_bytes: [u8; 16] = data[8..24].try_into().ok()?;
+                    let dst_bytes: [u8; 16] = data[24..40].try_into().ok()?;
+                    let src = IpAddr::V6(Ipv6Addr::from(src_bytes));
+                    let dst = IpAddr::V6(Ipv6Addr::from(dst_bytes));
+                    let (protocol, transport_offset) =
+                        Self::ipv6_transport_start(&data[..total_len], 40)?;
+                    let transport_len = match protocol {
+                        IPPROTO_TCP => {
+                            if total_len < transport_offset + 20 {
+                                return None;
+                            }
+                            usize::from(data[transport_offset + 12] >> 4).checked_mul(4)?
+                        }
+                        IPPROTO_UDP => 8,
+                        _ => 0,
+                    };
+                    if protocol == IPPROTO_TCP && !(20..=60).contains(&transport_len) {
+                        return None;
+                    }
+                    if protocol == IPPROTO_TCP && total_len < transport_offset + transport_len {
+                        return None;
+                    }
+                    if protocol == IPPROTO_UDP && total_len < transport_offset + 8 {
+                        return None;
+                    }
+                    Some((true, protocol, transport_offset, src, dst, total_len))
+                }
+                _ => None,
+            }
+        }
+
+        fn redirect_target(
+            redirects: &[PortRedirect],
+            protocol: u8,
+            destination_port: u16,
+        ) -> Option<u16> {
+            let is_tcp = protocol == IPPROTO_TCP;
+            redirects
+                .iter()
+                .find(|redirect| {
+                    redirect.is_tcp == is_tcp && redirect.source_port == Some(destination_port)
+                })
+                .or_else(|| {
+                    redirects.iter().find(|redirect| {
+                        redirect.is_tcp == is_tcp && redirect.source_port.is_none()
+                    })
+                })
+                .map(|redirect| redirect.target_port)
+        }
+
+        fn rewrite_endpoint(
+            data: &mut [u8],
+            is_ipv6: bool,
+            transport_offset: usize,
+            source: bool,
+            address: IpAddr,
+            port: u16,
+        ) -> bool {
+            let (address_start, port_start) = if is_ipv6 {
+                (
+                    if source { 8 } else { 24 },
+                    transport_offset + if source { 0 } else { 2 },
+                )
+            } else {
+                (
+                    if source { 12 } else { 16 },
+                    transport_offset + if source { 0 } else { 2 },
+                )
+            };
+            let address_bytes = match (is_ipv6, address) {
+                (true, IpAddr::V6(address)) => address.octets().to_vec(),
+                (false, IpAddr::V4(address)) => address.octets().to_vec(),
+                _ => return false,
+            };
+            let Some(address_slot) =
+                data.get_mut(address_start..address_start + address_bytes.len())
+            else {
+                return false;
+            };
+            address_slot.copy_from_slice(&address_bytes);
+            let Some(port_slot) = data.get_mut(port_start..port_start + 2) else {
+                return false;
+            };
+            port_slot.copy_from_slice(&port.to_be_bytes());
+            true
+        }
+
+        fn redirect_packet(
+            data: &mut [u8],
+            len: usize,
+            addr: &WindivertAddress,
+            redirects: &[PortRedirect],
+            flow_table: &Arc<Mutex<RedirectFlowTable>>,
+        ) -> Result<()> {
+            let Some((is_ipv6, protocol, transport_offset, src, dst, total_len)) =
+                Self::packet_metadata(data, len)
+            else {
+                return Ok(());
+            };
+            if !matches!(protocol, IPPROTO_TCP | IPPROTO_UDP) {
+                return Ok(());
+            }
+
+            let src_port = u16::from_be_bytes([data[transport_offset], data[transport_offset + 1]]);
+            let dst_port =
+                u16::from_be_bytes([data[transport_offset + 2], data[transport_offset + 3]]);
+            let now = Instant::now();
+            let mut flows = flow_table.lock();
+
+            if addr.direction() == WINDIVERT_DIRECTION_OUT {
+                if dst.is_loopback() {
+                    return Ok(());
+                }
+                let original_destination = SocketAddr::new(dst, dst_port);
+                let key = FlowKey {
+                    protocol,
+                    client: SocketAddr::new(src, src_port),
+                    original_destination,
+                };
+                let listener_port = flows
+                    .outbound_listener(&key, now)
+                    .or_else(|| Self::redirect_target(redirects, protocol, dst_port));
+                let Some(listener_port) = listener_port else {
+                    return Ok(());
+                };
+                if !flows.entries.contains_key(&key) {
+                    flows.insert(key, listener_port, now);
+                }
+                let loopback = if is_ipv6 {
+                    IpAddr::V6(Ipv6Addr::LOCALHOST)
+                } else {
+                    IpAddr::V4(Ipv4Addr::LOCALHOST)
+                };
+                if !Self::rewrite_endpoint(
+                    data,
+                    is_ipv6,
+                    transport_offset,
+                    false,
+                    loopback,
+                    listener_port,
+                ) {
+                    return Err(Error::Packet("Failed to rewrite outbound endpoint".into()));
+                }
+            } else {
+                if !src.is_loopback() {
+                    return Ok(());
+                }
+                let reverse = ReverseFlowKey {
+                    protocol,
+                    client: SocketAddr::new(dst, dst_port),
+                    listener_port: src_port,
+                };
+                let Some(original_destination) = flows.inbound_destination(&reverse, now) else {
+                    return Ok(());
+                };
+                if !Self::rewrite_endpoint(
+                    data,
+                    is_ipv6,
+                    transport_offset,
+                    true,
+                    original_destination.ip(),
+                    original_destination.port(),
+                ) {
+                    return Err(Error::Packet("Failed to rewrite inbound endpoint".into()));
+                }
+            }
+
+            if total_len > data.len() {
+                return Err(Error::Packet(
+                    "WinDivert packet length exceeds buffer".into(),
+                ));
+            }
+            Ok(())
+        }
     }
 
     #[async_trait]
@@ -354,66 +768,71 @@ pub mod windivert {
                 .ok_or_else(|| Error::InvalidState("WinDivert not initialized".into()))?;
             let windivert = Arc::clone(&self.windivert);
             let stats = Arc::clone(&self.stats);
+            let flows = Arc::clone(&self.flows);
+            let redirects = self.redirects.clone();
 
             tokio::task::spawn_blocking(move || {
                 let handle = handle as HANDLE;
-                let mut packet_buf = vec![0u8; 65535];
-                let mut addr = WindivertAddress::default();
+                loop {
+                    let mut packet_buf = vec![0u8; 65535];
+                    let mut addr = WindivertAddress::default();
+                    let len = {
+                        let guard = windivert.lock();
+                        let api = guard.as_ref().ok_or_else(|| {
+                            Error::InvalidState("WinDivert not initialized".into())
+                        })?;
+                        api.recv(handle, &mut packet_buf, &mut addr).map_err(|e| {
+                            Error::Interception(format!("WinDivertRecv failed: {}", e))
+                        })?
+                    } as usize;
 
-                let len = {
+                    let original = packet_buf[..len].to_vec();
+                    let packet = Self::parse_packet(&original, len, &addr)?;
+
+                    Self::redirect_packet(&mut packet_buf, len, &addr, &redirects, &flows)?;
+
                     let guard = windivert.lock();
                     let api = guard
                         .as_ref()
                         .ok_or_else(|| Error::InvalidState("WinDivert not initialized".into()))?;
-                    api.recv(handle, &mut packet_buf, &mut addr)
-                        .map_err(|e| Error::Interception(format!("WinDivertRecv failed: {}", e)))?
-                };
+                    let mut send_addr = addr;
+                    api.calc_checksums(&mut packet_buf[..len], &mut send_addr)
+                        .map_err(|e| {
+                            Error::Interception(format!(
+                                "WinDivert checksum calculation failed: {}",
+                                e
+                            ))
+                        })?;
+                    api.send(handle, &packet_buf[..len], &send_addr)
+                        .map_err(|e| Error::Interception(format!("WinDivertSend failed: {}", e)))?;
 
-                let packet = Self::parse_packet(&packet_buf, len as usize, &addr)?
-                    .ok_or_else(|| Error::Packet("Failed to parse WinDivert packet".into()))?;
+                    {
+                        let mut guard = stats.write();
+                        guard.packets_sent += 1;
+                        guard.bytes_sent += len as u64;
+                    }
 
-                {
-                    let mut guard = stats.write();
-                    guard.packets_received += 1;
-                    guard.bytes_received += packet.length as u64;
+                    let Some(packet) = packet else {
+                        continue;
+                    };
+                    {
+                        let mut guard = stats.write();
+                        guard.packets_received += 1;
+                        guard.bytes_received += packet.length as u64;
+                    }
+                    return Ok(packet);
                 }
-
-                Ok(packet)
             })
             .await
             .map_err(|e| Error::Interception(format!("Join error: {}", e)))?
         }
 
         async fn send_packet(&self, packet: Packet) -> Result<()> {
-            let handle = (*self.handle.read())
-                .ok_or_else(|| Error::InvalidState("WinDivert not initialized".into()))?;
-            let windivert = Arc::clone(&self.windivert);
-            let stats = Arc::clone(&self.stats);
-            let payload = packet.payload.clone();
-            let direction = match packet.direction {
-                PacketDirection::Inbound => WINDIVERT_DIRECTION_IN,
-                _ => WINDIVERT_DIRECTION_OUT,
-            };
-
-            tokio::task::spawn_blocking(move || {
-                let handle = handle as HANDLE;
-                let mut addr = WindivertAddress::default();
-                addr.set_direction(direction);
-
-                let guard = windivert.lock();
-                let api = guard
-                    .as_ref()
-                    .ok_or_else(|| Error::InvalidState("WinDivert not initialized".into()))?;
-                api.send(handle, payload.as_ref(), &addr)
-                    .map_err(|e| Error::Interception(format!("WinDivertSend failed: {}", e)))?;
-
-                let mut guard = stats.write();
-                guard.packets_sent += 1;
-                guard.bytes_sent += payload.len() as u64;
-                Ok(())
-            })
-            .await
-            .map_err(|e| Error::Interception(format!("Join error: {}", e)))?
+            let _ = packet;
+            Err(Error::NotSupported(
+                "WinDivert reinjection requires the original network packet; use recv_packet"
+                    .into(),
+            ))
         }
 
         async fn shutdown(&mut self) -> Result<()> {
@@ -453,7 +872,7 @@ pub mod windivert {
     }
 
     fn build_filter(config: &InterceptorConfig) -> Result<String> {
-        let mut clauses = vec!["(ip or ipv6)".to_string()];
+        let mut clauses = vec!["(ip or ipv6) and (tcp or udp)".to_string()];
 
         if let Some(iface) = &config.interface
             && let Some(ifidx) = parse_windivert_interface_index(Some(iface.as_str()))?
@@ -628,7 +1047,7 @@ pub mod windivert {
 
             assert_eq!(
                 build_filter(&config).unwrap(),
-                "(ip or ipv6) and ifIdx == 7"
+                "(ip or ipv6) and (tcp or udp) and ifIdx == 7"
             );
         }
 
@@ -639,7 +1058,150 @@ pub mod windivert {
                 ..Default::default()
             };
 
-            assert_eq!(build_filter(&config).unwrap(), "(ip or ipv6)");
+            assert_eq!(
+                build_filter(&config).unwrap(),
+                "(ip or ipv6) and (tcp or udp)"
+            );
+        }
+
+        #[test]
+        fn redirect_flow_table_tracks_reverse_destination_with_a_bound() {
+            let mut table = RedirectFlowTable::default();
+            let key = FlowKey {
+                protocol: IPPROTO_TCP,
+                client: "192.0.2.10:40000".parse().unwrap(),
+                original_destination: "198.51.100.20:443".parse().unwrap(),
+            };
+            let now = Instant::now();
+            table.insert(key.clone(), 8443, now);
+
+            assert_eq!(table.entries.len(), 1);
+            assert_eq!(table.outbound_listener(&key, now), Some(8443));
+            assert_eq!(
+                table.inbound_destination(
+                    &ReverseFlowKey {
+                        protocol: IPPROTO_TCP,
+                        client: "192.0.2.10:40000".parse().unwrap(),
+                        listener_port: 8443,
+                    },
+                    now,
+                ),
+                Some("198.51.100.20:443".parse().unwrap())
+            );
+
+            for _ in 0..MAX_REDIRECT_EXPIRY_ENTRIES * 2 {
+                table.touch(&key, Instant::now());
+            }
+            assert!(table.expiry.len() <= MAX_REDIRECT_EXPIRY_ENTRIES);
+
+            for port in 0..MAX_REDIRECT_FLOWS + 1 {
+                let key = FlowKey {
+                    protocol: IPPROTO_UDP,
+                    client: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port as u16),
+                    original_destination: SocketAddr::new(
+                        IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                        10000 + (port as u16 % 1000),
+                    ),
+                };
+                table.insert(key, 1000, now);
+            }
+            assert!(table.entries.len() <= MAX_REDIRECT_FLOWS);
+        }
+
+        #[test]
+        fn redirects_ipv4_udp_and_restores_original_source_on_reply() {
+            let mut outbound = vec![
+                0x45,
+                0,
+                0,
+                28,
+                0,
+                0,
+                0,
+                0,
+                64,
+                IPPROTO_UDP,
+                0,
+                0,
+                192,
+                0,
+                2,
+                10,
+                198,
+                51,
+                100,
+                20,
+                0x9c,
+                0x40,
+                0,
+                53,
+                0,
+                8,
+                0,
+                0,
+            ];
+            let redirects = vec![PortRedirect::new(53, false, 5353)];
+            let flows = Arc::new(Mutex::new(RedirectFlowTable::default()));
+            let mut outbound_addr = WindivertAddress::default();
+            outbound_addr.set_direction(WINDIVERT_DIRECTION_OUT);
+            let outbound_len = outbound.len();
+
+            WinDivertInterceptor::redirect_packet(
+                &mut outbound,
+                outbound_len,
+                &outbound_addr,
+                &redirects,
+                &flows,
+            )
+            .expect("outbound rewrite should succeed");
+
+            assert_eq!(&outbound[16..20], &[127, 0, 0, 1]);
+            assert_eq!(&outbound[22..24], &5353u16.to_be_bytes());
+
+            let mut inbound = vec![
+                0x45,
+                0,
+                0,
+                28,
+                0,
+                0,
+                0,
+                0,
+                64,
+                IPPROTO_UDP,
+                0,
+                0,
+                127,
+                0,
+                0,
+                1,
+                192,
+                0,
+                2,
+                10,
+                0x14,
+                0xe9,
+                0x9c,
+                0x40,
+                0,
+                8,
+                0,
+                0,
+            ];
+            let mut inbound_addr = WindivertAddress::default();
+            inbound_addr.set_direction(WINDIVERT_DIRECTION_IN);
+            let inbound_len = inbound.len();
+            WinDivertInterceptor::redirect_packet(
+                &mut inbound,
+                inbound_len,
+                &inbound_addr,
+                &redirects,
+                &flows,
+            )
+            .expect("inbound rewrite should succeed");
+
+            assert_eq!(&inbound[12..16], &[198, 51, 100, 20]);
+            assert_eq!(&inbound[20..22], &53u16.to_be_bytes());
         }
 
         #[test]
