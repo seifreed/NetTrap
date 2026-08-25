@@ -22,10 +22,11 @@ covered by the process-health and dispatch checks.
 The required client contract is `dig` 9.x, `curl` 8.x, OpenSSL 3.x or
 LibreSSL 3.x, plus `ldapsearch` when installed. `tests/verify_platform.sh`
 fails on other required-client major versions and logs the exact client
-versions used by each runner. The release Docker smoke also runs `ldapsearch`,
-`redis-cli`, `mosquitto_pub`, and curl's POP3/IMAP clients. LDAP is skipped with
-an explicit warning on host runners when the optional client is unavailable. A
-new major is added only after the same E2E suite passes with it.
+versions used by each runner. The release Docker smoke also runs
+`openssl s_client`, curl's HTTPS/SMTP/FTP/POP3/IMAP clients, `ssh`, `ldapsearch`,
+`redis-cli`, and `mosquitto_pub`. LDAP is skipped with an explicit warning on
+host runners when the optional client is unavailable. A new major is added only
+after the same E2E suite passes with it.
 
 | Handler | Current behavior | Client E2E | Known ceiling |
 |---|---|---:|---|
@@ -39,7 +40,7 @@ new major is added only after the same E2E suite passes with it.
 | IMAP/IMAPS | Explicit listener banner and command subset | Yes (curl IMAP auth probe) | No content detector; must be selected by listener name |
 | TFTP | RRQ/WRQ block handling and configured file root | No | No required real-client transfer E2E |
 | Telnet | Negotiation/prompt responses and command capture | No | Port-open smoke only; not a full terminal server |
-| SSH | Banner and partial KEX/authentication responses | No | Does not complete a normal OpenSSH authentication session |
+| SSH | Banner and partial KEX/authentication responses | Yes (`ssh`, banner/KEX handshake) | Does not complete a normal OpenSSH authentication session |
 | SMB | SMB1/SMB2 parsing and synthetic negotiation | Yes (`smbclient`, negotiation probe) | Fixed partial SMB2 behavior; the client does not establish file sharing or a full SMB2/SMB3 session |
 | RDP | X.224/Cookie parsing and synthetic negotiation data | No | No complete RDP security or desktop session |
 | Redis | RESP parsing and a command-response subset | Yes (`redis-cli`, PING) | No persistence, replication, or full Redis semantics |

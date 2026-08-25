@@ -8,13 +8,17 @@ echo ""
 
 FAILED=0
 PASSED=0
+TEST_CONFIG="$(mktemp /tmp/nettrap-integration.XXXXXX.toml)"
+SMTP_DIR="/tmp/nettrap-integration-smtp"
+SMTP_MESSAGE="/tmp/nettrap-integration-message.eml"
 
 cleanup() {
     if [ -n "${NETTRAP_PID:-}" ]; then
         kill "$NETTRAP_PID" 2>/dev/null || true
         wait "$NETTRAP_PID" 2>/dev/null || true
     fi
-    rm -f /tmp/test_output.txt
+    rm -f /tmp/test_output.txt "$TEST_CONFIG" "$SMTP_MESSAGE"
+    rm -rf "$SMTP_DIR"
 }
 
 trap cleanup EXIT
@@ -102,13 +106,82 @@ run_smb_negotiate_probe() {
     grep -Eiq 'protocol|NT_STATUS|failed|error' <<< "$output"
 }
 
+run_tls_handshake() {
+    local output
+    output="$(timeout 10 openssl s_client -connect 127.0.0.1:18443 \
+        -servername example.test -showcerts </dev/null 2>&1 || true)"
+    grep -Fq 'BEGIN CERTIFICATE' <<< "$output"
+}
+
+run_https_get() {
+    test "$(curl --noproxy '*' --insecure --silent --show-error \
+        --resolve example.test:18443:127.0.0.1 \
+        --output /dev/null --write-out '%{http_code}' \
+        https://example.test:18443/)" = "200"
+}
+
+run_smtp_delivery() {
+    rm -rf "$SMTP_DIR"
+    mkdir -p "$SMTP_DIR"
+    printf 'Subject: NetTrap E2E\n\nclient delivery\n' >"$SMTP_MESSAGE"
+    curl --noproxy '*' --silent --show-error --url smtp://127.0.0.1:12525 \
+        --mail-from sender@example.test --mail-rcpt receiver@example.test \
+        --upload-file "$SMTP_MESSAGE"
+    find "$SMTP_DIR" -type f -name '*.eml' -print -quit | grep -q .
+}
+
+run_ftp_download() {
+    test "$(curl --noproxy '*' --silent --show-error --user malware:secret \
+        ftp://127.0.0.1:12121/readme.txt)" = "NetTrap default text file"
+}
+
+run_ssh_handshake() {
+    local output
+    output="$(ssh -vv -o BatchMode=yes -o ConnectTimeout=5 \
+        -o ConnectionAttempts=1 -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null -p 2222 127.0.0.1 \
+        </dev/null 2>&1 || true)"
+    grep -Fq 'Remote protocol version 2.0' <<< "$output"
+}
+
+sed '/^output_format =/a smtp_dir = "/tmp/nettrap-integration-smtp"' \
+    /etc/nettrap/config.toml >"$TEST_CONFIG"
+cat >>"$TEST_CONFIG" <<'EOF'
+
+[[listeners]]
+name = "https"
+protocol = "tcp"
+port = 18443
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+use_ssl = true
+
+[[listeners]]
+name = "smtp"
+protocol = "tcp"
+port = 12525
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "ftp"
+protocol = "tcp"
+port = 12121
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+pasv_ports = "30100-30105"
+EOF
+
 echo "Starting NetTrap engine..."
-timeout 120 nettrap run -c /etc/nettrap/config.toml &
+timeout 120 nettrap run -c "$TEST_CONFIG" &
 NETTRAP_PID=$!
 sleep 3
 
 echo "Waiting for services..."
-for port in 445 5353 8080 110 143 1389 1883 2222 2323 3306 5432 6379; do
+for port in 445 5353 8080 110 143 1389 1883 2222 2323 3306 5432 6379 12121 12525 18443; do
     ready=false
     for _ in $(seq 1 40); do
         if if [ "$port" = 5353 ]; then
@@ -159,6 +232,22 @@ run_test "HTTP connection exhaustion" run_connection_exhaustion_probe
 
 echo ""
 
+echo "--- TLS/HTTPS Protocol Tests ---"
+
+run_test "TLS certificate handshake" run_tls_handshake
+
+run_test "HTTPS GET" run_https_get
+
+echo ""
+
+echo "--- SMTP/FTP Protocol Tests ---"
+
+run_test "SMTP client delivery" run_smtp_delivery
+
+run_test "FTP client download" run_ftp_download
+
+echo ""
+
 echo "--- LDAP Protocol Tests ---"
 
 run_test "LDAP bind and search" \
@@ -200,6 +289,8 @@ echo "--- SSH/Telnet Listener Tests ---"
 
 run_test "SSH port open" \
     "nc -z 127.0.0.1 2222"
+
+run_test "SSH client handshake" run_ssh_handshake
 
 run_test "Telnet port open" \
     "nc -z 127.0.0.1 2323"

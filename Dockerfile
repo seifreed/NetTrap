@@ -28,6 +28,8 @@ RUN apt-get update && apt-get install -y \
     mariadb-client \
     mosquitto-clients \
     netcat-openbsd \
+    openssh-client \
+    openssl \
     postgresql-client \
     procps \
     redis-tools \
@@ -47,7 +49,7 @@ COPY tests/protocol_matrix_smoke.sh /app/protocol_matrix_smoke.sh
 RUN mkdir -p /var/log/nettrap /var/lib/nettrap/pcap \
     && chown -R nettrap:nettrap /var/log/nettrap /var/lib/nettrap
 
-EXPOSE 445 5353/udp 8080 110 143 1389 1883 2222 2323 3306 5432 6379 9090 9091
+EXPOSE 445 5353/udp 8080 110 143 1389 1883 2222 2323 3306 5432 6379 12121 12525 18443 9090 9091
 
 USER nettrap
 
