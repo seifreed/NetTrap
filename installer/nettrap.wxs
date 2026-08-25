@@ -13,6 +13,11 @@
         <Component Id="MainFiles" Guid="*">
           <File Id="NettrapExecutable" Source="$(var.BinaryPath)" KeyPath="yes" />
           <File Id="NettrapConfig" Source="$(var.ConfigPath)" />
+          <?if $(var.Arch) = x64 ?>
+          <File Id="WinDivertDll" Source="$(var.WinDivertDllPath)" />
+          <File Id="WinDivertSys" Source="$(var.WinDivertSysPath)" />
+          <File Id="WinDivertLicense" Source="$(var.WinDivertLicensePath)" />
+          <?endif ?>
         </Component>
         <Directory Id="DOCFOLDER" Name="docs">
           <Component Id="Documentation" Guid="*">

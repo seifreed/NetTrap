@@ -14,9 +14,8 @@ suite.
   manual cleanup. The opt-in Linux network-namespace E2E covers redirection,
   crash recovery, and graceful cleanup.
 - Windows x86_64 transparent redirection is experimental and currently covers
-  bounded TCP/UDP NAT flows only. WinDivert binaries and drivers are external
-  prerequisites and are not shipped in release archives. Windows ARM64 stays
-  in listener/capture mode.
+  bounded TCP/UDP NAT flows only. Release ZIP/MSI artifacts bundle the pinned
+  WinDivert runtime and license; Windows ARM64 stays in listener/capture mode.
 - macOS has no transparent redirection implementation.
 - Live capture and process attribution depend on OS facilities, privileges, and
   external packet-capture runtimes.

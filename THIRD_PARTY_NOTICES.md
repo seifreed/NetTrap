@@ -10,7 +10,7 @@ the repository license policy. Every release publishes an SPDX SBOM containing
 the package versions and declared license identifiers; that SBOM is the
 authoritative dependency inventory for the corresponding artifact.
 
-## Optional External Components
+## Optional External Components Not Bundled
 
 These components are not bundled in NetTrap release archives:
 
@@ -20,9 +20,12 @@ These components are not bundled in NetTrap release archives:
 - **Npcap** is an external Windows packet-capture prerequisite. The free/demo
   installer is not redistributable with NetTrap; redistribution requires the
   appropriate Npcap OEM rights. Terms: <https://npcap.com/oem/>.
-- **WinDivert** adapter source remains in the workspace for future development,
-  but NetTrap releases do not ship its DLL or driver and Windows interception is
-  disabled. WinDivert is available under the GNU LGPL. Project and terms:
+## Bundled Windows x86_64 Component
+
+- **WinDivert** DLL and `WinDivert64.sys` are bundled only in Windows x86_64
+  release ZIP/MSI artifacts for the experimental NAT interception path. The
+  matching `WinDivert-LICENSE.txt` file is included in those artifacts. WinDivert
+  is available under the GNU LGPL. Project and terms:
   <https://reqrypt.org/windivert.html>.
 
 ## System Libraries
@@ -31,5 +34,6 @@ Linux and macOS builds may dynamically use system-provided `libpcap` and Linux
 netfilter libraries. They are installed and licensed by the host operating
 system or container base image and are not included in NetTrap binary archives.
 
-No Npcap installer, WinDivert binary/driver, or mkcert binary is included in a
-NetTrap release unless a future release notice explicitly says otherwise.
+No Npcap installer or mkcert binary is included in a NetTrap release. Windows
+ARM64 releases do not include WinDivert because that architecture uses the
+Npcap capture-only path.

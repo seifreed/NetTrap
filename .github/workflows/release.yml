@@ -137,6 +137,12 @@ jobs:
           New-Item -ItemType Directory -Force -Path $runtime | Out-Null
           Copy-Item (Join-Path $root "WinDivert-2.2.2-A\x64\WinDivert.dll") $runtime
           Copy-Item (Join-Path $root "WinDivert-2.2.2-A\x64\WinDivert64.sys") $runtime
+          $license = Get-ChildItem -Path $root -Recurse -File |
+            Where-Object { $_.Name -match '^LICENSE(\.txt)?$' } |
+            Select-Object -First 1
+          if ($null -eq $license) { throw "WinDivert license file was not found" }
+          Copy-Item $license.FullName (Join-Path $runtime "WinDivert-LICENSE.txt")
+          "WINDIVERT_RUNTIME=$runtime" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "PATH=$runtime;$env:PATH" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
         shell: pwsh
 
@@ -221,6 +227,14 @@ jobs:
             "PLATFORM_SUPPORT.md", "PROTOCOL_SUPPORT.md"
           )
           Copy-Item $releaseFiles -Destination package
+          if ("${{ matrix.arch }}" -eq "x64") {
+            if (-not $env:WINDIVERT_RUNTIME) { throw "WinDivert runtime path is not configured" }
+            Copy-Item @(
+              (Join-Path $env:WINDIVERT_RUNTIME "WinDivert.dll"),
+              (Join-Path $env:WINDIVERT_RUNTIME "WinDivert64.sys"),
+              (Join-Path $env:WINDIVERT_RUNTIME "WinDivert-LICENSE.txt")
+            ) -Destination package
+          }
           & "target/${{ matrix.target }}/release/nettrap.exe" config --defaults | Out-File -FilePath package/config.toml -Encoding utf8
           Compress-Archive -Path package/* -DestinationPath "nettrap-${{ matrix.name }}.zip"
         shell: pwsh
@@ -247,8 +261,17 @@ jobs:
             "KnownLimitationsPath=$((Resolve-Path "KNOWN_LIMITATIONS.md").Path)",
             "ThirdPartyNoticesPath=$((Resolve-Path "THIRD_PARTY_NOTICES.md").Path)",
             "PlatformSupportPath=$((Resolve-Path "PLATFORM_SUPPORT.md").Path)",
-            "ProtocolSupportPath=$((Resolve-Path "PROTOCOL_SUPPORT.md").Path)"
+            "ProtocolSupportPath=$((Resolve-Path "PROTOCOL_SUPPORT.md").Path)",
+            "Arch=${{ matrix.arch }}"
           )
+          if ("${{ matrix.arch }}" -eq "x64") {
+            if (-not $env:WINDIVERT_RUNTIME) { throw "WinDivert runtime path is not configured" }
+            $defines += @(
+              "WinDivertDllPath=$((Resolve-Path (Join-Path $env:WINDIVERT_RUNTIME "WinDivert.dll")).Path)",
+              "WinDivertSysPath=$((Resolve-Path (Join-Path $env:WINDIVERT_RUNTIME "WinDivert64.sys")).Path)",
+              "WinDivertLicensePath=$((Resolve-Path (Join-Path $env:WINDIVERT_RUNTIME "WinDivert-LICENSE.txt")).Path)"
+            )
+          }
           $wixArgs = @('build', 'installer/nettrap.wxs', '-arch', "${{ matrix.arch }}")
           foreach ($define in $defines) { $wixArgs += @('-d', $define) }
           $wixArgs += @('-o', "nettrap-${{ matrix.name }}.msi")
@@ -300,6 +323,11 @@ jobs:
           foreach ($document in @("LICENSE", "README.md", "CHANGELOG.md", "SECURITY.md", "KNOWN_LIMITATIONS.md", "THIRD_PARTY_NOTICES.md", "PLATFORM_SUPPORT.md", "PROTOCOL_SUPPORT.md")) {
             if (-not (Test-Path "$cleanDir/$document")) { throw "Missing $document" }
           }
+          if ("${{ matrix.arch }}" -eq "x64") {
+            foreach ($driverFile in @("WinDivert.dll", "WinDivert64.sys", "WinDivert-LICENSE.txt")) {
+              if (-not (Test-Path "$cleanDir/$driverFile")) { throw "Missing $driverFile" }
+            }
+          }
           & "$cleanDir/nettrap.exe" --version
           & "$cleanDir/nettrap.exe" config --defaults | Out-Null
         shell: pwsh
@@ -319,6 +347,12 @@ jobs:
           if ($null -eq $installed) { throw "MSI extraction did not contain nettrap.exe" }
           $config = Get-ChildItem -Path $cleanDir -Filter config.toml -Recurse | Select-Object -First 1
           if ($null -eq $config) { throw "MSI extraction did not contain config.toml" }
+          if ("${{ matrix.arch }}" -eq "x64") {
+            foreach ($driverFile in @("WinDivert.dll", "WinDivert64.sys", "WinDivert-LICENSE.txt")) {
+              $driver = Get-ChildItem -Path $cleanDir -Filter $driverFile -Recurse | Select-Object -First 1
+              if ($null -eq $driver) { throw "MSI extraction did not contain $driverFile" }
+            }
+          }
           & $installed.FullName --version
           & $installed.FullName config --defaults | Out-Null
         shell: pwsh

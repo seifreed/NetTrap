@@ -1,9 +1,9 @@
 # WinDivert Binaries for NetTrap
 
 NetTrap `0.1.0-alpha.1` uses WinDivert for experimental TCP/UDP NAT
-redirection on Windows x86_64 when `--intercept` is enabled. Release archives
-do not include WinDivert binaries or drivers; install them separately before
-running that mode.
+redirection on Windows x86_64 when `--intercept` is enabled. Windows x86_64
+release ZIP/MSI artifacts include the pinned `WinDivert.dll`,
+`WinDivert64.sys`, and matching license text beside the executable.
 
 Windows listener mode does not need WinDivert. Experimental Windows capture
 uses an externally installed Npcap runtime.
@@ -20,7 +20,7 @@ Extract and place the following files:
 
 Windows x86 is not a CI or release target.
 
-## Download
+## Development Download
 
 ```powershell
 # Download the development version pinned by this example

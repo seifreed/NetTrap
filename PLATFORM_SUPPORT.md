@@ -27,8 +27,8 @@ the release workflow; it does not imply transparent interception support.
   contract runs as `NETTRAP_NAMESPACE_E2E=1` with root privileges on Linux.
 - macOS has no transparent redirection implementation.
 - Windows x86_64 `--intercept` uses WinDivert for experimental TCP/UDP NAT
-  redirection. WinDivert binaries and drivers remain an external prerequisite;
-  release archives do not bundle them.
+  redirection. Release ZIP/MSI artifacts bundle the pinned WinDivert binaries
+  and license text beside the executable.
 - Npcap is an external prerequisite for experimental live capture on Windows;
   it is not bundled.
 - Process attribution, TLS termination, and live packet capture remain
