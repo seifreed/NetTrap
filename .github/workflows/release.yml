@@ -159,6 +159,11 @@ jobs:
           & "target/${{ matrix.target }}/release/nettrap.exe" config --defaults | Out-Null
         shell: pwsh
 
+      - name: Run Windows listener parity smoke
+        if: runner.os == 'Windows' && matrix.arch != 'arm64'
+        run: ./tests/windows_listener_smoke.ps1 -BinaryPath "${{ github.workspace }}\target\${{ matrix.target }}\release\nettrap.exe"
+        shell: pwsh
+
       - name: Package Unix release
         if: matrix.archive == 'tar'
         run: |
