@@ -316,7 +316,17 @@ jobs:
       - name: Smoke test binary
         run: |
           & "target/${{ matrix.target }}/release/nettrap.exe" --version
-          & "target/${{ matrix.target }}/release/nettrap.exe" config --defaults | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows binary --version failed with exit code $LASTEXITCODE"
+          }
+          $defaultsPath = Join-Path $env:RUNNER_TEMP "nettrap-defaults.toml"
+          & "target/${{ matrix.target }}/release/nettrap.exe" config --defaults --output $defaultsPath
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows binary config --defaults failed with exit code $LASTEXITCODE"
+          }
+          if (-not (Test-Path $defaultsPath)) {
+            throw "Windows binary config --defaults did not create $defaultsPath"
+          }
         shell: pwsh
 
       - name: Upload artifact
