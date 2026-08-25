@@ -28,6 +28,11 @@ process liveness and bounded file-descriptor/RSS growth, and injects truncated
 HTTP/DNS frames between rounds. This is a bounded hostile-load contract, not a
 claim of unrestricted production-scale soak coverage.
 
+Windows CI and release jobs run `tests/windows_protocol_matrix_smoke.ps1` over
+the same 30 TCP and 14 UDP listener matrix and enforce the same 26/11
+response-versus-capture-only contract. This makes the protocol smoke a parity
+check rather than a Windows-only subset.
+
 The required client contract is `dig` 9.x, `curl` 8.x, OpenSSL 3.x or
 LibreSSL 3.x, plus `ldapsearch` when installed. `tests/verify_platform.sh`
 fails on other required-client major versions and logs the exact client
