@@ -58,7 +58,7 @@ run_quick() {
 
     run cargo fmt --all -- --check
     run cargo clippy --all-targets --all-features -- -D warnings
-    run cargo test
+    run cargo test -- --test-threads=1
     run cargo audit
     run cargo deny check
     run scripts/check-architecture.sh

@@ -64,7 +64,7 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Run tests
-        run: cargo test
+        run: cargo test -- --test-threads=1
 
       - name: Run security audit
         run: cargo audit
