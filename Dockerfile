@@ -36,6 +36,8 @@ RUN apt-get update && apt-get install -y \
     redis-tools \
     smbclient \
     iproute2 \
+    iptables \
+    nftables \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 10001 nettrap \
     && useradd --system --uid 10001 --gid nettrap --home-dir /app --shell /usr/sbin/nologin nettrap
