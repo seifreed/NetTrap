@@ -165,6 +165,23 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }}
 
+      - name: Sign Windows binary (Authenticode)
+        if: runner.os == 'Windows' && vars.NETTRAP_NATIVE_SIGNING == '1'
+        env:
+          NETTRAP_WINDOWS_PFX_BASE64: ${{ secrets.NETTRAP_WINDOWS_PFX_BASE64 }}
+          NETTRAP_WINDOWS_PFX_PASSWORD: ${{ secrets.NETTRAP_WINDOWS_PFX_PASSWORD }}
+          NETTRAP_WINDOWS_TIMESTAMP_URL: ${{ vars.NETTRAP_WINDOWS_TIMESTAMP_URL }}
+        run: ./scripts/sign_windows.ps1 -BinaryPath "target/${{ matrix.target }}/release/nettrap.exe"
+        shell: pwsh
+
+      - name: Sign macOS binary (Developer ID)
+        if: runner.os == 'macOS' && vars.NETTRAP_NATIVE_SIGNING == '1'
+        env:
+          NETTRAP_MACOS_P12_BASE64: ${{ secrets.NETTRAP_MACOS_P12_BASE64 }}
+          NETTRAP_MACOS_P12_PASSWORD: ${{ secrets.NETTRAP_MACOS_P12_PASSWORD }}
+          NETTRAP_MACOS_SIGNING_IDENTITY: ${{ vars.NETTRAP_MACOS_SIGNING_IDENTITY }}
+        run: bash scripts/sign_macos.sh "target/${{ matrix.target }}/release/nettrap"
+
       - name: Run platform tests
         if: matrix.arch != 'arm64'
         run: cargo test --all --locked --target ${{ matrix.target }} -- --test-threads=1

@@ -26,7 +26,9 @@ checksum detects local corruption and is also published as a release asset.
 
 The bundle signature covers the downloaded release artifact. Individual
 executables inside the published packages are hash-checked against the
-corresponding signed raw `.binary` before release publication. They are not
-currently Authenticode-signed or Apple Developer
-ID-signed. Those platform signatures require externally managed signing
-identities and must not be inferred from the artifact signature.
+corresponding signed raw `.binary` before release publication. Releases with
+the repository variable `NETTRAP_NATIVE_SIGNING=1` additionally sign Windows
+executables with Authenticode and macOS executables with Developer ID; the
+required PFX/P12 identities stay in GitHub Actions secrets. Without that
+variable, platform-native signatures are intentionally omitted and must not be
+inferred from the artifact signature.

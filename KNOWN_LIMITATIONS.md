@@ -45,9 +45,11 @@ See [PROTOCOL_SUPPORT.md](PROTOCOL_SUPPORT.md) for the handler-by-handler matrix
 - Event, report, API, and configuration schemas carry explicit version fields,
   and `config --migrate` handles older configuration versions; long-term
   compatibility guarantees are not yet provided.
-- Release binaries are not platform code-signed for Windows, macOS, or Linux.
-  GitHub release artifacts are keylessly signed with Sigstore bundles and also
-  include checksums, SBOMs, and provenance attestations.
+- Linux release binaries and all packages are keylessly signed with Sigstore
+  bundles and include checksums, SBOMs, and provenance attestations. Windows
+  Authenticode and macOS Developer ID signing is available in the release
+  workflow only when `NETTRAP_NATIVE_SIGNING=1` is configured with external
+  identities; the repository does not contain those private keys.
 - Release gates include a bounded hostile HTTP/DNS soak with malformed frames,
   64-connection churn, bounded file-descriptor/RSS growth checks, and a
   128-socket connection-exhaustion smoke. The scheduled weekly gate extends
