@@ -121,6 +121,40 @@ jobs:
             exit 1
           fi
 
+  hostile-e2e-smoke:
+    name: Hostile E2E Smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpcap-dev libnetfilter-queue-dev libnfnetlink-dev curl dnsutils netcat-openbsd python3
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable (2026-08-25)
+        with:
+          toolchain: 1.97.1
+
+      - name: Build release binary
+        run: cargo build --release --locked -p nettrap-cli
+
+      - name: Run hostile runtime soak
+        env:
+          NETTRAP_BIN: ./target/release/nettrap
+          NETTRAP_SOAK_SECONDS: "60"
+        run: bash tests/soak_test.sh
+
+      - name: Run complete hostile protocol matrix
+        env:
+          NETTRAP_BIN: ./target/release/nettrap
+          NETTRAP_MATRIX_REPEAT: "2"
+        run: bash tests/protocol_matrix_smoke.sh
+
   scheduled-heavy-gates:
     name: Scheduled Heavy Gates
     runs-on: ubuntu-latest
