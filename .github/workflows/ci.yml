@@ -261,6 +261,10 @@ jobs:
           $sdkArchive = Join-Path $env:RUNNER_TEMP "npcap-sdk.zip"
           $sdkRoot = Join-Path $env:RUNNER_TEMP "npcap-sdk"
           Invoke-WebRequest -Uri "https://npcap.com/dist/npcap-sdk-1.16.zip" -OutFile $sdkArchive
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $sdkArchive).Hash.ToLowerInvariant()
+          if ($hash -ne "f0a8be7778ee3ae1b99bbbecb27a3ff0f6c111a4093f1c78c5c5a099607184db") {
+            throw "Npcap SDK archive SHA-256 mismatch: $hash"
+          }
           Expand-Archive -Path $sdkArchive -DestinationPath $sdkRoot -Force
           $libDir = Join-Path $sdkRoot $(if ("${{ matrix.arch }}" -eq "arm64") { "Lib\ARM64" } else { "Lib\x64" })
           "LIB=$libDir;$env:LIB" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
