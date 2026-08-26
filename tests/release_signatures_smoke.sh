@@ -7,6 +7,18 @@ command -v cosign >/dev/null || {
     exit 1
 }
 
+workflow="$(dirname -- "${BASH_SOURCE[0]}")/../.github/workflows/release.yml"
+for marker in \
+    "cosign sign-blob --yes" \
+    "scripts/verify-release-signatures.sh releases" \
+    "Sign Windows MSI (Authenticode)" \
+    "Get-AuthenticodeSignature -LiteralPath \"nettrap-\${{ matrix.name }}.msi\""; do
+    if ! grep -Fq "$marker" "$workflow"; then
+        echo "release signing contract is missing: $marker" >&2
+        exit 1
+    fi
+done
+
 workdir="$(mktemp -d)"
 trap 'rm -rf "$workdir"' EXIT
 
