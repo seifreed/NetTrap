@@ -53,10 +53,10 @@ See [PROTOCOL_SUPPORT.md](PROTOCOL_SUPPORT.md) for the handler-by-handler matrix
 - Release gates include a bounded hostile HTTP/DNS soak with malformed frames,
   64-connection churn, bounded file-descriptor/RSS growth checks, and a
   128-socket connection-exhaustion smoke. The scheduled weekly gate extends
-  that soak to 30 minutes and repeats the complete TCP/UDP protocol matrix 32
-  times, injecting 4 KiB malformed payloads into every handler plus truncated
-  HTTP/DNS frames; unbounded production-scale hostile load is not a release
-  gate.
+  that soak to 30 minutes and runs the complete TCP/UDP protocol matrix for a
+  bounded 30-minute window (and at least 32 rounds), injecting 4 KiB malformed
+  payloads into every handler plus truncated HTTP/DNS frames; unbounded
+  production-scale hostile load is not a release gate.
 - Real malware samples and private captures are not part of default regression
   tests; runtime behavior is sample-agnostic.
 
