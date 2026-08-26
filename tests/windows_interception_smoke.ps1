@@ -20,7 +20,7 @@ default_tcp_listener = "http-smoke"
 default_udp_listener = "dns-smoke"
 pcap_enabled = false
 output_format = "jsonl"
-output_path = "$eventsPath"
+output_path = "$($eventsPath.Replace('\', '/'))"
 
 [[listeners]]
 name = "http-smoke"
