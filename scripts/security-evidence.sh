@@ -53,6 +53,7 @@ jq -e '
         "Build & Test (Windows x86_64-pc-windows-msvc)",
         "Build & Test (Windows aarch64-pc-windows-msvc)",
         "Verify Linux/Windows protocol parity",
+        "Hostile E2E Smoke",
         "Rust Quality",
         "Lockfile and Diff Hygiene",
         "Security Audit",
