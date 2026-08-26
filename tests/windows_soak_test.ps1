@@ -89,6 +89,12 @@ function Wait-Tcp([int] $Port) {
     throw "TCP listener on port $Port did not become ready"
 }
 
+function Reset-Connection([Net.Sockets.TcpClient] $Client) {
+    if ($Client.Connected) {
+        $Client.Client.LingerState = [Net.Sockets.LingerOption]::new($true, 0)
+    }
+}
+
 function Invoke-Http {
     $client = [Net.Sockets.TcpClient]::new()
     try {
@@ -103,7 +109,10 @@ function Invoke-Http {
         if ($count -eq 0 -or $text -notmatch '^HTTP/1\.[01] \d{3}') {
             throw "HTTP soak probe returned an invalid response"
         }
-    } finally { $client.Dispose() }
+    } finally {
+        Reset-Connection $client
+        $client.Dispose()
+    }
 }
 
 function Invoke-Dns {
@@ -150,7 +159,10 @@ function Invoke-DnsTcp {
         if (($body[2] -band 0x80) -eq 0) {
             throw "DNS TCP response did not set QR (flags byte $($body[2]))"
         }
-    } finally { $client.Dispose() }
+    } finally {
+        Reset-Connection $client
+        $client.Dispose()
+    }
 }
 
 function Invoke-Churn([int] $Count) {
@@ -161,6 +173,7 @@ function Invoke-Churn([int] $Count) {
             $client.Connect("127.0.0.1", 18080)
             $stream = $client.GetStream()
             $stream.Write($http, 0, $http.Length)
+            Reset-Connection $client
             [void]$clients.Add($client)
         } catch { $client.Dispose() }
     }
@@ -180,7 +193,11 @@ function Invoke-Malformed {
         try {
             $client.Connect("127.0.0.1", 18080)
             $client.GetStream().Write($bad, 0, $bad.Length)
-        } catch { } finally { $client.Dispose() }
+        } catch {
+        } finally {
+            Reset-Connection $client
+            $client.Dispose()
+        }
     }
 }
 
