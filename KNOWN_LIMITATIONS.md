@@ -58,11 +58,12 @@ See [PROTOCOL_SUPPORT.md](PROTOCOL_SUPPORT.md) for the handler-by-handler matrix
   reports an open high or critical Code Scanning alert. This gate is not a
   substitute for an independent third-party security audit.
 - Release gates include a bounded hostile HTTP/DNS soak with malformed frames,
-  64-connection churn, bounded file-descriptor/RSS growth checks, and a
-  128-socket connection-exhaustion smoke. The scheduled weekly gate extends
-  that soak to 30 minutes and runs the complete TCP/UDP protocol matrix for a
-  bounded 30-minute window (and at least 32 rounds), injecting 4 KiB malformed
-  payloads into every handler plus truncated HTTP/DNS frames; unbounded
+  64-connection churn, bounded file-descriptor/RSS growth checks, a
+  128-socket connection-exhaustion smoke, and a complete TCP/UDP protocol
+  matrix sustained for at least 60 seconds. The scheduled weekly gate extends
+  that matrix and soak to a bounded 30-minute window (and at least 32 rounds),
+  injecting 4 KiB malformed payloads into every handler plus truncated HTTP/DNS
+  frames; unbounded
   production-scale hostile load is not a release gate. The scheduled gate
   runs the equivalent Windows HTTP/DNS hostile soak with concurrent sockets,
   malformed payloads, and working-set/handle bounds. It also runs every

@@ -37,6 +37,7 @@ handler, truncated HTTP/DNS probes, and bounded working-set/handle growth.
 Scheduled CI runs the Windows matrix for a bounded 30-minute window (and at
 least 32 rounds); release and non-scheduled runs repeat it twice. This makes
 the protocol smoke a parity check rather than a Windows-only subset.
+Release jobs also enforce a bounded 60-second matrix window before packaging.
 The Windows listener smoke also runs real `curl.exe` client probes for HTTP,
 DNS, TLS, SMTP, FTP, POP3, and IMAP, including SMTP message persistence.
 
