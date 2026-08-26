@@ -251,7 +251,12 @@ function Assert-TcpResponse([string] $Name, [byte[]] $Response) {
             try { $null = $text | ConvertFrom-Json -ErrorAction Stop }
             catch { throw "invalid NKN JSON-RPC response" }
         }
-        "rdp" { if ($Response[0] -ne 0x03) { throw "invalid RDP response" } }
+        "rdp" {
+            if ($Response.Length -lt 4 -or $Response[0] -ne 0x03 -or
+                $Response[2] -ne 0x00 -or $Response[3] -ne 0x00) {
+                throw "invalid RDP response"
+            }
+        }
     }
 }
 
@@ -421,6 +426,52 @@ function Invoke-UdpProbe([string] $Name, [int] $Port, [byte[]] $Payload, [bool] 
         $script:udpResponses++
     } finally {
         $udp.Dispose()
+    }
+}
+
+function Invoke-SocksConnectProbe([int] $Port) {
+    $client = [System.Net.Sockets.TcpClient]::new()
+    $client.ReceiveTimeout = 5000
+    try {
+        $client.Connect("127.0.0.1", $Port)
+        $stream = $client.GetStream()
+        $stream.ReadTimeout = 5000
+
+        $greeting = [byte[]](0x05, 0x01, 0x00)
+        $stream.Write($greeting, 0, $greeting.Length)
+        $method = Read-Exact $stream 2
+        if ($method[0] -ne 0x05 -or $method[1] -ne 0x00) {
+            throw "SOCKS5 no-auth negotiation failed"
+        }
+
+        $request = [Text.Encoding]::ASCII.GetBytes("example.test")
+        $frame = [byte[]](0x05, 0x01, 0x00, 0x03, $request.Length) + $request + [byte[]](0x00, 0x50)
+        $stream.Write($frame, 0, $frame.Length)
+        $response = Read-Exact $stream 10
+        if ($response[0] -ne 0x05 -or $response[1] -ne 0x00 -or
+            $response[2] -ne 0x00 -or $response[3] -ne 0x01) {
+            throw "invalid SOCKS5 CONNECT response"
+        }
+    } finally {
+        $client.Dispose()
+    }
+}
+
+function Invoke-MemcachedSetProbe([int] $Port) {
+    $client = [System.Net.Sockets.TcpClient]::new()
+    $client.ReceiveTimeout = 5000
+    try {
+        $client.Connect("127.0.0.1", $Port)
+        $stream = $client.GetStream()
+        $stream.ReadTimeout = 5000
+        $payload = [Text.Encoding]::ASCII.GetBytes("set e2e 0 0 5`r`nhello`r`n")
+        $stream.Write($payload, 0, $payload.Length)
+        $response = [Text.Encoding]::ASCII.GetString((Read-StreamResponse $stream))
+        if ($response -notmatch '(?m)^STORED\r?$') {
+            throw "invalid Memcached SET response"
+        }
+    } finally {
+        $client.Dispose()
     }
 }
 
@@ -596,6 +647,12 @@ try {
             $expectResponse = $tcpCaptureOnly -notcontains $name
             $payload = [byte[]](Get-TcpPayload $name)
             Invoke-TcpProbe $name $tcpPorts[$name] $payload (Is-ServerFirst $name) $expectResponse
+            if ($name -eq "socks" -and $expectResponse) {
+                Invoke-SocksConnectProbe $tcpPorts[$name]
+            }
+            if ($name -eq "memcached" -and $expectResponse) {
+                Invoke-MemcachedSetProbe $tcpPorts[$name]
+            }
         }
 
         foreach ($name in $udpNames) {
