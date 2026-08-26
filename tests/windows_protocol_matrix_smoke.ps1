@@ -142,12 +142,12 @@ function Read-Bytes($Stream) {
     try {
         $count = $Stream.Read($buffer, 0, $buffer.Length)
     } catch [System.IO.IOException] {
-        return [byte[]]::new(0)
+        return ,([byte[]]::new(0))
     }
     if ($count -le 0) {
-        return [byte[]]::new(0)
+        return ,([byte[]]::new(0))
     }
-    return [byte[]]$buffer[0..($count - 1)]
+    return ,([byte[]]$buffer[0..($count - 1)])
 }
 
 function Read-Exact($Stream, [int] $Count) {
@@ -164,7 +164,7 @@ function Read-Exact($Stream, [int] $Count) {
         }
         $offset += $read
     }
-    return $buffer
+    return ,$buffer
 }
 
 function Read-DnsTcpResponse($Stream) {
@@ -177,7 +177,7 @@ function Read-DnsTcpResponse($Stream) {
     [Array]::Copy($prefix, 0, $frame, 0, 2)
     $body = Read-Exact $Stream $length
     [Array]::Copy($body, 0, $frame, 2, $length)
-    return $frame
+    return ,$frame
 }
 
 function Read-StreamResponse($Stream) {
@@ -185,7 +185,7 @@ function Read-StreamResponse($Stream) {
     $Stream.ReadTimeout = 5000
     $first = Read-Bytes $Stream
     if ($first.Length -eq 0) {
-        return [byte[]]::new(0)
+        return ,([byte[]]::new(0))
     }
     $chunks.AddRange($first)
     $Stream.ReadTimeout = 250
@@ -199,7 +199,7 @@ function Read-StreamResponse($Stream) {
             throw "TCP probe response exceeded 16 MiB"
         }
     }
-    return $chunks.ToArray()
+    return ,$chunks.ToArray()
 }
 
 function Record-ResponseSize([string] $Transport, [string] $Name, [int] $Size) {
@@ -272,7 +272,7 @@ function Read-UntilText($Stream, [string] $Marker) {
         }
         $data.AddRange($chunk)
         if ([Text.Encoding]::ASCII.GetString($data.ToArray()).Contains($Marker)) {
-            return $data.ToArray()
+            return ,$data.ToArray()
         }
     }
 }
