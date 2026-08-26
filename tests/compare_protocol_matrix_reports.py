@@ -115,6 +115,19 @@ def canonical_response_sizes(report: dict[str, str], transport: str, path: Path)
             f"report {path} has inconsistent {transport}_response_sizes "
             f"(missing: {missing}; unexpected: {unexpected})"
         )
+    capture_only = {
+        name for name in report[f"{transport}_capture_only"].split(",") if name
+    }
+    for name in names:
+        minimum, maximum = entries[name]
+        if name in capture_only and (minimum != 0 or maximum != 0):
+            raise ValueError(
+                f"report {path} records a response for capture-only {transport} handler {name}"
+            )
+        if name not in capture_only and minimum == 0:
+            raise ValueError(
+                f"report {path} records an empty response for {transport} handler {name}"
+            )
     return ",".join(f"{name}:{entries[name][0]}-{entries[name][1]}" for name in names)
 
 
