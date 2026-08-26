@@ -11,6 +11,15 @@ PASSED=0
 TEST_CONFIG="$(mktemp /tmp/nettrap-integration.XXXXXX.toml)"
 SMTP_DIR="/tmp/nettrap-integration-smtp"
 SMTP_MESSAGE="/tmp/nettrap-integration-message.eml"
+IRC_PORT=16667
+FINGER_PORT=1079
+IDENT_PORT=1113
+DAYTIME_PORT=11013
+TIME_PORT=10037
+CHARGEN_PORT=11919
+QUOTD_PORT=11717
+MEMCACHED_PORT=11211
+SOCKS_PORT=11080
 
 cleanup() {
     if [ -n "${NETTRAP_PID:-}" ]; then
@@ -150,6 +159,54 @@ run_telnet_banner() {
     grep -Fq 'login:' <<< "$output"
 }
 
+run_irc_registration() {
+    local output
+    output="$({ printf 'NICK matrix\r\nUSER matrix 0 * :matrix\r\n'; sleep 1; } |
+        timeout 5 nc 127.0.0.1 "$IRC_PORT" 2>/dev/null || true)"
+    grep -Eq ' 001 matrix :' <<< "$output"
+}
+
+run_finger_query() {
+    local output
+    output="$(printf 'root\r\n' | timeout 5 nc 127.0.0.1 "$FINGER_PORT" 2>/dev/null || true)"
+    grep -Fq 'Login: root' <<< "${output//$'\r'/}"
+}
+
+run_ident_query() {
+    local output
+    output="$(printf '40000 , 80\r\n' | timeout 5 nc 127.0.0.1 "$IDENT_PORT" 2>/dev/null || true)"
+    grep -Fq 'USERID : UNIX : root' <<< "$output"
+}
+
+run_server_first_text() {
+    local output
+    output="$(timeout 2 nc 127.0.0.1 "$1" 2>/dev/null || true)"
+    test -n "$output"
+}
+
+run_rfc868_time() {
+    test "$(wc -c < <(timeout 2 nc 127.0.0.1 "$TIME_PORT" 2>/dev/null || true))" -ge 4
+}
+
+run_memcached_version() {
+    local output
+    output="$(printf 'version\r\n' | timeout 5 nc 127.0.0.1 "$MEMCACHED_PORT" 2>/dev/null || true)"
+    grep -Fq 'VERSION 1.6.22' <<< "$output"
+}
+
+run_socks_handshake() {
+    local response_path status
+    response_path="$(mktemp /tmp/nettrap-socks.XXXXXX)"
+    printf '\005\001\000' | timeout 5 nc 127.0.0.1 "$SOCKS_PORT" >"$response_path" 2>/dev/null || true
+    if od -An -t x1 "$response_path" | tr -d ' \n' | grep -Fq '0500'; then
+        status=0
+    else
+        status=$?
+    fi
+    rm -f "$response_path"
+    return "$status"
+}
+
 sed '/^output_format =/a smtp_dir = "/tmp/nettrap-integration-smtp"' \
     /etc/nettrap/config.toml >"$TEST_CONFIG"
 cat >>"$TEST_CONFIG" <<'EOF'
@@ -181,13 +238,90 @@ emulate_response = true
 pasv_ports = "30100-30105"
 EOF
 
+cat >>"$TEST_CONFIG" <<EOF
+
+[[listeners]]
+name = "irc"
+protocol = "tcp"
+port = $IRC_PORT
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "finger"
+protocol = "tcp"
+port = $FINGER_PORT
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "ident"
+protocol = "tcp"
+port = $IDENT_PORT
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "daytime"
+protocol = "tcp"
+port = $DAYTIME_PORT
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "time"
+protocol = "tcp"
+port = $TIME_PORT
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "chargen"
+protocol = "tcp"
+port = $CHARGEN_PORT
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "quotd"
+protocol = "tcp"
+port = $QUOTD_PORT
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "memcached"
+protocol = "tcp"
+port = $MEMCACHED_PORT
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "socks"
+protocol = "tcp"
+port = $SOCKS_PORT
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+EOF
+
 echo "Starting NetTrap engine..."
 timeout 120 nettrap run -c "$TEST_CONFIG" &
 NETTRAP_PID=$!
 sleep 3
 
 echo "Waiting for services..."
-for port in 445 5353 8080 110 143 1389 1883 2222 2323 3306 5432 6379 12121 12525 18443; do
+for port in 445 5353 8080 110 143 1389 1883 2222 2323 3306 5432 6379 12121 12525 18443 \
+    "$IRC_PORT" "$FINGER_PORT" "$IDENT_PORT" "$DAYTIME_PORT" "$TIME_PORT" \
+    "$CHARGEN_PORT" "$QUOTD_PORT" "$MEMCACHED_PORT" "$SOCKS_PORT"; do
     ready=false
     for _ in $(seq 1 40); do
         if if [ "$port" = 5353 ]; then
@@ -278,6 +412,28 @@ run_test "MQTT publish" \
 
 run_test "Redis PING" \
     "redis-cli -h 127.0.0.1 -p 6379 --raw PING | grep -Fx PONG"
+
+run_test "Memcached version" run_memcached_version
+
+run_test "SOCKS5 handshake" run_socks_handshake
+
+echo ""
+
+echo "--- Legacy TCP Service Tests ---"
+
+run_test "IRC registration" run_irc_registration
+
+run_test "Finger query" run_finger_query
+
+run_test "Ident query" run_ident_query
+
+run_test "Daytime response" "run_server_first_text $DAYTIME_PORT"
+
+run_test "RFC 868 time response" run_rfc868_time
+
+run_test "Chargen response" "run_server_first_text $CHARGEN_PORT"
+
+run_test "QOTD response" "run_server_first_text $QUOTD_PORT"
 
 echo ""
 
