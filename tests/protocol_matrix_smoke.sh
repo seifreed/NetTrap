@@ -380,6 +380,12 @@ if name == "coap" and (len(data) < 5 or data[0] >> 6 != 1 or data[1] < 0x40):
     raise SystemExit("invalid CoAP response")
 if name == "daytime" and not re.search(r"\d{2}:\d{2}:\d{2}", text):
     raise SystemExit("invalid daytime response")
+if name == "time" and len(data) < 4:
+    raise SystemExit("invalid RFC 868 response")
+if name in {"chargen", "quotd"} and len(data) < 1:
+    raise SystemExit(f"invalid {name} response")
+if name == "raw" and "probe" not in text:
+    raise SystemExit("invalid raw UDP response")
 PY
 }
 
