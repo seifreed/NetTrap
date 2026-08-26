@@ -1,7 +1,8 @@
 //! WinDivert-based packet interception for NetTrap on Windows.
 //!
-//! This crate provides a WinDivert interceptor for capturing and modifying
-//! network packets on Windows systems.
+//! This crate contains the WinDivert bindings and packet parser for Windows.
+//! Transparent interception is currently disabled until packet-preserving NAT
+//! and reinjection are validated on a real host.
 
 #[cfg(windows)]
 mod bindings;

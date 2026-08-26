@@ -1,32 +1,26 @@
 //! WinDivert Interceptor implementation.
 //!
-//! Implements the Interceptor trait using WinDivert for Windows packet capture.
+//! Contains the WinDivert adapter; runtime interception currently fails closed.
 
 use crate::prelude::*;
-use crate::bindings::{WinDivert, WindivertAddress, WINDIVERT_LAYER_NETWORK, WINDIVERT_DIRECTION_OUT};
+use crate::bindings::{WinDivert, WindivertAddress, WINDIVERT_DIRECTION_OUT};
 use parking_lot::RwLock;
 use std::sync::Arc;
 
 #[cfg(windows)]
 pub struct WinDivertInterceptor {
-    config: crate::intercept::InterceptorConfig,
     windivert: Arc<RwLock<Option<WinDivert>>>,
     handle: Arc<RwLock<Option<crate::bindings::HANDLE>>>,
     running: RwLock<bool>,
-    filter: String,
-    stats: crate::intercept::InterceptStats,
 }
 
 #[cfg(windows)]
 impl WinDivertInterceptor {
-    pub fn new(config: crate::intercept::InterceptorConfig) -> Result<Self> {
+    pub fn new(_config: crate::intercept::InterceptorConfig) -> Result<Self> {
         Ok(Self {
-            config,
             windivert: Arc::new(RwLock::new(None)),
             handle: Arc::new(RwLock::new(None)),
             running: RwLock::new(false),
-            filter: "outbound and ip".to_string(),
-            stats: crate::intercept::InterceptStats::default(),
         })
     }
 
@@ -263,22 +257,9 @@ impl WinDivertInterceptor {
 #[async_trait]
 impl Interceptor for WinDivertInterceptor {
     async fn init(&mut self) -> Result<()> {
-        tracing::info!("Initializing WinDivert interceptor with filter: {}", self.filter);
-        
-        let mut windivert = WinDivert::new();
-        let handle = windivert.open(
-            &self.filter,
-            0,
-            WINDIVERT_LAYER_NETWORK,
-            0
-        ).map_err(|e| Error::Interception(format!("Failed to open WinDivert: {}", e)))?;
-        
-        *self.windivert.write() = Some(windivert);
-        *self.handle.write() = Some(handle);
-        *self.running.write() = true;
-
-        tracing::info!("WinDivert interceptor initialized successfully");
-        Ok(())
+        Err(Error::NotSupported(
+            "Windows transparent interception is disabled until packet-preserving NAT redirection is implemented and validated; use listener mode".into(),
+        ))
     }
 
     async fn recv_packet(&self) -> Result<Packet> {

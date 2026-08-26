@@ -8,9 +8,7 @@ $workDir = Join-Path $env:RUNNER_TEMP "nettrap-interception-smoke"
 $configPath = Join-Path $workDir "config.toml"
 $stdoutPath = Join-Path $workDir "stdout.log"
 $stderrPath = Join-Path $workDir "stderr.log"
-$bodyPath = Join-Path $workDir "response.body"
 $process = $null
-$requireNetwork = $env:NETTRAP_REQUIRE_WINDIVERT_NETWORK -ne "0"
 
 New-Item -ItemType Directory -Force -Path $workDir | Out-Null
 @"
@@ -50,43 +48,18 @@ try {
     $process = Start-Process -FilePath $BinaryPath -ArgumentList @(
         "run", "--intercept", "-c", $configPath
     ) -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
-
-    $statusCode = $null
-    for ($attempt = 0; $attempt -lt 40 -and $null -eq $statusCode; $attempt++) {
-        if ($process.HasExited) {
-            throw "NetTrap exited before interception startup (code $($process.ExitCode))"
-        }
-        try {
-            $statusCode = (& curl.exe --noproxy "*" --silent --show-error --max-time 2 `
-                --output $bodyPath --write-out "%{http_code}" --header "Host: example.test" `
-                "http://198.18.0.1/")
-            if ($LASTEXITCODE -ne 0 -or $statusCode -ne "200") {
-                $statusCode = $null
-                Start-Sleep -Milliseconds 250
-            }
-        } catch {
-            $statusCode = $null
-            Start-Sleep -Milliseconds 250
-        }
+    if (-not $process.WaitForExit(10000)) {
+        Stop-NetTrap
+        throw "Windows transparent interception did not fail closed"
     }
-    if ($statusCode -ne "200") {
-        $stderr = if (Test-Path $stderrPath) { Get-Content $stderrPath -Raw } else { "" }
-        if (-not $process.HasExited -and -not $requireNetwork) {
-            Write-Host "::warning::WinDivert network redirect smoke skipped: hosted runner did not route synthetic external traffic; driver and process startup remained healthy."
-            return
-        }
-        throw "WinDivert interception did not redirect the HTTP request. $stderr"
+    $output = @(
+        if (Test-Path $stdoutPath) { Get-Content $stdoutPath -Raw }
+        if (Test-Path $stderrPath) { Get-Content $stderrPath -Raw }
+    ) -join "`n"
+    if ($process.ExitCode -eq 0 -or $output -notmatch "disabled|not supported|packet-preserving NAT") {
+        throw "Windows transparent interception was not rejected safely (code $($process.ExitCode)): $output"
     }
-
-    $dnsAnswer = Resolve-DnsName -Name "example.test" -Type A -Server "198.18.0.1" -DnsOnly -QuickTimeout
-    if (-not ($dnsAnswer | Where-Object { $_.IPAddress -match '^\d+(\.\d+){3}$' })) {
-        throw "WinDivert interception did not redirect the UDP DNS request"
-    }
-
-    if ($process.HasExited) {
-        throw "NetTrap exited after interception smoke (code $($process.ExitCode))"
-    }
-    Write-Host "PASS: Windows WinDivert TCP/UDP interception smoke"
+    Write-Host "PASS: Windows transparent interception fails closed before opening WinDivert"
 } finally {
     Stop-NetTrap
 }
