@@ -468,10 +468,17 @@ PY
 }
 
 run_rdp_negotiation() {
-    local output
-    output="$(printf '\003\000\000\023\016\340\000\000\000\000\000\001\000\010\000\003\000\000\000' |
-        timeout 5 nc 127.0.0.1 "$RDP_TCP_PORT" 2>/dev/null | od -An -t x1 || true)"
-    grep -Eq '(^|[[:space:]])03[[:space:]]+00[[:space:]]+00[[:space:]]+00' <<< "$output"
+    python3 -c '
+import sys
+
+data = sys.stdin.buffer.read()
+length = int.from_bytes(data[2:4], "big") if len(data) >= 4 else 0
+if len(data) < 4 or data[:2] != b"\x03\x00" or length < 4 or length > len(data):
+    raise SystemExit("invalid RDP TPKT response")
+' < <(
+        printf '\003\000\000\023\016\340\000\000\000\000\000\001\000\010\000\003\000\000\000' |
+            timeout 5 nc 127.0.0.1 "$RDP_TCP_PORT" 2>/dev/null || true
+    )
 }
 
 run_upnp_tcp_description() {

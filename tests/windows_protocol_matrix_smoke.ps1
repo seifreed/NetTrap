@@ -252,8 +252,11 @@ function Assert-TcpResponse([string] $Name, [byte[]] $Response) {
             catch { throw "invalid NKN JSON-RPC response" }
         }
         "rdp" {
+            $tpktLength = if ($Response.Length -ge 4) {
+                ($Response[2] -shl 8) -bor $Response[3]
+            } else { 0 }
             if ($Response.Length -lt 4 -or $Response[0] -ne 0x03 -or
-                $Response[2] -ne 0x00 -or $Response[3] -ne 0x00) {
+                $Response[1] -ne 0x00 -or $tpktLength -lt 4 -or $tpktLength -gt $Response.Length) {
                 throw "invalid RDP response"
             }
         }
