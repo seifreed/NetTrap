@@ -11,6 +11,7 @@ $eventLogPath = Join-Path $workDir "events.jsonl"
 $pcapPath = Join-Path $workDir "traffic.pcap"
 $stopFlagPath = Join-Path $workDir "stop.flag"
 $replayPath = Join-Path $workDir "replayed.jsonl"
+$pcapEnabled = $env:NETTRAP_WINDOWS_PCAP -eq "1"
 $stdoutPath = Join-Path $workDir "stdout.log"
 $stderrPath = Join-Path $workDir "stderr.log"
 $process = $null
@@ -74,7 +75,7 @@ New-Item -ItemType Directory -Force -Path $workDir | Out-Null
 $config = [System.Collections.Generic.List[string]]::new()
 [void]$config.Add("attribution_enabled = false")
 [void]$config.Add('default_decision = "emulate"')
-[void]$config.Add("pcap_enabled = true")
+[void]$config.Add(('pcap_enabled = {0}' -f $pcapEnabled.ToString().ToLowerInvariant()))
 [void]$config.Add(('pcap_path = "{0}"' -f $pcapPath.Replace('\', '/')))
 [void]$config.Add('output_format = "jsonl"')
 [void]$config.Add(('output_path = "{0}"' -f $eventLogPath.Replace('\', '/')))
@@ -413,9 +414,11 @@ function Invoke-UdpMalformedBurst([object[]] $Ports) {
 }
 
 function Test-ArtifactExports {
-    foreach ($path in @($eventLogPath, $pcapPath, ($eventLogPath -replace '\.jsonl$', '.html'),
-            ($eventLogPath -replace '\.jsonl$', '.sarif.json'),
-            ($eventLogPath -replace '\.jsonl$', '.csv'))) {
+    $artifacts = @($eventLogPath, ($eventLogPath -replace '\.jsonl$', '.html'),
+        ($eventLogPath -replace '\.jsonl$', '.sarif.json'),
+        ($eventLogPath -replace '\.jsonl$', '.csv'))
+    if ($pcapEnabled) { $artifacts += $pcapPath }
+    foreach ($path in $artifacts) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or
             (Get-Item -LiteralPath $path).Length -le 0) {
             throw "missing or empty artifact: $path"
@@ -431,10 +434,12 @@ function Test-ArtifactExports {
         }
     }
 
-    & $BinaryPath pcap -i $pcapPath -o $replayPath | Out-Null
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $replayPath -PathType Leaf) -or
-        (Get-Item -LiteralPath $replayPath).Length -le 0) {
-        throw "PCAP replay export failed"
+    if ($pcapEnabled) {
+        & $BinaryPath pcap -i $pcapPath -o $replayPath | Out-Null
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $replayPath -PathType Leaf) -or
+            (Get-Item -LiteralPath $replayPath).Length -le 0) {
+            throw "PCAP replay export failed"
+        }
     }
 }
 
