@@ -355,3 +355,5 @@ try {
 } finally {
     Stop-NetTrap
 }
+
+exit 0
