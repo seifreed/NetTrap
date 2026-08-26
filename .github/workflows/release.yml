@@ -241,6 +241,81 @@ jobs:
           ./target/${{ matrix.target }}/release/nettrap config --defaults > /dev/null
         if: runner.os != 'Windows'
 
+      - name: Run macOS listener E2E smoke
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          workdir="$(mktemp -d)"
+          config="$workdir/config.toml"
+          output="$workdir/output.log"
+          cat >"$config" <<'EOF'
+          attribution_enabled = false
+          default_decision = "emulate"
+          pcap_enabled = false
+          output_format = "jsonl"
+
+          [[listeners]]
+          name = "dns-udp"
+          protocol = "udp"
+          port = 53530
+          bind_address = "127.0.0.1"
+          enabled = true
+          emulate_response = true
+
+          [[listeners]]
+          name = "dns-tcp"
+          protocol = "tcp"
+          port = 53532
+          bind_address = "127.0.0.1"
+          enabled = true
+          emulate_response = true
+
+          [[listeners]]
+          name = "http"
+          protocol = "tcp"
+          port = 18088
+          bind_address = "127.0.0.1"
+          enabled = true
+          emulate_response = true
+
+          [[listeners]]
+          name = "tls"
+          protocol = "tcp"
+          port = 18444
+          bind_address = "127.0.0.1"
+          enabled = true
+          emulate_response = true
+          use_ssl = true
+          EOF
+          ./target/${{ matrix.target }}/release/nettrap run -c "$config" >"$output" 2>&1 &
+          pid=$!
+          cleanup() {
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            rm -rf "$workdir"
+          }
+          trap cleanup EXIT
+          for _ in $(seq 1 40); do
+            if curl --noproxy '*' --silent --fail --max-time 1 \
+                -H 'Host: release.example.test' http://127.0.0.1:18088/ >/dev/null 2>&1; then
+              break
+            fi
+            if ! kill -0 "$pid" 2>/dev/null; then
+              cat "$output"
+              exit 1
+            fi
+            sleep 0.25
+          done
+          curl --noproxy '*' --silent --fail \
+            -H 'Host: release.example.test' http://127.0.0.1:18088/ | grep -F 'It Works!'
+          dig @127.0.0.1 -p 53530 example.com A +short \
+            | grep -E '^[0-9]+(\.[0-9]+){3}$'
+          dig +tcp @127.0.0.1 -p 53532 example.com A +short \
+            | grep -E '^[0-9]+(\.[0-9]+){3}$'
+          tls_output="$(openssl s_client -connect 127.0.0.1:18444 \
+            -servername release.example.test -showcerts </dev/null 2>&1 || true)"
+          grep -F 'BEGIN CERTIFICATE' <<<"$tls_output"
+
       - name: Smoke test Windows binary
         if: runner.os == 'Windows'
         run: |
