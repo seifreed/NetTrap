@@ -22,8 +22,8 @@ cleanup() {
 
 trap cleanup EXIT
 
-if [[ ! "$duration" =~ ^[1-9][0-9]*$ ]]; then
-    echo "NETTRAP_SOAK_SECONDS must be a positive integer" >&2
+if [[ ! "$duration" =~ ^[1-9][0-9]*$ ]] || (( duration > 1800 )); then
+    echo "NETTRAP_SOAK_SECONDS must be between 1 and 1800" >&2
     exit 1
 fi
 if [[ ! "$concurrency" =~ ^[1-9][0-9]*$ ]] || (( concurrency > 64 )); then
