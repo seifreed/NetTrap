@@ -330,6 +330,10 @@ jobs:
           "$clean_dir/nettrap" config --defaults > /dev/null
           test -x "nettrap-${{ matrix.name }}.binary"
           "nettrap-${{ matrix.name }}.binary" --version
+          if [[ "$RUNNER_OS" == "macOS" && "${{ vars.NETTRAP_NATIVE_SIGNING }}" == "1" ]]; then
+            codesign --verify --strict "$clean_dir/nettrap"
+            codesign --verify --strict "nettrap-${{ matrix.name }}.binary"
+          fi
           test "$(sha256sum "$clean_dir/nettrap" | awk '{print $1}')" = \
             "$(sha256sum "nettrap-${{ matrix.name }}.binary" | awk '{print $1}')"
 
@@ -373,6 +377,17 @@ jobs:
           }
           & "$cleanDir/nettrap.exe" --version
           & "$cleanDir/nettrap.exe" config --defaults | Out-Null
+          if ('${{ vars.NETTRAP_NATIVE_SIGNING }}' -eq '1') {
+            foreach ($signedPath in @(
+              (Join-Path $cleanDir 'nettrap.exe'),
+              (Resolve-Path "nettrap-${{ matrix.name }}.binary").Path
+            )) {
+              $signature = Get-AuthenticodeSignature -LiteralPath $signedPath
+              if ($signature.Status -ne 'Valid') {
+                throw "Packaged executable Authenticode verification failed for $signedPath`: $($signature.Status)"
+              }
+            }
+          }
           if ((Get-Item "nettrap-${{ matrix.name }}.binary").Length -le 0) { throw "Empty raw binary" }
           $rawHash = (Get-FileHash -Algorithm SHA256 -Path "nettrap-${{ matrix.name }}.binary").Hash
           $zipHash = (Get-FileHash -Algorithm SHA256 -Path "$cleanDir/nettrap.exe").Hash

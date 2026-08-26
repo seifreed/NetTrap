@@ -12,7 +12,9 @@ for marker in \
     "cosign sign-blob --yes" \
     "scripts/verify-release-signatures.sh releases" \
     "Sign Windows MSI (Authenticode)" \
-    "Get-AuthenticodeSignature -LiteralPath \"nettrap-\${{ matrix.name }}.msi\""; do
+    "Get-AuthenticodeSignature -LiteralPath \"nettrap-\${{ matrix.name }}.msi\"" \
+    "Packaged executable Authenticode verification failed" \
+    "codesign --verify --strict \"\$clean_dir/nettrap\""; do
     if ! grep -Fq "$marker" "$workflow"; then
         echo "release signing contract is missing: $marker" >&2
         exit 1
