@@ -8,6 +8,9 @@ $runnerTemp = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } elseif ($env:TEMP) { $e
 $workDir = Join-Path $runnerTemp "nettrap-protocol-matrix"
 $configPath = Join-Path $workDir "config.toml"
 $eventLogPath = Join-Path $workDir "events.jsonl"
+$pcapPath = Join-Path $workDir "traffic.pcap"
+$stopFlagPath = Join-Path $workDir "stop.flag"
+$replayPath = Join-Path $workDir "replayed.jsonl"
 $stdoutPath = Join-Path $workDir "stdout.log"
 $stderrPath = Join-Path $workDir "stderr.log"
 $process = $null
@@ -71,7 +74,8 @@ New-Item -ItemType Directory -Force -Path $workDir | Out-Null
 $config = [System.Collections.Generic.List[string]]::new()
 [void]$config.Add("attribution_enabled = false")
 [void]$config.Add('default_decision = "emulate"')
-[void]$config.Add("pcap_enabled = false")
+[void]$config.Add("pcap_enabled = true")
+[void]$config.Add(('pcap_path = "{0}"' -f $pcapPath.Replace('\', '/')))
 [void]$config.Add('output_format = "jsonl"')
 [void]$config.Add(('output_path = "{0}"' -f $eventLogPath.Replace('\', '/')))
 
@@ -102,11 +106,15 @@ foreach ($name in $udpNames) {
     $port++
 }
 $config | Set-Content -Path $configPath -Encoding utf8
+Remove-Item -LiteralPath $stopFlagPath -Force -ErrorAction SilentlyContinue
 
 function Stop-NetTrap {
     if ($null -ne $script:process -and -not $script:process.HasExited) {
-        Stop-Process -Id $script:process.Id -Force -ErrorAction SilentlyContinue
-        [void]$script:process.WaitForExit(5000)
+        New-Item -ItemType File -Force -Path $stopFlagPath | Out-Null
+        if (-not $script:process.WaitForExit(15000)) {
+            Stop-Process -Id $script:process.Id -Force -ErrorAction SilentlyContinue
+            [void]$script:process.WaitForExit(5000)
+        }
     }
 }
 
@@ -404,6 +412,32 @@ function Invoke-UdpMalformedBurst([object[]] $Ports) {
     }
 }
 
+function Test-ArtifactExports {
+    foreach ($path in @($eventLogPath, $pcapPath, ($eventLogPath -replace '\.jsonl$', '.html'),
+            ($eventLogPath -replace '\.jsonl$', '.sarif.json'),
+            ($eventLogPath -replace '\.jsonl$', '.csv'))) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or
+            (Get-Item -LiteralPath $path).Length -le 0) {
+            throw "missing or empty artifact: $path"
+        }
+    }
+
+    foreach ($format in @("json", "jsonl", "toon", "sarif", "csv")) {
+        $output = Join-Path $workDir "report.$format"
+        & $BinaryPath report -i $eventLogPath -o $output --format $format | Out-Null
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $output -PathType Leaf) -or
+            (Get-Item -LiteralPath $output).Length -le 0) {
+            throw "report export failed for $format"
+        }
+    }
+
+    & $BinaryPath pcap -i $pcapPath -o $replayPath | Out-Null
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $replayPath -PathType Leaf) -or
+        (Get-Item -LiteralPath $replayPath).Length -le 0) {
+        throw "PCAP replay export failed"
+    }
+}
+
 function Get-TcpPayload([string] $Name) {
     switch ($Name) {
         "dns" { return [byte[]](0x00, 0x1d, 0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x03, 0x63, 0x6f, 0x6d, 0x00, 0x00, 0x01, 0x00, 0x01) }
@@ -476,7 +510,7 @@ function Is-ServerFirst([string] $Name) {
 
 try {
     $process = Start-Process -FilePath $BinaryPath -ArgumentList @(
-        "run", "-c", $configPath
+        "--stop-flag", $stopFlagPath, "run", "-c", $configPath
     ) -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
 
     foreach ($portValue in $tcpPorts.Values) {
@@ -544,6 +578,8 @@ try {
     if ($missingEventListeners.Count -gt 0) {
         throw "event log is missing handler activity: $($missingEventListeners -join ', ')"
     }
+    Stop-NetTrap
+    Test-ArtifactExports
     if ($env:NETTRAP_MATRIX_REPORT) {
         @(
             "schema=5"
