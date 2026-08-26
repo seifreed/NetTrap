@@ -834,15 +834,29 @@ pub mod windivert {
                         .as_ref()
                         .ok_or_else(|| Error::InvalidState("WinDivert not initialized".into()))?;
                     let mut send_addr = addr;
-                    api.calc_checksums(&mut packet_buf[..len], &mut send_addr)
-                        .map_err(|e| {
+                    let send_result = api
+                        .calc_checksums(&mut packet_buf[..len], &mut send_addr)
+                        .and_then(|()| api.send(handle, &packet_buf[..len], &send_addr));
+                    if let Err(error) = send_result {
+                        // A failed rewrite or checksum/send must not strand the packet in the
+                        // divert queue. Reinject the untouched frame before surfacing the error.
+                        tracing::warn!(
+                            "WinDivert modified-packet reinjection failed; retrying original packet: {}",
+                            error
+                        );
+                        if !Self::restore_original_packet(&mut packet_buf, &original, len) {
+                            return Err(Error::Packet(
+                                "Failed to restore original WinDivert packet after reinjection error"
+                                    .into(),
+                            ));
+                        }
+                        api.send(handle, &packet_buf[..len], &addr).map_err(|fallback| {
                             Error::Interception(format!(
-                                "WinDivert checksum calculation failed: {}",
-                                e
+                                "WinDivertSend failed for modified packet ({}), and original packet fallback failed: {}",
+                                error, fallback
                             ))
                         })?;
-                    api.send(handle, &packet_buf[..len], &send_addr)
-                        .map_err(|e| Error::Interception(format!("WinDivertSend failed: {}", e)))?;
+                    }
 
                     {
                         let mut guard = stats.write();
