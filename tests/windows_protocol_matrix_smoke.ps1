@@ -204,11 +204,15 @@ function Invoke-TcpMalformedBurst([object[]] $Ports) {
     foreach ($port in $Ports) {
         $client = [System.Net.Sockets.TcpClient]::new()
         try {
-            $client.Connect("127.0.0.1", [int]$port)
+            $connect = $client.ConnectAsync("127.0.0.1", [int]$port)
+            if (-not $connect.Wait(250)) {
+                continue
+            }
             $stream = $client.GetStream()
             $stream.Write($payload, 0, $payload.Length)
             $stream.Flush()
         } catch [System.Net.Sockets.SocketException] {
+        } catch [System.AggregateException] {
         } catch [System.IO.IOException] {
         } finally {
             $client.Dispose()
