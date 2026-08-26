@@ -56,6 +56,15 @@ port = 18089
 bind_address = "::1"
 enabled = true
 emulate_response = true
+
+[[listeners]]
+name = "tls-smoke"
+protocol = "tcp"
+port = 18444
+bind_address = "127.0.0.1"
+enabled = true
+emulate_response = true
+use_ssl = true
 "@ | Set-Content -Path $configPath -Encoding utf8
 
 function Stop-NetTrap {
@@ -195,6 +204,21 @@ try {
         if ($null -ne $dnsTcp) {
             $dnsTcp.Dispose()
         }
+    }
+
+    $tlsClient = [System.Net.Sockets.TcpClient]::new()
+    try {
+        $tlsClient.Connect("127.0.0.1", 18444)
+        $tlsStream = [System.Net.Security.SslStream]::new(
+            $tlsClient.GetStream(), $false,
+            { param($sender, $certificate, $chain, $errors) return $true })
+        $tlsStream.AuthenticateAsClient("example.test")
+        if (-not $tlsStream.IsEncrypted -or -not $tlsStream.IsAuthenticated) {
+            throw "TLS listener smoke did not complete an authenticated encrypted session"
+        }
+        $tlsStream.Dispose()
+    } finally {
+        $tlsClient.Dispose()
     }
 
     Write-Host "PASS: Windows IPv4/IPv6 TCP/UDP listener parity smoke"

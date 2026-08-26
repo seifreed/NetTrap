@@ -234,6 +234,15 @@ jobs:
           bind_address = "::1"
           enabled = true
           emulate_response = true
+
+          [[listeners]]
+          name = "tls"
+          protocol = "tcp"
+          port = 18444
+          bind_address = "127.0.0.1"
+          enabled = true
+          emulate_response = true
+          use_ssl = true
           EOF
 
       - name: Run integration tests
@@ -250,6 +259,8 @@ jobs:
           dig @::1 -p 53531 example.com A +short | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
           curl --noproxy '*' --fail --silent --header 'Host: example.test' http://127.0.0.1:8088/ | grep -F 'It Works!'
           curl --noproxy '*' --fail --silent --header 'Host: example.test' 'http://[::1]:8089/' | grep -F 'It Works!'
+          openssl s_client -connect 127.0.0.1:18444 \
+            -servername example.test -showcerts </dev/null 2>&1 | grep -F 'BEGIN CERTIFICATE'
 
           kill $NETTRAP_PID
           wait $NETTRAP_PID || true
