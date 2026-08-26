@@ -56,17 +56,32 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     mod windows_tests {
+        #[cfg(target_arch = "x86_64")]
+        use nettrap_core::config::InterceptionMode;
         use nettrap_interceptor::InterceptorConfig;
         use nettrap_interceptor::platform::DefaultInterceptor;
 
+        #[cfg(target_arch = "x86_64")]
         #[test]
-        fn test_interceptor_creation() {
+        fn windivert_constructor_requires_windivert_mode() {
             let config = InterceptorConfig::default();
-            let result = DefaultInterceptor::new(config);
-            assert!(
-                result.is_ok() || result.is_err(),
-                "Interceptor code should compile on Windows"
-            );
+            assert!(DefaultInterceptor::new(config).is_err());
+
+            let config = InterceptorConfig {
+                mode: InterceptionMode::WinDivert,
+                ..Default::default()
+            };
+            assert!(DefaultInterceptor::new(config).is_ok());
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        #[test]
+        fn arm64_default_interceptor_uses_pcap_without_opening_device() {
+            let config = InterceptorConfig {
+                interface: Some("Npcap test interface".to_string()),
+                ..Default::default()
+            };
+            assert!(DefaultInterceptor::new(config).is_ok());
         }
     }
 
