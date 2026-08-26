@@ -3,6 +3,13 @@
 set -euo pipefail
 
 binary="${NETTRAP_BIN:-./target/release/nettrap}"
+if [[ ! -x "$binary" ]]; then
+    binary="$(command -v nettrap || true)"
+fi
+if [[ -z "$binary" || ! -x "$binary" ]]; then
+    echo "NetTrap binary is not executable: ${NETTRAP_BIN:-./target/release/nettrap}" >&2
+    exit 1
+fi
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 manifest="$script_dir/protocol_matrix_manifest.txt"
 workdir="$(mktemp -d)"
