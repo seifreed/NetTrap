@@ -395,6 +395,12 @@ jobs:
         run: ./tests/windows_protocol_matrix_smoke.ps1 -BinaryPath "${{ github.workspace }}\target\${{ matrix.target }}\release\nettrap.exe"
         shell: pwsh
 
+      - name: Run Windows hostile soak
+        env:
+          NETTRAP_SOAK_SECONDS: ${{ github.event_name == 'schedule' && '1800' || '60' }}
+        run: ./tests/windows_soak_test.ps1 -BinaryPath "${{ github.workspace }}\target\${{ matrix.target }}\release\nettrap.exe"
+        shell: pwsh
+
       - name: Generate Windows protocol matrix parity report
         env:
           NETTRAP_MATRIX_REPEAT: "1"

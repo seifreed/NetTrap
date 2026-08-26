@@ -216,6 +216,13 @@ jobs:
         run: ./tests/windows_protocol_matrix_smoke.ps1 -BinaryPath "${{ github.workspace }}\target\${{ matrix.target }}\release\nettrap.exe"
         shell: pwsh
 
+      - name: Run Windows hostile soak
+        if: runner.os == 'Windows'
+        env:
+          NETTRAP_SOAK_SECONDS: "60"
+        run: ./tests/windows_soak_test.ps1 -BinaryPath "${{ github.workspace }}\target\${{ matrix.target }}\release\nettrap.exe"
+        shell: pwsh
+
       - name: Run Windows interception smoke (x64)
         if: runner.os == 'Windows' && matrix.arch == 'x64'
         env:
