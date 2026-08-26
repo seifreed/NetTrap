@@ -43,6 +43,11 @@ if ($repeatText -notmatch '^[1-9][0-9]*$' -or [int]$repeatText -gt 32) {
     throw "NETTRAP_MATRIX_REPEAT must be between 1 and 32"
 }
 $repeat = [int]$repeatText
+$durationText = if ($env:NETTRAP_MATRIX_DURATION_SECONDS) { $env:NETTRAP_MATRIX_DURATION_SECONDS } else { "0" }
+if ($durationText -notmatch '^[0-9]+$' -or [int]$durationText -gt 1800) {
+    throw "NETTRAP_MATRIX_DURATION_SECONDS must be between 0 and 1800"
+}
+$durationSeconds = [int]$durationText
 
 $tcpNames = @($tcpRows.Name)
 $udpNames = @($udpRows.Name)
@@ -313,7 +318,9 @@ try {
     $process.Refresh()
     $workingSetBaseline = $process.WorkingSet64
     $handleBaseline = $process.HandleCount
-    for ($round = 1; $round -le $repeat; $round++) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($durationSeconds)
+    $round = 1
+    while ($round -le $repeat -or ($durationSeconds -gt 0 -and [DateTime]::UtcNow -lt $deadline)) {
         foreach ($name in $tcpNames) {
             $expectResponse = $tcpCaptureOnly -notcontains $name
             $payload = [byte[]](Get-TcpPayload $name)
@@ -338,13 +345,15 @@ try {
             throw "NetTrap exited during Windows protocol matrix round $round (code $($process.ExitCode))"
         }
         Assert-ResourceBounds $workingSetBaseline $handleBaseline
+        $round++
     }
+    $roundsCompleted = $round - 1
 
     if ($process.HasExited) {
         throw "NetTrap exited during protocol matrix smoke (code $($process.ExitCode))"
     }
-    $tcpResponses = ($tcpNames.Count - $tcpCaptureOnly.Count) * $repeat
-    $udpResponses = ($udpNames.Count - $udpCaptureOnly.Count) * $repeat
+    $tcpResponses = ($tcpNames.Count - $tcpCaptureOnly.Count) * $roundsCompleted
+    $udpResponses = ($udpNames.Count - $udpCaptureOnly.Count) * $roundsCompleted
     if ($env:NETTRAP_MATRIX_REPORT) {
         @(
             "schema=2"
@@ -354,15 +363,15 @@ try {
             "udp_responses=$udpResponses"
             "tcp_observed_responses=$($tcpObservedResponses -join ',')"
             "udp_observed_responses=$($udpObservedResponses -join ',')"
-            "tcp_malformed_probes=$($tcpNames.Count * $repeat)"
-            "udp_malformed_probes=$($udpNames.Count * $repeat)"
+            "tcp_malformed_probes=$($tcpNames.Count * $roundsCompleted)"
+            "udp_malformed_probes=$($udpNames.Count * $roundsCompleted)"
             "tcp_names=$($tcpNames -join ',')"
             "udp_names=$($udpNames -join ',')"
             "tcp_capture_only=$($tcpCaptureOnly -join ',')"
             "udp_capture_only=$($udpCaptureOnly -join ',')"
         ) | Set-Content -LiteralPath $env:NETTRAP_MATRIX_REPORT -Encoding utf8
     }
-    Write-Host "PASS: Windows protocol matrix parity smoke ($($tcpNames.Count) TCP, $($udpNames.Count) UDP handlers; $tcpResponses TCP, $udpResponses UDP responses; $repeat round(s))"
+    Write-Host "PASS: Windows protocol matrix parity smoke ($($tcpNames.Count) TCP, $($udpNames.Count) UDP handlers; $tcpResponses TCP, $udpResponses UDP responses; $roundsCompleted round(s))"
 } catch {
     $stderr = if (Test-Path $stderrPath) { Get-Content $stderrPath -Raw } else { "" }
     throw "$($_.Exception.Message)`n$stderr"

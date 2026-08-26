@@ -206,6 +206,7 @@ jobs:
         env:
           NETTRAP_BIN: ./target/release/nettrap
           NETTRAP_MATRIX_REPEAT: ${{ github.event_name == 'schedule' && '32' || '2' }}
+          NETTRAP_MATRIX_DURATION_SECONDS: ${{ github.event_name == 'schedule' && '1800' || '0' }}
         run: bash tests/protocol_matrix_smoke.sh
 
       - name: Run benchmarks

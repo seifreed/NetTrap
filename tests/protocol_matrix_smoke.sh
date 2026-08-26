@@ -10,6 +10,7 @@ config="$workdir/config.toml"
 log="$workdir/nettrap.log"
 nettrap_pid=""
 repeat="${NETTRAP_MATRIX_REPEAT:-1}"
+duration="${NETTRAP_MATRIX_DURATION_SECONDS:-0}"
 
 if [[ ! -r "$manifest" ]]; then
     echo "protocol matrix manifest is missing: $manifest" >&2
@@ -38,6 +39,10 @@ fi
 
 if [[ ! "$repeat" =~ ^[1-9][0-9]*$ ]] || (( repeat > 32 )); then
     echo "NETTRAP_MATRIX_REPEAT must be between 1 and 32" >&2
+    exit 1
+fi
+if [[ ! "$duration" =~ ^[0-9]+$ ]] || (( duration > 1800 )); then
+    echo "NETTRAP_MATRIX_DURATION_SECONDS must be between 0 and 1800" >&2
     exit 1
 fi
 
@@ -237,7 +242,9 @@ for value in sys.argv[1:]:
 PY
 }
 
-for round in $(seq 1 "$repeat"); do
+deadline=$((SECONDS + duration))
+round=1
+while (( round <= repeat || (duration > 0 && SECONDS < deadline) )); do
 for index in "${!tcp_ports[@]}"; do
     name=${tcp_names[$index]}
     request="$workdir/tcp-$name.request"
@@ -312,7 +319,9 @@ done
     timeout 2 nc 127.0.0.1 "${tcp_ports[1]}" <"$malformed_http" >/dev/null 2>&1 || true
     printf '\xff\x00\xff\x00' | timeout 2 nc -u -w 1 127.0.0.1 "${udp_ports[0]}" >/dev/null 2>&1 || true
     assert_resource_bounds
+    round=$((round + 1))
 done
+rounds_completed=$((round - 1))
 
 if ! kill -0 "$nettrap_pid" 2>/dev/null; then
     cat "$log" >&2
@@ -321,8 +330,8 @@ fi
 
 if [[ -n "${NETTRAP_MATRIX_REPORT:-}" ]]; then
     mkdir -p "$(dirname "$NETTRAP_MATRIX_REPORT")"
-    tcp_malformed_probes=$(( ${#tcp_ports[@]} * repeat ))
-    udp_malformed_probes=$(( ${#udp_ports[@]} * repeat ))
+    tcp_malformed_probes=$(( ${#tcp_ports[@]} * rounds_completed ))
+    udp_malformed_probes=$(( ${#udp_ports[@]} * rounds_completed ))
     {
         printf 'schema=2\n'
         printf 'tcp_handlers=%s\n' "${#tcp_names[@]}"
@@ -340,4 +349,4 @@ if [[ -n "${NETTRAP_MATRIX_REPORT:-}" ]]; then
     } >"$NETTRAP_MATRIX_REPORT"
 fi
 
-echo "PASS: protocol matrix smoke exercised ${#tcp_names[@]} TCP and ${#udp_names[@]} UDP handlers for ${repeat} round(s) (${tcp_responses} TCP, ${udp_responses} UDP responses)"
+echo "PASS: protocol matrix smoke exercised ${#tcp_names[@]} TCP and ${#udp_names[@]} UDP handlers for ${rounds_completed} round(s) (${tcp_responses} TCP, ${udp_responses} UDP responses)"
