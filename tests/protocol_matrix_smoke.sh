@@ -3,22 +3,38 @@
 set -euo pipefail
 
 binary="${NETTRAP_BIN:-nettrap}"
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+manifest="$script_dir/protocol_matrix_manifest.txt"
 workdir="$(mktemp -d)"
 config="$workdir/config.toml"
 log="$workdir/nettrap.log"
 nettrap_pid=""
 repeat="${NETTRAP_MATRIX_REPEAT:-1}"
 
-tcp_names=(
-    dns http smtp ftp pop3 imap irc telnet finger ident daytime time chargen
-    quotd syslogrecv dummy ssh smb rdp redis mysql ldap socks memcached mqtt tls
-    upnp nkn postgres raw
-)
-udp_names=(dns tftp snmp sip upnp ntp coap quic daytime time chargen quotd syslogrecv raw)
-
-# These handlers intentionally record traffic without synthesizing a wire response.
-tcp_capture_only=(syslogrecv tls dummy upnp)
-udp_capture_only=(quic syslogrecv upnp)
+if [[ ! -r "$manifest" ]]; then
+    echo "protocol matrix manifest is missing: $manifest" >&2
+    exit 1
+fi
+tcp_names=()
+udp_names=()
+tcp_capture_only=()
+udp_capture_only=()
+while IFS= read -r name; do
+    [[ -n "$name" ]] && tcp_names+=("$name")
+done < <(awk '$1 == "tcp" {print $2}' "$manifest")
+while IFS= read -r name; do
+    [[ -n "$name" ]] && udp_names+=("$name")
+done < <(awk '$1 == "udp" {print $2}' "$manifest")
+while IFS= read -r name; do
+    [[ -n "$name" ]] && tcp_capture_only+=("$name")
+done < <(awk '$1 == "tcp" && $3 == "capture" {print $2}' "$manifest")
+while IFS= read -r name; do
+    [[ -n "$name" ]] && udp_capture_only+=("$name")
+done < <(awk '$1 == "udp" && $3 == "capture" {print $2}' "$manifest")
+if (( ${#tcp_names[@]} != 30 || ${#udp_names[@]} != 14 )); then
+    echo "protocol matrix manifest must define 30 TCP and 14 UDP handlers" >&2
+    exit 1
+fi
 
 if [[ ! "$repeat" =~ ^[1-9][0-9]*$ ]] || (( repeat > 32 )); then
     echo "NETTRAP_MATRIX_REPEAT must be between 1 and 32" >&2

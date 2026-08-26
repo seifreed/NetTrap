@@ -10,24 +10,44 @@ $configPath = Join-Path $workDir "config.toml"
 $stdoutPath = Join-Path $workDir "stdout.log"
 $stderrPath = Join-Path $workDir "stderr.log"
 $process = $null
+$manifestPath = Join-Path $PSScriptRoot "protocol_matrix_manifest.txt"
+if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+    throw "protocol matrix manifest is missing: $manifestPath"
+}
+$manifestRows = @(
+    Get-Content -LiteralPath $manifestPath |
+        Where-Object { $_.Trim() -and -not $_.TrimStart().StartsWith("#") } |
+        ForEach-Object {
+            $fields = $_ -split '\s+'
+            if ($fields.Count -ne 3 -or $fields[0] -notin @("tcp", "udp") -or
+                $fields[2] -notin @("response", "capture")) {
+                throw "invalid protocol matrix manifest row: $_"
+            }
+            [pscustomobject]@{ Transport = $fields[0]; Name = $fields[1]; Mode = $fields[2] }
+        }
+)
+$tcpRows = @($manifestRows | Where-Object Transport -eq "tcp")
+$udpRows = @($manifestRows | Where-Object Transport -eq "udp")
+if ($tcpRows.Count -eq 0 -or $udpRows.Count -eq 0) {
+    throw "protocol matrix manifest must define TCP and UDP handlers"
+}
+if ($tcpRows.Count -ne 30 -or $udpRows.Count -ne 14) {
+    throw "protocol matrix manifest must define 30 TCP and 14 UDP handlers"
+}
+if (@($tcpRows.Name | Sort-Object -Unique).Count -ne $tcpRows.Count -or
+    @($udpRows.Name | Sort-Object -Unique).Count -ne $udpRows.Count) {
+    throw "protocol matrix manifest contains duplicate handlers"
+}
 $repeatText = if ($env:NETTRAP_MATRIX_REPEAT) { $env:NETTRAP_MATRIX_REPEAT } else { "1" }
 if ($repeatText -notmatch '^[1-9][0-9]*$' -or [int]$repeatText -gt 32) {
     throw "NETTRAP_MATRIX_REPEAT must be between 1 and 32"
 }
 $repeat = [int]$repeatText
 
-$tcpNames = @(
-    "dns", "http", "smtp", "ftp", "pop3", "imap", "irc", "telnet", "finger", "ident",
-    "daytime", "time", "chargen", "quotd", "syslogrecv", "dummy", "ssh", "smb", "rdp",
-    "redis", "mysql", "ldap", "socks", "memcached", "mqtt", "tls", "upnp", "nkn",
-    "postgres", "raw"
-)
-$udpNames = @(
-    "dns", "tftp", "snmp", "sip", "upnp", "ntp", "coap", "quic", "daytime", "time",
-    "chargen", "quotd", "syslogrecv", "raw"
-)
-$tcpCaptureOnly = @("syslogrecv", "tls", "dummy", "upnp")
-$udpCaptureOnly = @("quic", "syslogrecv", "upnp")
+$tcpNames = @($tcpRows.Name)
+$udpNames = @($udpRows.Name)
+$tcpCaptureOnly = @($tcpRows | Where-Object Mode -eq "capture" | ForEach-Object Name)
+$udpCaptureOnly = @($udpRows | Where-Object Mode -eq "capture" | ForEach-Object Name)
 $tcpPorts = @{}
 $udpPorts = @{}
 
