@@ -290,6 +290,99 @@ record_response_size() {
     fi
 }
 
+assert_tcp_response() {
+    local name=$1
+    local response=$2
+    python3 - "$name" "$response" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+name, path = sys.argv[1:]
+data = Path(path).read_bytes()
+if not data:
+    raise SystemExit(f"{name} response is empty")
+text = data.decode("ascii", errors="replace")
+
+if name == "dns":
+    length = int.from_bytes(data[:2], "big") if len(data) >= 2 else 0
+    if len(data) < 14 or length < 12 or len(data) - 2 < length or not data[4] & 0x80:
+        raise SystemExit("invalid DNS TCP response framing or QR bit")
+elif name == "http" and not re.match(r"^HTTP/1\.[01] \d{3}", text):
+    raise SystemExit("invalid HTTP response")
+elif name == "upnp" and not re.match(r"^HTTP/1\.[01] 200", text):
+    raise SystemExit("invalid UPnP response")
+elif name == "smtp" and not re.match(r"^(220|250)", text):
+    raise SystemExit("invalid SMTP response")
+elif name == "ftp" and not re.match(r"^(220|215|200|221)", text):
+    raise SystemExit("invalid FTP response")
+elif name == "pop3" and not text.startswith("+OK"):
+    raise SystemExit("invalid POP3 response")
+elif name == "imap" and not re.match(r"^\* (OK|CAPABILITY)", text):
+    raise SystemExit("invalid IMAP response")
+elif name == "irc" and not re.search(r"\s001\s", text):
+    raise SystemExit("invalid IRC response")
+elif name == "finger" and "Login:" not in text:
+    raise SystemExit("invalid finger response")
+elif name == "ident" and "USERID" not in text:
+    raise SystemExit("invalid ident response")
+elif name == "daytime" and not re.search(r"\d{2}:\d{2}:\d{2}", text):
+    raise SystemExit("invalid daytime response")
+elif name == "time" and len(data) < 4:
+    raise SystemExit("invalid RFC 868 response")
+elif name == "ssh" and not text.startswith("SSH-2.0-"):
+    raise SystemExit("invalid SSH response")
+elif name == "redis" and not text.startswith("+PONG"):
+    raise SystemExit("invalid Redis response")
+elif name == "memcached" and not text.startswith("VERSION "):
+    raise SystemExit("invalid Memcached response")
+elif name == "socks" and (len(data) < 2 or data[0] != 5):
+    raise SystemExit("invalid SOCKS response")
+elif name == "ldap" and data[0] != 0x30:
+    raise SystemExit("invalid LDAP response")
+elif name == "mqtt" and data[0] != 0x20:
+    raise SystemExit("invalid MQTT response")
+elif name == "nkn":
+    try:
+        json.loads(text)
+    except json.JSONDecodeError as error:
+        raise SystemExit(f"invalid NKN JSON-RPC response: {error}") from error
+elif name == "rdp" and data[0] != 3:
+    raise SystemExit("invalid RDP response")
+PY
+}
+
+assert_udp_response() {
+    local name=$1
+    local response=$2
+    python3 - "$name" "$response" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+name, path = sys.argv[1:]
+data = Path(path).read_bytes()
+if not data:
+    raise SystemExit(f"{name} response is empty")
+text = data.decode("ascii", errors="replace")
+if name == "dns" and (len(data) < 12 or not data[2] & 0x80):
+    raise SystemExit("invalid DNS response")
+if name == "tftp" and (len(data) < 4 or int.from_bytes(data[:2], "big") not in {3, 5}):
+    raise SystemExit("invalid TFTP response")
+if name == "snmp" and (data[0] != 0x30 or 0xA2 not in data):
+    raise SystemExit("invalid SNMP response")
+if name == "sip" and not re.match(r"^SIP/2\.0 200", text):
+    raise SystemExit("invalid SIP response")
+if name == "ntp" and (len(data) < 48 or data[0] & 0x07 != 4):
+    raise SystemExit("invalid NTP response")
+if name == "coap" and (len(data) < 5 or data[0] >> 6 != 1 or data[1] < 0x40):
+    raise SystemExit("invalid CoAP response")
+if name == "daytime" and not re.search(r"\d{2}:\d{2}:\d{2}", text):
+    raise SystemExit("invalid daytime response")
+PY
+}
+
 run_tcp_probe() {
     local mode=$1
     local port=$2
@@ -424,6 +517,7 @@ for index in "${!tcp_ports[@]}"; do
             tail -20 "$log" >&2
             exit 1
         fi
+        assert_tcp_response "$name" "$response"
         tcp_responses=$((tcp_responses + 1))
         if ! contains_name "$name" "${tcp_observed_responses[@]-}"; then
             tcp_observed_responses+=("$name")
@@ -458,6 +552,7 @@ for index in "${!udp_ports[@]}"; do
             tail -20 "$log" >&2
             exit 1
         fi
+        assert_udp_response "$name" "$response"
         udp_responses=$((udp_responses + 1))
         if ! contains_name "$name" "${udp_observed_responses[@]-}"; then
             udp_observed_responses+=("$name")
