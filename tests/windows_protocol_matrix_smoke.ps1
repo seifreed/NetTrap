@@ -55,6 +55,8 @@ $tcpCaptureOnly = @($tcpRows | Where-Object Mode -eq "capture" | ForEach-Object 
 $udpCaptureOnly = @($udpRows | Where-Object Mode -eq "capture" | ForEach-Object Name)
 $tcpObservedResponses = [System.Collections.Generic.List[string]]::new()
 $udpObservedResponses = [System.Collections.Generic.List[string]]::new()
+$tcpResponses = 0
+$udpResponses = 0
 $tcpPorts = @{}
 $udpPorts = @{}
 
@@ -148,6 +150,9 @@ function Invoke-TcpProbe([string] $Name, [int] $Port, [byte[]] $Payload, [bool] 
                 if ($ExpectResponse -and -not $script:tcpObservedResponses.Contains($Name)) {
                     [void]$script:tcpObservedResponses.Add($Name)
                 }
+                if ($ExpectResponse) {
+                    $script:tcpResponses++
+                }
                 return
             }
         }
@@ -165,6 +170,7 @@ function Invoke-TcpProbe([string] $Name, [int] $Port, [byte[]] $Payload, [bool] 
         if (-not $script:tcpObservedResponses.Contains($Name)) {
             [void]$script:tcpObservedResponses.Add($Name)
         }
+        $script:tcpResponses++
     } finally {
         $client.Dispose()
     }
@@ -186,6 +192,7 @@ function Invoke-UdpProbe([string] $Name, [int] $Port, [byte[]] $Payload, [bool] 
         if (-not $script:udpObservedResponses.Contains($Name)) {
             [void]$script:udpObservedResponses.Add($Name)
         }
+        $script:udpResponses++
     } finally {
         $udp.Dispose()
     }
@@ -360,8 +367,6 @@ try {
     if ($process.HasExited) {
         throw "NetTrap exited during protocol matrix smoke (code $($process.ExitCode))"
     }
-    $tcpResponses = ($tcpNames.Count - $tcpCaptureOnly.Count) * $roundsCompleted
-    $udpResponses = ($udpNames.Count - $udpCaptureOnly.Count) * $roundsCompleted
     if ($env:NETTRAP_MATRIX_REPORT) {
         @(
             "schema=2"
