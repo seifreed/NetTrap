@@ -1277,6 +1277,126 @@ pub mod windivert {
         }
 
         #[test]
+        fn redirects_ipv4_tcp_and_restores_original_source_on_reply() {
+            let mut outbound = vec![
+                0x45,
+                0,
+                0,
+                40,
+                0,
+                0,
+                0,
+                0,
+                64,
+                IPPROTO_TCP,
+                0,
+                0,
+                192,
+                0,
+                2,
+                10,
+                198,
+                51,
+                100,
+                20,
+                0x9c,
+                0x40,
+                0,
+                80,
+                0,
+                0,
+                0,
+                1,
+                0,
+                0,
+                0,
+                0,
+                0x50,
+                0x02,
+                0x20,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ];
+            let redirects = vec![PortRedirect::new(80, true, 8080)];
+            let flows = Arc::new(Mutex::new(RedirectFlowTable::default()));
+            let mut outbound_addr = WindivertAddress::default();
+            outbound_addr.set_direction(WINDIVERT_DIRECTION_OUT);
+            let outbound_len = outbound.len();
+
+            WinDivertInterceptor::redirect_packet(
+                &mut outbound,
+                outbound_len,
+                &outbound_addr,
+                &redirects,
+                &flows,
+            )
+            .expect("outbound TCP rewrite should succeed");
+
+            assert_eq!(&outbound[16..20], &[127, 0, 0, 1]);
+            assert_eq!(&outbound[22..24], &8080u16.to_be_bytes());
+
+            let mut reply = vec![
+                0x45,
+                0,
+                0,
+                40,
+                0,
+                0,
+                0,
+                0,
+                64,
+                IPPROTO_TCP,
+                0,
+                0,
+                127,
+                0,
+                0,
+                1,
+                192,
+                0,
+                2,
+                10,
+                0x1f,
+                0x90,
+                0x9c,
+                0x40,
+                0,
+                0,
+                0,
+                2,
+                0,
+                0,
+                0,
+                1,
+                0x50,
+                0x10,
+                0x20,
+                0,
+                0,
+                0,
+                0,
+            ];
+            let mut reply_addr = WindivertAddress::default();
+            reply_addr.set_direction(WINDIVERT_DIRECTION_OUT);
+            let reply_len = reply.len();
+
+            WinDivertInterceptor::redirect_packet(
+                &mut reply,
+                reply_len,
+                &reply_addr,
+                &redirects,
+                &flows,
+            )
+            .expect("loopback TCP reply rewrite should succeed");
+
+            assert_eq!(&reply[12..16], &[198, 51, 100, 20]);
+            assert_eq!(&reply[20..22], &80u16.to_be_bytes());
+        }
+
+        #[test]
         fn redirects_ipv6_udp_and_restores_original_source_on_reply() {
             let mut outbound = vec![
                 0x60,
