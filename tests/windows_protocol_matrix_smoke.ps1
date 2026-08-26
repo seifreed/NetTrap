@@ -620,6 +620,10 @@ try {
     }
     $roundsCompleted = $round - 1
 
+    if ($durationSeconds -ge 60 -and $roundsCompleted -lt 2) {
+        throw "protocol matrix duration requested at least 60s but completed only $roundsCompleted round(s)"
+    }
+
     if ($process.HasExited) {
         throw "NetTrap exited during protocol matrix smoke (code $($process.ExitCode))"
     }

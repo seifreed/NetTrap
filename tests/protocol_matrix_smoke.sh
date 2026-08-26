@@ -585,6 +585,11 @@ done
 done
 rounds_completed=$((round - 1))
 
+if (( duration >= 60 && rounds_completed < 2 )); then
+    echo "protocol matrix duration requested at least 60s but completed only $rounds_completed round(s)" >&2
+    exit 1
+fi
+
 if ! kill -0 "$nettrap_pid" 2>/dev/null; then
     cat "$log" >&2
     exit 1
