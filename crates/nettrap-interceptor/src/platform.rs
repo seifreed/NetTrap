@@ -23,8 +23,8 @@ pub mod windivert {
     use crate::prelude::*;
     use nettrap_windivert::{
         HANDLE, IPPROTO_TCP, IPPROTO_UDP, WINDIVERT_DIRECTION_IN, WINDIVERT_DIRECTION_OUT,
-        WINDIVERT_LAYER_NETWORK, WinDivert, WindivertAddress, WindivertIpHdr, WindivertIpv6Hdr,
-        WindivertTcpHdr, WindivertUdpHdr, close_handle,
+        WinDivert, WindivertAddress, WindivertIpHdr, WindivertIpv6Hdr, WindivertTcpHdr,
+        WindivertUdpHdr, close_handle,
     };
     use parking_lot::{Mutex, RwLock};
     use std::collections::{HashMap, VecDeque};
@@ -768,22 +768,9 @@ pub mod windivert {
     #[async_trait]
     impl Interceptor for WinDivertInterceptor {
         async fn init(&mut self) -> Result<()> {
-            tracing::info!(
-                "Initializing WinDivert interceptor with filter: {}",
-                self.filter
-            );
-
-            let mut windivert = WinDivert::new();
-            let handle = windivert
-                .open(&self.filter, 0, WINDIVERT_LAYER_NETWORK, 0)
-                .map_err(|e| Error::Interception(format!("Failed to open WinDivert: {}", e)))?;
-
-            *self.handle.write() = Some(handle as usize);
-            *self.windivert.lock() = Some(windivert);
-            *self.running.write() = true;
-
-            tracing::info!("WinDivert interceptor initialized successfully");
-            Ok(())
+            Err(Error::NotSupported(
+                "Windows transparent interception is disabled until packet-preserving NAT redirection is implemented and validated; use listener mode".into(),
+            ))
         }
 
         async fn recv_packet(&self) -> Result<Packet> {
@@ -937,6 +924,23 @@ pub mod windivert {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[tokio::test]
+        async fn init_fails_closed_before_opening_windivert() {
+            let config = InterceptorConfig {
+                mode: nettrap_core::config::InterceptionMode::WinDivert,
+                ..Default::default()
+            };
+            let mut interceptor = WinDivertInterceptor::new(config).expect("valid config");
+
+            let error = interceptor
+                .init()
+                .await
+                .expect_err("Windows transparent interception must remain disabled");
+            assert!(
+                matches!(error, Error::NotSupported(message) if message.contains("packet-preserving NAT"))
+            );
+        }
 
         #[test]
         fn parses_ipv4_tcp_packet() {
