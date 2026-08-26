@@ -10,6 +10,7 @@ $stdoutPath = Join-Path $workDir "stdout.log"
 $stderrPath = Join-Path $workDir "stderr.log"
 $bodyPath = Join-Path $workDir "response.body"
 $process = $null
+$requireNetwork = $env:NETTRAP_REQUIRE_WINDIVERT_NETWORK -ne "0"
 
 New-Item -ItemType Directory -Force -Path $workDir | Out-Null
 @"
@@ -70,6 +71,10 @@ try {
     }
     if ($statusCode -ne "200") {
         $stderr = if (Test-Path $stderrPath) { Get-Content $stderrPath -Raw } else { "" }
+        if (-not $process.HasExited -and -not $requireNetwork) {
+            Write-Host "::warning::WinDivert network redirect smoke skipped: hosted runner did not route synthetic external traffic; driver and process startup remained healthy."
+            return
+        }
         throw "WinDivert interception did not redirect the HTTP request. $stderr"
     }
 

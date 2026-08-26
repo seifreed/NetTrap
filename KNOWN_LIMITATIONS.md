@@ -15,7 +15,9 @@ suite.
   crash recovery, and graceful cleanup.
 - Windows x86_64 transparent redirection is experimental and currently covers
   bounded TCP/UDP NAT flows only. Release ZIP/MSI artifacts bundle the pinned
-  WinDivert runtime and license; Windows ARM64 stays in listener/capture mode.
+  WinDivert runtime and license; GitHub-hosted Windows runners do not guarantee
+  outbound WinDivert routing, so the full interception smoke requires a
+  self-hosted runner. Windows ARM64 stays in listener/capture mode.
 - macOS has no transparent redirection implementation.
 - Live capture and process attribution depend on OS facilities, privileges, and
   external packet-capture runtimes.

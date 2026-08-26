@@ -10,7 +10,7 @@ the release workflow; it does not imply transparent interception support.
 | Linux ARM64 | Yes | Supported | Experimental `iptables`/`ip6tables` or direct `nft` redirection | Native Rust build and tests |
 | macOS x86_64 | Yes | Supported | Not supported | Native Rust gates plus `dig` and `curl` E2E |
 | macOS ARM64 | Yes | Supported | Not supported | Native Rust gates plus `dig` and `curl` E2E |
-| Windows x86_64 | Yes | Supported | Experimental WinDivert TCP/UDP NAT redirection | Native Rust gates, binary/config smoke, protocol matrix parity, listener parity, and verified WinDivert HTTP redirect smoke |
+| Windows x86_64 | Yes | Supported | Experimental WinDivert TCP/UDP NAT redirection | Native Rust gates, binary/config smoke, protocol matrix parity, and listener parity; full WinDivert redirect assertion requires a self-hosted runner with deterministic outbound routing |
 | Windows ARM64 | Yes | Supported | Not supported; Npcap capture is experimental | Native Rust gates, binary/config smoke, protocol matrix parity, and TCP/UDP listener parity smoke |
 | Linux x86/ARM32 | No | Not supported | Not supported | No CI target or release asset |
 | Windows x86 | No | Not supported | Not supported | No CI target or release asset |
@@ -47,7 +47,7 @@ outside this table may work but are unsupported until added to CI.
 | Linux ARM64 | Ubuntu 24.04 ARM GitHub-hosted runner |
 | macOS x86_64 | macOS 15 Intel GitHub-hosted runner |
 | macOS ARM64 | macOS 14 ARM GitHub-hosted runner |
-| Windows x86_64 | Current `windows-latest` GitHub-hosted runner |
+| Windows x86_64 | Current `windows-latest` GitHub-hosted runner; full redirect assertion on self-hosted Windows |
 | Windows ARM64 | Windows 11 ARM GitHub-hosted runner |
 
 ## macOS Decision
