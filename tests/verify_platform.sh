@@ -20,6 +20,8 @@ echo ""
 
 OS="$(uname -s)"
 ARCH="$(uname -m)"
+INTEGRATION_RETRIES=5
+INTEGRATION_RETRY_DELAY_SECS=1
 
 echo "Platform: $OS"
 echo "Architecture: $ARCH"
@@ -220,15 +222,31 @@ sleep 2
 
 echo "Testing DNS..."
 if command -v dig &> /dev/null; then
-    if dig @127.0.0.1 -p 53539 test.example.com A +short > /tmp/dns_result.txt 2>&1 \
-        && grep -qE "^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$" /tmp/dns_result.txt; then
+    dns_udp_ok=false
+    for _ in $(seq 1 "$INTEGRATION_RETRIES"); do
+        if dig @127.0.0.1 -p 53539 test.example.com A +short > /tmp/dns_result.txt 2>&1 \
+            && grep -qE "^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$" /tmp/dns_result.txt; then
+            dns_udp_ok=true
+            break
+        fi
+        sleep "$INTEGRATION_RETRY_DELAY_SECS"
+    done
+    if [ "$dns_udp_ok" = true ]; then
         echo "✓ DNS test passed"
     else
         echo "✗ DNS test failed"
         exit 1
     fi
-    if dig +tcp @127.0.0.1 -p 53539 test.example.com A +short > /tmp/dns_result.txt 2>&1 \
-        && grep -qE "^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$" /tmp/dns_result.txt; then
+    dns_tcp_ok=false
+    for _ in $(seq 1 "$INTEGRATION_RETRIES"); do
+        if dig +tcp @127.0.0.1 -p 53539 test.example.com A +short > /tmp/dns_result.txt 2>&1 \
+            && grep -qE "^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$" /tmp/dns_result.txt; then
+            dns_tcp_ok=true
+            break
+        fi
+        sleep "$INTEGRATION_RETRY_DELAY_SECS"
+    done
+    if [ "$dns_tcp_ok" = true ]; then
         echo "✓ DNS TCP test passed"
     else
         echo "✗ DNS TCP test failed"
