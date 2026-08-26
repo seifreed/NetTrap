@@ -189,9 +189,11 @@ jobs:
           cargo +nightly semver-checks --workspace --baseline-rev "$baseline"
 
       - name: Run every fuzz target
+        env:
+          NETTRAP_FUZZ_SECONDS: ${{ github.event_name == 'schedule' && '60' || '10' }}
         run: |
           for target in $(cargo +nightly fuzz list); do
-            cargo +nightly fuzz run "$target" -- -max_total_time=10
+            cargo +nightly fuzz run "$target" -- "-max_total_time=$NETTRAP_FUZZ_SECONDS"
           done
 
       - name: Build release binary for soak test

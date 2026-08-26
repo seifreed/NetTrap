@@ -83,9 +83,13 @@ run_semver_check() {
 }
 
 run_fuzz_smoke() {
-    local target
+    local target fuzz_seconds="${NETTRAP_FUZZ_SECONDS:-10}"
+    if [[ ! "$fuzz_seconds" =~ ^[1-9][0-9]*$ ]] || (( fuzz_seconds > 300 )); then
+        echo "NETTRAP_FUZZ_SECONDS must be between 1 and 300" >&2
+        exit 1
+    fi
     for target in $(run_nightly fuzz list); do
-        run run_nightly fuzz run "$target" -- -max_total_time=10
+        run run_nightly fuzz run "$target" -- "-max_total_time=$fuzz_seconds"
     done
 }
 
