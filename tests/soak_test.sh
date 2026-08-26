@@ -64,6 +64,14 @@ port = 18053
 bind_address = "127.0.0.1"
 enabled = true
 emulate_response = true
+
+[[listeners]]
+name = "dns-tcp"
+protocol = "tcp"
+port = 18054
+bind_address = "127.0.0.1"
+enabled = true
+emulate_response = true
 EOF
 
 malformed_http="$workdir/malformed-http.request"
@@ -72,6 +80,7 @@ malformed_http="$workdir/malformed-http.request"
     head -c 4096 /dev/zero | tr '\0' 'A'
     printf ' HTTP/1.1\r\nHost: soak.example.test\r\n\r\n'
 } >"$malformed_http"
+printf '\xff\xff' >"$workdir/malformed-dns-tcp.request"
 
 "$binary" run -c "$config" >"$log" 2>&1 &
 nettrap_pid=$!
@@ -90,6 +99,11 @@ done
 
 if ! curl --noproxy '*' --silent --fail --max-time 1 \
     -H 'Host: soak.example.test' http://127.0.0.1:18080/ >/dev/null 2>&1; then
+    cat "$log" >&2
+    exit 1
+fi
+if ! dig +tcp @127.0.0.1 -p 18054 soak.example.test A +short \
+    | grep -Eq '^[0-9]+(\.[0-9]+){3}$'; then
     cat "$log" >&2
     exit 1
 fi
@@ -127,6 +141,7 @@ run_malformed_burst() {
         (
             timeout 2 nc 127.0.0.1 18080 <"$malformed_http" >/dev/null 2>&1 || true
             printf '\xff\x00\xff\x00' | timeout 2 nc -u -w 1 127.0.0.1 18053 >/dev/null 2>&1 || true
+            timeout 2 nc 127.0.0.1 18054 <"$workdir/malformed-dns-tcp.request" >/dev/null 2>&1 || true
         ) &
         hostile_pids+=("$!")
     done
@@ -138,6 +153,7 @@ run_malformed_burst() {
 deadline=$((SECONDS + duration))
 http_requests=0
 dns_requests=0
+dns_tcp_requests=0
 malformed_requests=0
 while (( SECONDS < deadline )); do
     pids=()
@@ -147,6 +163,8 @@ while (( SECONDS < deadline )); do
                 --no-keepalive -H 'Host: soak.example.test' \
                 http://127.0.0.1:18080/ >/dev/null
             dig @127.0.0.1 -p 18053 soak.example.test A +short \
+                | grep -Eq '^[0-9]+(\.[0-9]+){3}$'
+            dig +tcp @127.0.0.1 -p 18054 soak.example.test A +short \
                 | grep -Eq '^[0-9]+(\.[0-9]+){3}$'
         ) &
         pids+=("$!")
@@ -176,7 +194,8 @@ while (( SECONDS < deadline )); do
 
     http_requests=$((http_requests + concurrency + 1))
     dns_requests=$((dns_requests + concurrency))
-    malformed_requests=$((malformed_requests + concurrency * 2))
+    dns_tcp_requests=$((dns_tcp_requests + concurrency))
+    malformed_requests=$((malformed_requests + concurrency * 3))
 done
 
 if ! kill -0 "$nettrap_pid" 2>/dev/null; then
@@ -185,4 +204,4 @@ if ! kill -0 "$nettrap_pid" 2>/dev/null; then
 fi
 assert_resource_bounds
 
-echo "PASS: ${duration}s hostile soak completed (${http_requests} HTTP, ${dns_requests} DNS, ${malformed_requests} malformed requests, ${connection_churn}-connection churn)"
+echo "PASS: ${duration}s hostile soak completed (${http_requests} HTTP, ${dns_requests} DNS UDP, ${dns_tcp_requests} DNS TCP, ${malformed_requests} malformed requests, ${connection_churn}-connection churn)"
