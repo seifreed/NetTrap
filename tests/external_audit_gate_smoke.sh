@@ -17,7 +17,7 @@ Network parsing and release controls.
 ## Findings
 Severity rank: None.
 Reproduction: each finding includes reproduction steps.
-Retest statement: all findings were retested after remediation.
+Retest statement: all findings were retested after remediation; no pending findings remain.
 EOF
 
 bash "$script" "$workdir/valid.md"

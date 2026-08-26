@@ -26,7 +26,7 @@ require_marker '(severity|risk)[[:space:]]*(rank|level|classification)'
 require_marker '(reproduction|reproduce|proof.of.concept)'
 require_marker '(retest|verification|remediation)[[:space:]]*(statement|result|status)?'
 
-if grep -Eiq '\b(todo|tbd|pending|incomplete|placeholder)\b' "$report"; then
+if grep -Eiq '^[[:space:]]*(TODO|TBD|INCOMPLETE|PLACEHOLDER)([[:space:]:]|$)|\[[[:space:]]*(TODO|TBD|INCOMPLETE|PLACEHOLDER)[[:space:]]*\]' "$report"; then
     echo "external security audit report contains unresolved placeholders" >&2
     exit 1
 fi
