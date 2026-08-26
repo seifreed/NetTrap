@@ -286,6 +286,13 @@ jobs:
           New-Item -ItemType Directory -Force -Path $runtime | Out-Null
           Copy-Item (Join-Path $root "WinDivert-2.2.2-A\x64\WinDivert.dll") $runtime
           Copy-Item (Join-Path $root "WinDivert-2.2.2-A\x64\WinDivert64.sys") $runtime
+          foreach ($required in @("WinDivert.dll", "WinDivert64.sys")) {
+            $path = Join-Path $runtime $required
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or
+                (Get-Item -LiteralPath $path).Length -le 0) {
+              throw "WinDivert runtime file is missing or empty: $path"
+            }
+          }
           "PATH=$runtime;$env:PATH" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
         shell: pwsh
 
