@@ -230,6 +230,40 @@ jobs:
         run: ./tests/windows_interception_smoke.ps1 -BinaryPath "${{ github.workspace }}\target\${{ matrix.target }}\release\nettrap.exe"
         shell: pwsh
 
+      - name: Generate Linux release protocol parity report
+        if: runner.os == 'Linux'
+        env:
+          NETTRAP_BIN: ${{ github.workspace }}/target/${{ matrix.target }}/release/nettrap
+          NETTRAP_MATRIX_REPEAT: "1"
+          NETTRAP_MATRIX_REPORT: ${{ runner.temp }}/nettrap-protocol-matrix-${{ matrix.name }}.txt
+        run: bash tests/protocol_matrix_smoke.sh
+
+      - name: Upload Linux release protocol parity report
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-protocol-matrix-${{ matrix.name }}
+          path: ${{ runner.temp }}/nettrap-protocol-matrix-${{ matrix.name }}.txt
+          if-no-files-found: error
+          archive: false
+
+      - name: Generate Windows release protocol parity report
+        if: runner.os == 'Windows'
+        env:
+          NETTRAP_MATRIX_REPEAT: "1"
+          NETTRAP_MATRIX_REPORT: ${{ runner.temp }}\nettrap-protocol-matrix-${{ matrix.name }}.txt
+        run: ./tests/windows_protocol_matrix_smoke.ps1 -BinaryPath "${{ github.workspace }}\target\${{ matrix.target }}\release\nettrap.exe"
+        shell: pwsh
+
+      - name: Upload Windows release protocol parity report
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-protocol-matrix-${{ matrix.name }}
+          path: ${{ runner.temp }}\nettrap-protocol-matrix-${{ matrix.name }}.txt
+          if-no-files-found: error
+          archive: false
+
       - name: Package Unix release
         if: matrix.archive == 'tar'
         run: |
@@ -452,6 +486,29 @@ jobs:
           if-no-files-found: error
           archive: false
 
+  protocol-parity:
+    name: Verify release Linux/Windows protocol parity
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download release protocol reports
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-protocol-matrix-*
+          path: reports
+          merge-multiple: true
+
+      - name: Compare release protocol contracts
+        run: python3 tests/compare_protocol_matrix_reports.py \
+          reports/nettrap-protocol-matrix-linux-x86_64.txt \
+          reports/nettrap-protocol-matrix-linux-aarch64.txt \
+          reports/nettrap-protocol-matrix-windows-x86_64.txt \
+          reports/nettrap-protocol-matrix-windows-aarch64.txt
+
   image:
     name: Build OCI image (${{ matrix.platform }})
     needs: e2e
@@ -532,7 +589,7 @@ jobs:
 
   publish:
     name: Publish Draft Release
-    needs: [build, e2e, image-manifest]
+    needs: [build, e2e, image-manifest, protocol-parity]
     runs-on: ubuntu-latest
     permissions:
       artifact-metadata: write
