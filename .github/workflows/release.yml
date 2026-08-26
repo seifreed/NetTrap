@@ -498,8 +498,15 @@ jobs:
             codesign --verify --strict "$clean_dir/nettrap"
             codesign --verify --strict "nettrap-${{ matrix.name }}.binary"
           fi
-          test "$(sha256sum "$clean_dir/nettrap" | awk '{print $1}')" = \
-            "$(sha256sum "nettrap-${{ matrix.name }}.binary" | awk '{print $1}')"
+          sha256_file() {
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "$1" | awk '{print $1}'
+            else
+              shasum -a 256 "$1" | awk '{print $1}'
+            fi
+          }
+          test "$(sha256_file "$clean_dir/nettrap")" = \
+            "$(sha256_file "nettrap-${{ matrix.name }}.binary")"
 
       - name: Verify packaged Linux formats
         if: runner.os == 'Linux'

@@ -24,7 +24,9 @@ for marker in \
     "Sign Windows MSI (Authenticode)" \
     "Get-AuthenticodeSignature -LiteralPath \"nettrap-\${{ matrix.name }}.msi\"" \
     "Packaged executable Authenticode verification failed" \
-    "codesign --verify --strict \"\$clean_dir/nettrap\""; do
+    "codesign --verify --strict \"\$clean_dir/nettrap\"" \
+    "sha256_file()" \
+    "shasum -a 256 \"\$1\""; do
     if ! grep -Fq "$marker" "$workflow"; then
         echo "release signing contract is missing: $marker" >&2
         exit 1
