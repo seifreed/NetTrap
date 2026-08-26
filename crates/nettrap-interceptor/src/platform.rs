@@ -1645,9 +1645,10 @@ pub mod windivert {
 
             let mut outbound_addr = WindivertAddress::default();
             outbound_addr.set_direction(WINDIVERT_DIRECTION_OUT);
+            let outbound_len = outbound.len();
             WinDivertInterceptor::redirect_packet(
                 &mut outbound,
-                outbound.len(),
+                outbound_len,
                 &outbound_addr,
                 &redirects,
                 &flows,
@@ -1671,9 +1672,10 @@ pub mod windivert {
 
             let mut reply_addr = WindivertAddress::default();
             reply_addr.set_direction(WINDIVERT_DIRECTION_OUT);
+            let reply_len = reply.len();
             WinDivertInterceptor::redirect_packet(
                 &mut reply,
-                reply.len(),
+                reply_len,
                 &reply_addr,
                 &redirects,
                 &flows,
