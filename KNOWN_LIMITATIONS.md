@@ -8,7 +8,7 @@ suite.
 
 - Direct listener mode is the primary supported path.
 - Linux transparent redirection is experimental. It uses dedicated NetTrap
-  chains (or a dedicated `nft` table when the iptables tools are unavailable)
+  chains (or a per-process `nettrap_<pid>` table when the iptables tools are unavailable)
   and removes stale managed state on the next startup. Abrupt shutdown can
   leave redirect rules and multi-host forwarding enabled until that restart or
   manual cleanup. The opt-in Linux network-namespace E2E covers redirection,

@@ -122,10 +122,12 @@ kill -TERM "$nettrap_pid"
 wait "$nettrap_pid"
 nettrap_pid=""
 
-if nft list table ip nettrap >/dev/null 2>&1 || nft list table ip6 nettrap >/dev/null 2>&1; then
-    echo "FAIL: NetTrap nftables table survived graceful shutdown" >&2
-    exit 1
-fi
+for family in ip ip6; do
+    if nft list tables "$family" 2>/dev/null | grep -Eq "^table ${family} nettrap_[0-9]+$"; then
+        echo "FAIL: NetTrap nftables table survived graceful shutdown (${family})" >&2
+        exit 1
+    fi
+done
 if iptables -t nat -S NETTRAP_PREROUTING >/dev/null 2>&1 \
     || ip6tables -t nat -S NETTRAP_PREROUTING >/dev/null 2>&1; then
     echo "FAIL: NetTrap iptables chain survived graceful shutdown" >&2

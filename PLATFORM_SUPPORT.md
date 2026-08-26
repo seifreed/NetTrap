@@ -21,7 +21,8 @@ the release workflow; it does not imply transparent interception support.
   service directly.
 - Linux transparent redirection changes host firewall rules and requires
   privileges. It isolates redirects in dedicated NetTrap chains or the
-  `nettrap` nftables table and removes stale managed state on the next startup.
+  per-process `nettrap_<pid>` nftables table and removes stale managed state on
+  the next startup.
   `iptables-nft` compatibility is supported through the system wrapper; direct
   nftables uses the same port and interface restrictions. The opt-in namespace
   contract runs as `NETTRAP_NAMESPACE_E2E=1` with root privileges on Linux.
