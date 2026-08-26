@@ -189,7 +189,16 @@ pub mod windivert {
             key: &ReverseFlowKey,
             now: Instant,
         ) -> Option<SocketAddr> {
+            #[cfg(test)]
+            let before_prune = self.reverse.contains_key(key);
             self.prune(now);
+            #[cfg(test)]
+            eprintln!(
+                "reverse lookup: before={before_prune} after={} entries={} expiry={}",
+                self.reverse.contains_key(key),
+                self.entries.len(),
+                self.expiry.len()
+            );
             let flow_key = if let Some(flow_key) = self.reverse.get(key).cloned() {
                 flow_key
             } else {
