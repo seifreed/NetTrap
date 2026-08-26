@@ -22,6 +22,7 @@ QUOTD_PORT=11717
 MEMCACHED_PORT=11211
 SOCKS_PORT=11080
 TFTP_UDP_PORT=1069
+TFTP_ROOT="/tmp/nettrap-integration-tftp"
 SNMP_UDP_PORT=1161
 SIP_UDP_PORT=15060
 UPNP_UDP_PORT=11900
@@ -50,7 +51,7 @@ cleanup() {
         wait "$NETTRAP_PID" 2>/dev/null || true
     fi
     rm -f /tmp/test_output.txt "$TEST_CONFIG" "$SMTP_MESSAGE"
-    rm -rf "$SMTP_DIR" "$ARTIFACT_DIR"
+    rm -rf "$SMTP_DIR" "$ARTIFACT_DIR" "$TFTP_ROOT"
 }
 
 trap cleanup EXIT
@@ -356,6 +357,34 @@ finally:
 
 if len(response) < 4 or int.from_bytes(response[:2], "big") not in (3, 5):
     raise SystemExit(f"invalid TFTP RRQ response: {response[:8].hex()}")
+PY
+}
+
+run_tftp_wrq() {
+    python3 - "$TFTP_UDP_PORT" "$TFTP_ROOT" <<'PY'
+import pathlib
+import socket
+import sys
+
+port = int(sys.argv[1])
+root = pathlib.Path(sys.argv[2]) / "tftp_upload" / "upload.bin"
+payload = b"nettrap-tftp-upload"
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.settimeout(3)
+try:
+    sock.sendto(b"\x00\x02upload.bin\x00octet\x00", ("127.0.0.1", port))
+    response, peer = sock.recvfrom(65535)
+    if response != b"\x00\x04\x00\x00":
+        raise SystemExit(f"invalid TFTP WRQ ACK: {response[:8].hex()}")
+    sock.sendto(b"\x00\x03\x00\x01" + payload, peer)
+    response, _ = sock.recvfrom(65535)
+    if response != b"\x00\x04\x00\x01":
+        raise SystemExit(f"invalid TFTP DATA ACK: {response[:8].hex()}")
+finally:
+    sock.close()
+
+if root.read_bytes() != payload:
+    raise SystemExit("TFTP upload content was not persisted")
 PY
 }
 
@@ -720,6 +749,7 @@ port = $TFTP_UDP_PORT
 bind_address = "0.0.0.0"
 enabled = true
 emulate_response = true
+tftproot = "$TFTP_ROOT"
 
 [[listeners]]
 name = "snmp-udp"
@@ -818,6 +848,7 @@ enabled = true
 emulate_response = true
 EOF
 
+mkdir -p "$TFTP_ROOT"
 echo "Starting NetTrap engine..."
 timeout "$INTEGRATION_TIMEOUT_SECONDS" nettrap run -c "$TEST_CONFIG" &
 NETTRAP_PID=$!
@@ -868,6 +899,8 @@ echo ""
 echo "--- UDP Protocol Tests ---"
 
 run_test "TFTP RRQ" run_tftp_rrq
+
+run_test "TFTP WRQ" run_tftp_wrq
 
 run_test "SNMP GET" run_snmp_get
 
