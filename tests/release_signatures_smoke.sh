@@ -16,6 +16,7 @@ for marker in \
     "Verify release Linux/Windows protocol parity" \
     "tests/compare_protocol_matrix_reports.py" \
     "Block release on open high or critical alerts" \
+    "open_high_or_critical_technical" \
     "bash scripts/security-evidence.sh target/security-audit" \
     "Upload release security evidence" \
     "Require independent audit report" \
