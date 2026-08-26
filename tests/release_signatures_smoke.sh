@@ -17,6 +17,7 @@ for marker in \
     "tests/compare_protocol_matrix_reports.py" \
     "Block release on open high or critical alerts" \
     "bash scripts/security-evidence.sh target/security-audit" \
+    "Upload release security evidence" \
     "Sign Windows MSI (Authenticode)" \
     "Get-AuthenticodeSignature -LiteralPath \"nettrap-\${{ matrix.name }}.msi\"" \
     "Packaged executable Authenticode verification failed" \

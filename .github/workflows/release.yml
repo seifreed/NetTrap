@@ -623,7 +623,7 @@ jobs:
 
   publish:
     name: Publish Draft Release
-    needs: [build, e2e, image-manifest, protocol-parity]
+    needs: [build, e2e, image-manifest, protocol-parity, quality-gates, security-audit]
     runs-on: ubuntu-latest
     permissions:
       artifact-metadata: write
