@@ -19,8 +19,9 @@ REQUIRED_KEYS = {
     "udp_names",
     "tcp_capture_only",
     "udp_capture_only",
+    "event_listeners",
 }
-EXPECTED_SCHEMA = "2"
+EXPECTED_SCHEMA = "3"
 
 
 def read_report(path: Path) -> dict[str, str]:
@@ -40,6 +41,12 @@ def read_report(path: Path) -> dict[str, str]:
 
 
 def validate_observed_responses(report: dict[str, str], path: Path) -> None:
+    expected_events = report["tcp_names"].split(",") + [
+        f"{name}-udp" for name in report["udp_names"].split(",")
+    ]
+    if report["event_listeners"].split(",") != expected_events:
+        raise ValueError(f"report {path} has inconsistent event listener coverage")
+
     for transport in ("tcp", "udp"):
         names = report[f"{transport}_names"].split(",")
         capture_only = {

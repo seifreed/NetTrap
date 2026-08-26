@@ -392,7 +392,7 @@ try {
     }
     if ($env:NETTRAP_MATRIX_REPORT) {
         @(
-            "schema=2"
+            "schema=3"
             "tcp_handlers=$($tcpNames.Count)"
             "udp_handlers=$($udpNames.Count)"
             "tcp_responses=$tcpResponses"
@@ -405,6 +405,7 @@ try {
             "udp_names=$($udpNames -join ',')"
             "tcp_capture_only=$($tcpCaptureOnly -join ',')"
             "udp_capture_only=$($udpCaptureOnly -join ',')"
+            "event_listeners=$($expectedEventListeners -join ',')"
         ) | Set-Content -LiteralPath $env:NETTRAP_MATRIX_REPORT -Encoding utf8
     }
     Write-Host "PASS: Windows protocol matrix parity smoke ($($tcpNames.Count) TCP, $($udpNames.Count) UDP handlers; $tcpResponses TCP, $udpResponses UDP responses; $roundsCompleted round(s))"
