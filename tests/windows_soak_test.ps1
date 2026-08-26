@@ -263,6 +263,17 @@ function Invoke-Malformed {
             $client.Dispose()
         }
     }
+    for ($i = 0; $i -lt $concurrency; $i++) {
+        $client = [Net.Sockets.TcpClient]::new()
+        try {
+            $client.Connect("127.0.0.1", $dnsTcpPort)
+            $client.GetStream().Write($bad, 0, $bad.Length)
+        } catch {
+        } finally {
+            Reset-Connection $client
+            $client.Dispose()
+        }
+    }
 }
 
 function Assert-Bounds([long] $WorkingSet, [long] $Handles) {
