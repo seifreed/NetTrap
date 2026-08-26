@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-binary="${NETTRAP_BIN:-nettrap}"
+binary="${NETTRAP_BIN:-./target/release/nettrap}"
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 manifest="$script_dir/protocol_matrix_manifest.txt"
 workdir="$(mktemp -d)"
