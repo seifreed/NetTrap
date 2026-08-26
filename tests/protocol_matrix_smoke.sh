@@ -321,6 +321,8 @@ fi
 
 if [[ -n "${NETTRAP_MATRIX_REPORT:-}" ]]; then
     mkdir -p "$(dirname "$NETTRAP_MATRIX_REPORT")"
+    tcp_malformed_probes=$(( ${#tcp_ports[@]} * repeat ))
+    udp_malformed_probes=$(( ${#udp_ports[@]} * repeat ))
     {
         printf 'schema=2\n'
         printf 'tcp_handlers=%s\n' "${#tcp_names[@]}"
@@ -329,6 +331,8 @@ if [[ -n "${NETTRAP_MATRIX_REPORT:-}" ]]; then
         printf 'udp_responses=%s\n' "$udp_responses"
         printf 'tcp_observed_responses=%s\n' "$(IFS=,; echo "${tcp_observed_responses[*]}")"
         printf 'udp_observed_responses=%s\n' "$(IFS=,; echo "${udp_observed_responses[*]}")"
+        printf 'tcp_malformed_probes=%s\n' "$tcp_malformed_probes"
+        printf 'udp_malformed_probes=%s\n' "$udp_malformed_probes"
         printf 'tcp_names=%s\n' "$(IFS=,; echo "${tcp_names[*]}")"
         printf 'udp_names=%s\n' "$(IFS=,; echo "${udp_names[*]}")"
         printf 'tcp_capture_only=%s\n' "$(IFS=,; echo "${tcp_capture_only[*]}")"

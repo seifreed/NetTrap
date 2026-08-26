@@ -354,6 +354,8 @@ try {
             "udp_responses=$udpResponses"
             "tcp_observed_responses=$($tcpObservedResponses -join ',')"
             "udp_observed_responses=$($udpObservedResponses -join ',')"
+            "tcp_malformed_probes=$($tcpNames.Count * $repeat)"
+            "udp_malformed_probes=$($udpNames.Count * $repeat)"
             "tcp_names=$($tcpNames -join ',')"
             "udp_names=$($udpNames -join ',')"
             "tcp_capture_only=$($tcpCaptureOnly -join ',')"

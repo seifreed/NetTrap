@@ -13,6 +13,8 @@ REQUIRED_KEYS = {
     "udp_responses",
     "tcp_observed_responses",
     "udp_observed_responses",
+    "tcp_malformed_probes",
+    "udp_malformed_probes",
     "tcp_names",
     "udp_names",
     "tcp_capture_only",
@@ -61,6 +63,16 @@ def validate_observed_responses(report: dict[str, str], path: Path) -> None:
             raise ValueError(
                 f"report {path} has inconsistent {transport} observations "
                 f"(missing: {missing}; unexpected: {unexpected})"
+            )
+        malformed_key = f"{transport}_malformed_probes"
+        try:
+            malformed_probes = int(report[malformed_key])
+        except ValueError as error:
+            raise ValueError(f"report {path} has an invalid {malformed_key} value") from error
+        if malformed_probes < len(names):
+            raise ValueError(
+                f"report {path} exercised only {malformed_probes} malformed {transport} probes; "
+                f"expected at least {len(names)}"
             )
 
 
