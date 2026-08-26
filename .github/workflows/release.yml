@@ -305,6 +305,8 @@ jobs:
           "$clean_dir/nettrap" config --defaults > /dev/null
           test -x "nettrap-${{ matrix.name }}.binary"
           "nettrap-${{ matrix.name }}.binary" --version
+          test "$(sha256sum "$clean_dir/nettrap" | awk '{print $1}')" = \
+            "$(sha256sum "nettrap-${{ matrix.name }}.binary" | awk '{print $1}')"
 
       - name: Verify packaged Linux formats
         if: runner.os == 'Linux'
@@ -324,6 +326,9 @@ jobs:
           test -s "$clean_dir/rpm/etc/nettrap/config.toml"
           "$clean_dir/deb/usr/bin/nettrap" --version
           "$clean_dir/rpm/usr/bin/nettrap" --version
+          raw_hash="$(sha256sum "nettrap-${{ matrix.name }}.binary" | awk '{print $1}')"
+          test "$(sha256sum "$clean_dir/deb/usr/bin/nettrap" | awk '{print $1}')" = "$raw_hash"
+          test "$(sha256sum "$clean_dir/rpm/usr/bin/nettrap" | awk '{print $1}')" = "$raw_hash"
 
       - name: Verify packaged Windows release in a clean directory
         if: matrix.archive == 'zip'
@@ -344,6 +349,9 @@ jobs:
           & "$cleanDir/nettrap.exe" --version
           & "$cleanDir/nettrap.exe" config --defaults | Out-Null
           if ((Get-Item "nettrap-${{ matrix.name }}.binary").Length -le 0) { throw "Empty raw binary" }
+          $rawHash = (Get-FileHash -Algorithm SHA256 -Path "nettrap-${{ matrix.name }}.binary").Hash
+          $zipHash = (Get-FileHash -Algorithm SHA256 -Path "$cleanDir/nettrap.exe").Hash
+          if ($zipHash -ne $rawHash) { throw "ZIP executable differs from signed raw binary" }
         shell: pwsh
 
       - name: Verify packaged Windows MSI in a clean directory
@@ -369,6 +377,9 @@ jobs:
           }
           & $installed.FullName --version
           & $installed.FullName config --defaults | Out-Null
+          $rawHash = (Get-FileHash -Algorithm SHA256 -Path "nettrap-${{ matrix.name }}.binary").Hash
+          $msiHash = (Get-FileHash -Algorithm SHA256 -Path $installed.FullName).Hash
+          if ($msiHash -ne $rawHash) { throw "MSI executable differs from signed raw binary" }
         shell: pwsh
 
       - name: Upload packaged release

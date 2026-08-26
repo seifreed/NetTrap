@@ -25,6 +25,8 @@ the archive digest to the GitHub Actions release workflow and commit; the
 checksum detects local corruption and is also published as a release asset.
 
 The bundle signature covers the downloaded release artifact. Individual
-executables are not currently Authenticode-signed or Apple Developer
+executables inside the published packages are hash-checked against the
+corresponding signed raw `.binary` before release publication. They are not
+currently Authenticode-signed or Apple Developer
 ID-signed. Those platform signatures require externally managed signing
 identities and must not be inferred from the artifact signature.
