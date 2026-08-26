@@ -675,6 +675,32 @@ pub mod windivert {
             let now = Instant::now();
             let mut flows = flow_table.lock();
 
+            // WinDivert can report loopback replies as outbound packets. Match
+            // the reverse flow before applying the outbound request rewrite so
+            // the client sees the original destination on either direction.
+            if src.is_loopback() {
+                let reverse = ReverseFlowKey {
+                    protocol,
+                    client: SocketAddr::new(dst, dst_port),
+                    listener_port: src_port,
+                };
+                if let Some(original_destination) = flows.inbound_destination(&reverse, now) {
+                    if !Self::rewrite_endpoint(
+                        data,
+                        is_ipv6,
+                        transport_offset,
+                        true,
+                        original_destination.ip(),
+                        original_destination.port(),
+                    ) {
+                        return Err(Error::Packet(
+                            "Failed to rewrite loopback reply endpoint".into(),
+                        ));
+                    }
+                    return Ok(());
+                }
+            }
+
             if addr.direction() == WINDIVERT_DIRECTION_OUT {
                 if dst.is_loopback() {
                     return Ok(());
@@ -708,28 +734,6 @@ pub mod windivert {
                     listener_port,
                 ) {
                     return Err(Error::Packet("Failed to rewrite outbound endpoint".into()));
-                }
-            } else {
-                if !src.is_loopback() {
-                    return Ok(());
-                }
-                let reverse = ReverseFlowKey {
-                    protocol,
-                    client: SocketAddr::new(dst, dst_port),
-                    listener_port: src_port,
-                };
-                let Some(original_destination) = flows.inbound_destination(&reverse, now) else {
-                    return Ok(());
-                };
-                if !Self::rewrite_endpoint(
-                    data,
-                    is_ipv6,
-                    transport_offset,
-                    true,
-                    original_destination.ip(),
-                    original_destination.port(),
-                ) {
-                    return Err(Error::Packet("Failed to rewrite inbound endpoint".into()));
                 }
             }
 
@@ -1191,6 +1195,22 @@ pub mod windivert {
             let mut inbound_addr = WindivertAddress::default();
             inbound_addr.set_direction(WINDIVERT_DIRECTION_IN);
             let inbound_len = inbound.len();
+
+            let mut outbound_reply = inbound.clone();
+            let mut outbound_reply_addr = WindivertAddress::default();
+            outbound_reply_addr.set_direction(WINDIVERT_DIRECTION_OUT);
+            let outbound_reply_len = outbound_reply.len();
+            WinDivertInterceptor::redirect_packet(
+                &mut outbound_reply,
+                outbound_reply_len,
+                &outbound_reply_addr,
+                &redirects,
+                &flows,
+            )
+            .expect("outbound loopback reply rewrite should succeed");
+            assert_eq!(&outbound_reply[12..16], &[198, 51, 100, 20]);
+            assert_eq!(&outbound_reply[20..22], &53u16.to_be_bytes());
+
             WinDivertInterceptor::redirect_packet(
                 &mut inbound,
                 inbound_len,
