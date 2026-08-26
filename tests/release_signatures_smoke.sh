@@ -20,6 +20,7 @@ for marker in \
     "Upload release security evidence" \
     "Require independent audit report" \
     "scripts/verify-external-audit.sh" \
+    "Run macOS listener E2E smoke" \
     "Sign Windows MSI (Authenticode)" \
     "Get-AuthenticodeSignature -LiteralPath \"nettrap-\${{ matrix.name }}.msi\"" \
     "Packaged executable Authenticode verification failed" \
