@@ -101,19 +101,17 @@ jobs:
         run: |
             docker run --rm --entrypoint /bin/bash nettrap:test /app/protocol_matrix_smoke.sh
 
-      - name: Generate Linux protocol matrix parity report (x64 only)
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
+      - name: Generate Linux protocol matrix parity report
         env:
           NETTRAP_BIN: ${{ github.workspace }}/target/${{ matrix.target }}/release/nettrap
-          NETTRAP_MATRIX_REPORT: ${{ runner.temp }}/nettrap-protocol-matrix-linux.txt
+          NETTRAP_MATRIX_REPORT: ${{ runner.temp }}/nettrap-protocol-matrix-${{ matrix.name }}.txt
         run: bash tests/protocol_matrix_smoke.sh
 
-      - name: Upload Linux protocol matrix parity report (x64 only)
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
+      - name: Upload Linux protocol matrix parity report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: protocol-matrix-linux-x64
-          path: ${{ runner.temp }}/nettrap-protocol-matrix-linux.txt
+          name: protocol-matrix-${{ matrix.name }}
+          path: ${{ runner.temp }}/nettrap-protocol-matrix-${{ matrix.name }}.txt
           if-no-files-found: error
           archive: false
 
@@ -377,20 +375,18 @@ jobs:
         run: ./tests/windows_protocol_matrix_smoke.ps1 -BinaryPath "${{ github.workspace }}\target\${{ matrix.target }}\release\nettrap.exe"
         shell: pwsh
 
-      - name: Generate Windows protocol matrix parity report (x64)
-        if: matrix.arch == 'x64'
+      - name: Generate Windows protocol matrix parity report
         env:
           NETTRAP_MATRIX_REPEAT: "1"
-          NETTRAP_MATRIX_REPORT: ${{ runner.temp }}\nettrap-protocol-matrix-windows.txt
+          NETTRAP_MATRIX_REPORT: ${{ runner.temp }}\nettrap-protocol-matrix-${{ matrix.name }}.txt
         run: ./tests/windows_protocol_matrix_smoke.ps1 -BinaryPath "${{ github.workspace }}\target\${{ matrix.target }}\release\nettrap.exe"
         shell: pwsh
 
-      - name: Upload Windows protocol matrix parity report (x64)
-        if: matrix.arch == 'x64'
+      - name: Upload Windows protocol matrix parity report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: protocol-matrix-windows-x64
-          path: ${{ runner.temp }}\nettrap-protocol-matrix-windows.txt
+          name: protocol-matrix-${{ matrix.name }}
+          path: ${{ runner.temp }}\nettrap-protocol-matrix-${{ matrix.name }}.txt
           if-no-files-found: error
           archive: false
 
@@ -420,14 +416,16 @@ jobs:
       - name: Download protocol matrix reports
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: protocol-matrix-*-x64
+          pattern: protocol-matrix-*
           path: reports
           merge-multiple: true
 
       - name: Compare protocol matrix contracts
         run: python3 tests/compare_protocol_matrix_reports.py \
-          reports/nettrap-protocol-matrix-linux.txt \
-          reports/nettrap-protocol-matrix-windows.txt
+          reports/nettrap-protocol-matrix-linux-x64.txt \
+          reports/nettrap-protocol-matrix-linux-arm64.txt \
+          reports/nettrap-protocol-matrix-windows-x64.txt \
+          reports/nettrap-protocol-matrix-windows-arm64.txt
 
   security-audit:
     name: Security Audit

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare the observable protocol matrix contract across platforms."""
+"""Compare the observable protocol matrix contract across build targets."""
 
 from pathlib import Path
 import sys
@@ -77,26 +77,32 @@ def validate_observed_responses(report: dict[str, str], path: Path) -> None:
 
 
 def main() -> int:
-    if len(sys.argv) != 3:
-        print(f"usage: {sys.argv[0]} <linux-report> <windows-report>", file=sys.stderr)
+    if len(sys.argv) < 3:
+        print(f"usage: {sys.argv[0]} <report> <report> [<report> ...]", file=sys.stderr)
         return 2
-    linux = read_report(Path(sys.argv[1]))
-    windows = read_report(Path(sys.argv[2]))
-    validate_observed_responses(linux, Path(sys.argv[1]))
-    validate_observed_responses(windows, Path(sys.argv[2]))
-    if linux["schema"] != EXPECTED_SCHEMA or windows["schema"] != EXPECTED_SCHEMA:
-        print(
-            f"unsupported protocol matrix schema: Linux={linux['schema']!r} "
-            f"Windows={windows['schema']!r}; expected {EXPECTED_SCHEMA!r}",
-            file=sys.stderr,
-        )
-        return 1
-    if linux != windows:
-        differing = sorted(key for key in REQUIRED_KEYS if linux[key] != windows[key])
-        for key in differing:
-            print(f"protocol matrix mismatch for {key}: Linux={linux[key]!r} Windows={windows[key]!r}", file=sys.stderr)
-        return 1
-    print("PASS: Linux and Windows protocol matrix contracts match")
+    paths = [Path(value) for value in sys.argv[1:]]
+    reports = [read_report(path) for path in paths]
+    for report, path in zip(reports, paths):
+        validate_observed_responses(report, path)
+        if report["schema"] != EXPECTED_SCHEMA:
+            print(
+                f"unsupported protocol matrix schema in {path}: {report['schema']!r}; "
+                f"expected {EXPECTED_SCHEMA!r}",
+                file=sys.stderr,
+            )
+            return 1
+    baseline = reports[0]
+    for path, report in zip(paths[1:], reports[1:]):
+        if baseline != report:
+            differing = sorted(key for key in REQUIRED_KEYS if baseline[key] != report[key])
+            for key in differing:
+                print(
+                    f"protocol matrix mismatch for {key}: "
+                    f"{paths[0]}={baseline[key]!r} {path}={report[key]!r}",
+                    file=sys.stderr,
+                )
+            return 1
+    print(f"PASS: {len(reports)} build-target protocol matrix contracts match")
     return 0
 
 
