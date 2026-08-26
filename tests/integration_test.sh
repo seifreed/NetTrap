@@ -20,6 +20,19 @@ CHARGEN_PORT=11919
 QUOTD_PORT=11717
 MEMCACHED_PORT=11211
 SOCKS_PORT=11080
+TFTP_UDP_PORT=1069
+SNMP_UDP_PORT=1161
+SIP_UDP_PORT=15060
+UPNP_UDP_PORT=11900
+NTP_UDP_PORT=1123
+COAP_UDP_PORT=15683
+QUIC_UDP_PORT=14433
+DAYTIME_UDP_PORT=11014
+TIME_UDP_PORT=10038
+CHARGEN_UDP_PORT=11920
+QUOTD_UDP_PORT=11718
+SYSLOG_UDP_PORT=1514
+RAW_UDP_PORT=19099
 
 cleanup() {
     if [ -n "${NETTRAP_PID:-}" ]; then
@@ -207,6 +220,56 @@ run_socks_handshake() {
     return "$status"
 }
 
+run_udp_hex_probe() {
+    local port=$1
+    local payload_hex=$2
+    local minimum_bytes=$3
+    python3 - "$port" "$payload_hex" "$minimum_bytes" <<'PY'
+import socket
+import sys
+
+port = int(sys.argv[1])
+payload = bytes.fromhex(sys.argv[2])
+minimum_bytes = int(sys.argv[3])
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.settimeout(3)
+try:
+    sock.sendto(payload, ("127.0.0.1", port))
+    response, _ = sock.recvfrom(65535)
+    if len(response) < minimum_bytes:
+        raise SystemExit(f"UDP response too short: {len(response)} < {minimum_bytes}")
+finally:
+    sock.close()
+PY
+}
+
+run_udp_capture_probe() {
+    local port=$1
+    local payload_hex=$2
+    python3 - "$port" "$payload_hex" <<'PY'
+import socket
+import sys
+
+port = int(sys.argv[1])
+payload = bytes.fromhex(sys.argv[2])
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+try:
+    sock.sendto(payload, ("127.0.0.1", port))
+finally:
+    sock.close()
+PY
+}
+
+run_udp_empty_probe() {
+    run_udp_hex_probe "$1" "" "$2"
+}
+
+run_ntp_udp_probe() {
+    local payload_hex
+    payload_hex="1b$(printf '00%.0s' $(seq 1 47))"
+    run_udp_hex_probe "$NTP_UDP_PORT" "$payload_hex" 1
+}
+
 sed '/^output_format =/a smtp_dir = "/tmp/nettrap-integration-smtp"' \
     /etc/nettrap/config.toml >"$TEST_CONFIG"
 cat >>"$TEST_CONFIG" <<'EOF'
@@ -313,6 +376,113 @@ enabled = true
 emulate_response = true
 EOF
 
+cat >>"$TEST_CONFIG" <<EOF
+
+[[listeners]]
+name = "tftp-udp"
+protocol = "udp"
+port = $TFTP_UDP_PORT
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "snmp-udp"
+protocol = "udp"
+port = $SNMP_UDP_PORT
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "sip-udp"
+protocol = "udp"
+port = $SIP_UDP_PORT
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "upnp-udp"
+protocol = "udp"
+port = $UPNP_UDP_PORT
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "ntp-udp"
+protocol = "udp"
+port = $NTP_UDP_PORT
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "coap-udp"
+protocol = "udp"
+port = $COAP_UDP_PORT
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "quic-udp"
+protocol = "udp"
+port = $QUIC_UDP_PORT
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "daytime-udp"
+protocol = "udp"
+port = $DAYTIME_UDP_PORT
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "time-udp"
+protocol = "udp"
+port = $TIME_UDP_PORT
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "chargen-udp"
+protocol = "udp"
+port = $CHARGEN_UDP_PORT
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "quotd-udp"
+protocol = "udp"
+port = $QUOTD_UDP_PORT
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "syslogrecv-udp"
+protocol = "udp"
+port = $SYSLOG_UDP_PORT
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "raw-udp"
+protocol = "udp"
+port = $RAW_UDP_PORT
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+EOF
+
 echo "Starting NetTrap engine..."
 timeout 120 nettrap run -c "$TEST_CONFIG" &
 NETTRAP_PID=$!
@@ -352,6 +522,44 @@ run_test "DNS AAAA query" \
 
 run_test "DNS different domain" \
     "dig @127.0.0.1 -p 5353 test.example.org A +short | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'"
+
+echo ""
+
+echo "--- UDP Protocol Tests ---"
+
+run_test "TFTP RRQ" \
+    "run_udp_hex_probe $TFTP_UDP_PORT 0001736d6f6b652e747874006f6374657400 1"
+
+run_test "SNMP GET" \
+    "run_udp_hex_probe $SNMP_UDP_PORT 302602010004067075626c6963a019020101020100020100300e300c06082b060102010101000500 1"
+
+run_test "SIP OPTIONS" \
+    "run_udp_hex_probe $SIP_UDP_PORT 4f5054494f4e53207369703a6d61747269782e74657374205349502f322e300d0a5669613a205349502f322e302f554450203132372e302e302e313a353036303b6272616e63683d7a39684734624b2d6d61747269780d0a46726f6d3a203c7369703a6d6174726978406d61747269782e746573743e3b7461673d6d61747269780d0a546f3a203c7369703a6d6174726978406d61747269782e746573743e0d0a43616c6c2d49443a206d61747269782d63616c6c0d0a435365713a2031204f5054494f4e530d0a436f6e74656e742d4c656e6774683a20300d0a0d0a 1"
+
+run_test "NTP request" run_ntp_udp_probe
+
+run_test "CoAP request" \
+    "run_udp_hex_probe $COAP_UDP_PORT 41011234aa 1"
+
+run_test "Daytime UDP response" "run_udp_empty_probe $DAYTIME_UDP_PORT 1"
+
+run_test "RFC 868 UDP response" "run_udp_empty_probe $TIME_UDP_PORT 4"
+
+run_test "Chargen UDP response" "run_udp_empty_probe $CHARGEN_UDP_PORT 0"
+
+run_test "QOTD UDP response" "run_udp_empty_probe $QUOTD_UDP_PORT 1"
+
+run_test "UPnP SSDP capture" \
+    "run_udp_capture_probe $UPNP_UDP_PORT 4d2d534541524348202a20485454502f312e310d0a484f53543a203233392e3235352e3235352e3235303a313930300d0a4d414e3a2022737364703a646973636f766572220d0a4d583a20310d0a53543a20737364703a616c6c0d0a0d0a"
+
+run_test "Syslog UDP capture" \
+    "run_udp_capture_probe $SYSLOG_UDP_PORT 3c33343e3120323032362d30312d30315430303a30303a30305a20686f73742061707020312049443437202d20736d6f6b65"
+
+run_test "QUIC capture" \
+    "run_udp_capture_probe $QUIC_UDP_PORT c000000001080000000000000000000000000000000000000000"
+
+run_test "Raw UDP response" \
+    "run_udp_hex_probe $RAW_UDP_PORT 70726f62650a 1"
 
 echo ""
 
