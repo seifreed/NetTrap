@@ -224,7 +224,7 @@ jobs:
 
       - name: Run every fuzz target
         env:
-          NETTRAP_FUZZ_SECONDS: ${{ github.event_name == 'schedule' && '60' || '10' }}
+          NETTRAP_FUZZ_SECONDS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_call') && '60' || '10' }}
         run: |
           for target in $(cargo +nightly fuzz list); do
             cargo +nightly fuzz run "$target" -- "-max_total_time=$NETTRAP_FUZZ_SECONDS"
@@ -235,14 +235,14 @@ jobs:
 
       - name: Run bounded runtime soak
         env:
-          NETTRAP_SOAK_SECONDS: ${{ github.event_name == 'schedule' && '1800' || '60' }}
+          NETTRAP_SOAK_SECONDS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_call') && '1800' || '60' }}
         run: bash tests/soak_test.sh
 
       - name: Run repeated protocol matrix soak
         env:
           NETTRAP_BIN: ./target/release/nettrap
-          NETTRAP_MATRIX_REPEAT: ${{ github.event_name == 'schedule' && '32' || '2' }}
-          NETTRAP_MATRIX_DURATION_SECONDS: ${{ github.event_name == 'schedule' && '1800' || '0' }}
+          NETTRAP_MATRIX_REPEAT: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_call') && '32' || '2' }}
+          NETTRAP_MATRIX_DURATION_SECONDS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_call') && '1800' || '0' }}
         run: bash tests/protocol_matrix_smoke.sh
 
       - name: Run benchmarks
