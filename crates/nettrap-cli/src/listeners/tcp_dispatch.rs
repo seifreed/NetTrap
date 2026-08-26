@@ -1317,6 +1317,18 @@ pub(crate) async fn handle_upnp_tcp(
             "Ignoring UPnP TCP request for invalid listener IP {}",
             destination.ip()
         );
+        log_event(
+            output_path,
+            ctx.name(),
+            peer,
+            "upnp_request_rejected",
+            &format!(
+                "invalid listener IP {}, {} bytes",
+                destination.ip(),
+                data.len()
+            ),
+        )
+        .await;
         return Vec::new();
     };
     let response = handler.handle_http(data);

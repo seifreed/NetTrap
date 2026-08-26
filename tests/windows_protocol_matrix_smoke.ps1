@@ -263,15 +263,15 @@ function Get-TcpPayload([string] $Name) {
         "pop3" { return [Text.Encoding]::ASCII.GetBytes("CAPA`r`nQUIT`r`n") }
         "imap" { return [Text.Encoding]::ASCII.GetBytes("a001 CAPABILITY`r`na002 LOGOUT`r`n") }
         "irc" { return [Text.Encoding]::ASCII.GetBytes("NICK matrix`r`nUSER matrix 0 * :matrix`r`n") }
-        "telnet" { return [byte[]](0xff, 0xfb, 0x01, 0xff, 0xfb, 0x03) }
+        "telnet" { return [byte[]](0xff, 0xfb, 0x01, 0xff, 0xfb, 0x03, 0x72, 0x6f, 0x6f, 0x74, 0x0d, 0x0a) }
         "finger" { return [Text.Encoding]::ASCII.GetBytes("root`r`n") }
         "ident" { return [Text.Encoding]::ASCII.GetBytes("40000 , 80`r`n") }
         "daytime" { return [byte[]]::new(0) }
         "time" { return [byte[]]::new(0) }
         "chargen" { return [byte[]]::new(0) }
         "quotd" { return [byte[]]::new(0) }
-        "ssh" { return [byte[]]::new(0) }
-        "mysql" { return [byte[]]::new(0) }
+        "ssh" { return [Text.Encoding]::ASCII.GetBytes("SSH-2.0-NetTrapMatrix_1.0`r`n") }
+        "mysql" { return [byte[]](0x04, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00) }
         "syslogrecv" { return [Text.Encoding]::ASCII.GetBytes("<34>1 2026-01-01T00:00:00Z host app 1 ID47 - smoke`n") }
         "rdp" { return [byte[]](0x03, 0x00, 0x00, 0x13, 0x0e, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x08, 0x00, 0x03, 0x00, 0x00, 0x00) }
         "smb" {
@@ -290,7 +290,7 @@ function Get-TcpPayload([string] $Name) {
         "socks" { return [byte[]](0x05, 0x01, 0x00) }
         "memcached" { return [Text.Encoding]::ASCII.GetBytes("version`r`n") }
         "mqtt" { return [byte[]](0x10, 0x0c, 0x00, 0x04, 0x4d, 0x51, 0x54, 0x54, 0x04, 0x02, 0x00, 0x3c, 0x00, 0x00) }
-        "tls" { return [byte[]](0x16, 0x03, 0x01, 0x00, 0x00) }
+        "tls" { return [byte[]](0x16, 0x03, 0x01, 0x00, 0x04, 0x01, 0x00, 0x00, 0x00) }
         "upnp" { return [Text.Encoding]::ASCII.GetBytes("GET /desc.xml HTTP/1.1`r`nHost: matrix.test`r`nConnection: close`r`n`r`n") }
         "nkn" {
             $payload = [Text.Encoding]::ASCII.GetBytes('{"jsonrpc":"2.0","method":"getnodestate","id":7}')
@@ -382,13 +382,17 @@ try {
         } catch {
             throw "invalid event JSON on line $lineNumber`: $($_.Exception.Message)"
         }
-        if ($event.listener -is [string]) {
+        $hasEventId = $event.PSObject.Properties.Name -contains "event_id"
+        $eventName = $event.event
+        $handlerActivity = $hasEventId -or (($eventName -is [string]) -and
+            $eventName -notin @("connect", "policy_decision"))
+        if ($event.listener -is [string] -and $handlerActivity) {
             [void]$seenEventListeners.Add($event.listener)
         }
     }
     $missingEventListeners = @($expectedEventListeners | Where-Object { -not $seenEventListeners.Contains($_) })
     if ($missingEventListeners.Count -gt 0) {
-        throw "event log is missing listeners: $($missingEventListeners -join ', ')"
+        throw "event log is missing handler activity: $($missingEventListeners -join ', ')"
     }
     if ($env:NETTRAP_MATRIX_REPORT) {
         @(

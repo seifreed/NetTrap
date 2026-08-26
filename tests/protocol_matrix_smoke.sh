@@ -141,7 +141,7 @@ write_tcp_probe() {
         pop3) printf 'CAPA\r\nQUIT\r\n' >"$path" ;;
         imap) printf 'a001 CAPABILITY\r\na002 LOGOUT\r\n' >"$path" ;;
         irc) printf 'NICK matrix\r\nUSER matrix 0 * :matrix\r\n' >"$path" ;;
-        telnet) printf '%b' '\xff\xfb\x01\xff\xfb\x03' >"$path" ;;
+        telnet) printf '%b' '\xff\xfb\x01\xff\xfb\x03root\r\n' >"$path" ;;
         finger) printf 'root\r\n' >"$path" ;;
         ident) printf '40000 , 80\r\n' >"$path" ;;
         daytime) printf 'daytime\r\n' >"$path" ;;
@@ -150,7 +150,8 @@ write_tcp_probe() {
         quotd) printf 'quote\r\n' >"$path" ;;
         syslogrecv) printf '<34>1 2026-01-01T00:00:00Z host app 1 ID47 - smoke\n' >"$path" ;;
         dummy|raw) printf 'probe\r\n' >"$path" ;;
-        ssh|mysql) : >"$path" ;;
+        ssh) printf 'SSH-2.0-NetTrapMatrix_1.0\r\n' >"$path" ;;
+        mysql) printf '%b' '\x04\x00\x00\x01\x00\x00\x00\x00' >"$path" ;;
         rdp) printf '%b' '\x03\x00\x00\x13\x0e\xe0\x00\x00\x00\x00\x00\x01\x00\x08\x00\x03\x00\x00\x00' >"$path" ;;
         smb) python3 - "$path" >"$path" <<'PY'
 import struct
@@ -168,7 +169,7 @@ PY
         socks) printf '%b' '\x05\x01\x00' >"$path" ;;
         memcached) printf 'version\r\n' >"$path" ;;
         mqtt) printf '%b' '\x10\x0c\x00\x04MQTT\x04\x02\x00\x3c\x00\x00' >"$path" ;;
-        tls) printf '%b' '\x16\x03\x01\x00\x00' >"$path" ;;
+        tls) printf '%b' '\x16\x03\x01\x00\x04\x01\x00\x00\x00' >"$path" ;;
         upnp) printf 'GET /desc.xml HTTP/1.1\r\nHost: matrix.test\r\nConnection: close\r\n\r\n' >"$path" ;;
         nkn) printf '%s\n' '{"jsonrpc":"2.0","method":"getnodestate","id":7}' >"$path" ;;
         postgres) printf '%b' '\x00\x00\x00\x08\x00\x03\x00\x00' >"$path" ;;
@@ -229,12 +230,16 @@ for line_number, line in enumerate(event_path.read_text(encoding="utf-8").splitl
     except json.JSONDecodeError as error:
         raise SystemExit(f"invalid event JSON on line {line_number}: {error}") from error
     listener = event.get("listener")
-    if isinstance(listener, str):
+    event_name = event.get("event")
+    handler_activity = "event_id" in event or (
+        isinstance(event_name, str) and event_name not in {"connect", "policy_decision"}
+    )
+    if isinstance(listener, str) and handler_activity:
         seen.add(listener)
 
 missing = sorted(expected - seen)
 if missing:
-    raise SystemExit(f"event log is missing listeners: {', '.join(missing)}")
+    raise SystemExit(f"event log is missing handler activity: {', '.join(missing)}")
 PY
 }
 
@@ -360,6 +365,12 @@ if ! kill -0 "$nettrap_pid" 2>/dev/null; then
     exit 1
 fi
 
+for _ in $(seq 1 20); do
+    if assert_event_coverage 2>/dev/null; then
+        break
+    fi
+    sleep 0.1
+done
 assert_event_coverage
 
 if [[ -n "${NETTRAP_MATRIX_REPORT:-}" ]]; then
