@@ -32,6 +32,22 @@ port = 18088
 bind_address = "127.0.0.1"
 enabled = true
 emulate_response = true
+
+[[listeners]]
+name = "dns-smoke-v6"
+protocol = "udp"
+port = 53540
+bind_address = "::1"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "http-smoke-v6"
+protocol = "tcp"
+port = 18089
+bind_address = "::1"
+enabled = true
+emulate_response = true
 "@ | Set-Content -Path $configPath -Encoding utf8
 
 function Stop-NetTrap {
@@ -60,6 +76,13 @@ try {
     }
     if ($null -eq $http -or $http.StatusCode -ne 200) {
         throw "HTTP listener smoke failed"
+    }
+
+    $httpV6Status = (& curl.exe --noproxy "*" --silent --show-error --max-time 2 `
+        --output $null --write-out "%{http_code}" --header "Host: example.test" `
+        "http://[::1]:18089/")
+    if ($LASTEXITCODE -ne 0 -or $httpV6Status -ne "200") {
+        throw "IPv6 HTTP listener smoke failed (status $httpV6Status)"
     }
 
     $query = [System.Collections.Generic.List[byte]]::new()
@@ -99,7 +122,20 @@ try {
         throw "DNS listener smoke returned an invalid response"
     }
 
-    Write-Host "PASS: Windows TCP/UDP listener parity smoke"
+    $udpV6 = [System.Net.Sockets.UdpClient]::new([System.Net.Sockets.AddressFamily]::InterNetworkV6)
+    try {
+        $udpV6.Client.ReceiveTimeout = 5000
+        $endpointV6 = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::IPv6Loopback, 53540)
+        [void]$udpV6.Send($query.ToArray(), $query.Count, $endpointV6)
+        $responseV6 = $udpV6.Receive([ref]$endpointV6)
+    } finally {
+        $udpV6.Dispose()
+    }
+    if ($responseV6.Length -lt 12 -or ($responseV6[2] -band 0x80) -eq 0) {
+        throw "IPv6 DNS listener smoke returned an invalid response"
+    }
+
+    Write-Host "PASS: Windows IPv4/IPv6 TCP/UDP listener parity smoke"
 } finally {
     Stop-NetTrap
 }
