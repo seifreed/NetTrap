@@ -78,6 +78,22 @@ emulate_response = true
 use_ssl = true
 
 [[listeners]]
+name = "ssh-smoke"
+protocol = "tcp"
+port = 12222
+bind_address = "127.0.0.1"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "telnet-smoke"
+protocol = "tcp"
+port = 12323
+bind_address = "127.0.0.1"
+enabled = true
+emulate_response = true
+
+[[listeners]]
 name = "smtp-smoke"
 protocol = "tcp"
 port = 12526
@@ -263,6 +279,38 @@ try {
         $tlsStream.Dispose()
     } finally {
         $tlsClient.Dispose()
+    }
+
+    $sshClient = [System.Net.Sockets.TcpClient]::new()
+    try {
+        $sshClient.ReceiveTimeout = 5000
+        $sshClient.Connect("127.0.0.1", 12222)
+        $sshStream = $sshClient.GetStream()
+        $sshStream.ReadTimeout = 5000
+        $sshBuffer = [byte[]]::new(256)
+        $sshCount = $sshStream.Read($sshBuffer, 0, $sshBuffer.Length)
+        $sshBanner = [System.Text.Encoding]::ASCII.GetString($sshBuffer, 0, $sshCount)
+        if ($sshCount -le 0 -or $sshBanner -notmatch '(?m)^SSH-2\.0-[^\r\n]+\r\n') {
+            throw "SSH listener did not return a valid server banner"
+        }
+    } finally {
+        $sshClient.Dispose()
+    }
+
+    $telnetClient = [System.Net.Sockets.TcpClient]::new()
+    try {
+        $telnetClient.ReceiveTimeout = 5000
+        $telnetClient.Connect("127.0.0.1", 12323)
+        $telnetStream = $telnetClient.GetStream()
+        $telnetStream.ReadTimeout = 5000
+        $telnetBuffer = [byte[]]::new(256)
+        $telnetCount = $telnetStream.Read($telnetBuffer, 0, $telnetBuffer.Length)
+        $telnetBanner = [System.Text.Encoding]::ASCII.GetString($telnetBuffer, 0, $telnetCount)
+        if ($telnetCount -le 0 -or $telnetBanner -notmatch '(?i)login:\s*$') {
+            throw "Telnet listener did not return a login prompt"
+        }
+    } finally {
+        $telnetClient.Dispose()
     }
 
     "Subject: NetTrap Windows E2E`r`n`r`nclient delivery`r`n" |
