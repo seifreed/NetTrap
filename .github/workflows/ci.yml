@@ -361,6 +361,8 @@ jobs:
         shell: pwsh
 
       - name: Run Windows protocol matrix parity smoke
+        env:
+          NETTRAP_MATRIX_REPEAT: ${{ github.event_name == 'schedule' && '32' || '2' }}
         run: ./tests/windows_protocol_matrix_smoke.ps1 -BinaryPath "${{ github.workspace }}\target\${{ matrix.target }}\release\nettrap.exe"
         shell: pwsh
 

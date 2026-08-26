@@ -30,8 +30,10 @@ claim of unrestricted production-scale soak coverage.
 
 Windows CI and release jobs run `tests/windows_protocol_matrix_smoke.ps1` over
 the same 30 TCP and 14 UDP listener matrix and enforce the same 26/11
-response-versus-capture-only contract. This makes the protocol smoke a parity
-check rather than a Windows-only subset.
+response-versus-capture-only contract, truncated HTTP/DNS probes, and bounded
+working-set/handle growth. Scheduled CI repeats the Windows matrix 32 times;
+release and non-scheduled runs repeat it twice. This makes the protocol smoke a
+parity check rather than a Windows-only subset.
 
 The required client contract is `dig` 9.x, `curl` 8.x, OpenSSL 3.x or
 LibreSSL 3.x, plus `ldapsearch` when installed. `tests/verify_platform.sh`

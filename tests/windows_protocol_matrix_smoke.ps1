@@ -10,6 +10,11 @@ $configPath = Join-Path $workDir "config.toml"
 $stdoutPath = Join-Path $workDir "stdout.log"
 $stderrPath = Join-Path $workDir "stderr.log"
 $process = $null
+$repeatText = if ($env:NETTRAP_MATRIX_REPEAT) { $env:NETTRAP_MATRIX_REPEAT } else { "1" }
+if ($repeatText -notmatch '^[1-9][0-9]*$' -or [int]$repeatText -gt 32) {
+    throw "NETTRAP_MATRIX_REPEAT must be between 1 and 32"
+}
+$repeat = [int]$repeatText
 
 $tcpNames = @(
     "dns", "http", "smtp", "ftp", "pop3", "imap", "irc", "telnet", "finger", "ident",
@@ -150,6 +155,16 @@ function Invoke-UdpProbe([int] $Port, [byte[]] $Payload, [bool] $ExpectResponse)
     }
 }
 
+function Assert-ResourceBounds([long] $WorkingSetBaseline, [long] $HandleBaseline) {
+    $process.Refresh()
+    if ($process.WorkingSet64 -gt ($WorkingSetBaseline + 128MB)) {
+        throw "Windows protocol matrix exceeded RSS bound ($($process.WorkingSet64), baseline $WorkingSetBaseline)"
+    }
+    if ($process.HandleCount -gt ($HandleBaseline + 256)) {
+        throw "Windows protocol matrix exceeded handle bound ($($process.HandleCount), baseline $HandleBaseline)"
+    }
+}
+
 function Get-TcpPayload([string] $Name) {
     switch ($Name) {
         "dns" { return [byte[]](0x00, 0x1d, 0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x03, 0x63, 0x6f, 0x6d, 0x00, 0x00, 0x01, 0x00, 0x01) }
@@ -221,24 +236,39 @@ try {
         Wait-TcpPort $portValue
     }
 
-    foreach ($name in $tcpNames) {
-        $expectResponse = $tcpCaptureOnly -notcontains $name
-        $payload = [byte[]](Get-TcpPayload $name)
-        Invoke-TcpProbe $tcpPorts[$name] $payload (Is-ServerFirst $name) $expectResponse
-    }
+    $process.Refresh()
+    $workingSetBaseline = $process.WorkingSet64
+    $handleBaseline = $process.HandleCount
+    for ($round = 1; $round -le $repeat; $round++) {
+        foreach ($name in $tcpNames) {
+            $expectResponse = $tcpCaptureOnly -notcontains $name
+            $payload = [byte[]](Get-TcpPayload $name)
+            Invoke-TcpProbe $tcpPorts[$name] $payload (Is-ServerFirst $name) $expectResponse
+        }
 
-    foreach ($name in $udpNames) {
-        $expectResponse = $udpCaptureOnly -notcontains $name
-        $payload = [byte[]](Get-UdpPayload $name)
-        Invoke-UdpProbe $udpPorts[$name] $payload $expectResponse
+        foreach ($name in $udpNames) {
+            $expectResponse = $udpCaptureOnly -notcontains $name
+            $payload = [byte[]](Get-UdpPayload $name)
+            Invoke-UdpProbe $udpPorts[$name] $payload $expectResponse
+        }
+
+        $malformedHttp = [Text.Encoding]::ASCII.GetBytes(
+            ("GET /" + ("A" * 4096) + " HTTP/1.1`r`nHost: matrix.test`r`n`r`n"))
+        Invoke-TcpProbe $tcpPorts["http"] $malformedHttp $false $false
+        Invoke-UdpProbe $udpPorts["dns"] ([byte[]](0xff, 0x00, 0xff, 0x00)) $false
+
+        if ($process.HasExited) {
+            throw "NetTrap exited during Windows protocol matrix round $round (code $($process.ExitCode))"
+        }
+        Assert-ResourceBounds $workingSetBaseline $handleBaseline
     }
 
     if ($process.HasExited) {
         throw "NetTrap exited during protocol matrix smoke (code $($process.ExitCode))"
     }
-    $tcpResponses = $tcpNames.Count - $tcpCaptureOnly.Count
-    $udpResponses = $udpNames.Count - $udpCaptureOnly.Count
-    Write-Host "PASS: Windows protocol matrix parity smoke ($($tcpNames.Count) TCP, $($udpNames.Count) UDP handlers; $tcpResponses TCP, $udpResponses UDP responses)"
+    $tcpResponses = ($tcpNames.Count - $tcpCaptureOnly.Count) * $repeat
+    $udpResponses = ($udpNames.Count - $udpCaptureOnly.Count) * $repeat
+    Write-Host "PASS: Windows protocol matrix parity smoke ($($tcpNames.Count) TCP, $($udpNames.Count) UDP handlers; $tcpResponses TCP, $udpResponses UDP responses; $repeat round(s))"
 } catch {
     $stderr = if (Test-Path $stderrPath) { Get-Content $stderrPath -Raw } else { "" }
     throw "$($_.Exception.Message)`n$stderr"
