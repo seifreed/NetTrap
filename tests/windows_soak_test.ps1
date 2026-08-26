@@ -28,6 +28,30 @@ $stdout = Join-Path $workDir "stdout.log"
 $stderr = Join-Path $workDir "stderr.log"
 $process = $null
 
+function Get-FreeTcpPort {
+    $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+    try {
+        $listener.Start()
+        return ([Net.IPEndPoint]$listener.LocalEndpoint).Port
+    } finally {
+        $listener.Stop()
+    }
+}
+
+function Get-FreeUdpPort {
+    $udp = [Net.Sockets.UdpClient]::new()
+    try {
+        $udp.Client.Bind([Net.IPEndPoint]::new([Net.IPAddress]::Loopback, 0))
+        return ([Net.IPEndPoint]$udp.Client.LocalEndPoint).Port
+    } finally {
+        $udp.Dispose()
+    }
+}
+
+$httpPort = Get-FreeTcpPort
+$dnsUdpPort = Get-FreeUdpPort
+$dnsTcpPort = Get-FreeTcpPort
+
 New-Item -ItemType Directory -Force -Path $workDir | Out-Null
 Remove-Item -LiteralPath $stopFlag -Force -ErrorAction SilentlyContinue
 @"
@@ -39,7 +63,7 @@ output_format = "jsonl"
 [[listeners]]
 name = "soak-http"
 protocol = "tcp"
-port = 18080
+port = $httpPort
 bind_address = "127.0.0.1"
 enabled = true
 emulate_response = true
@@ -47,7 +71,7 @@ emulate_response = true
 [[listeners]]
 name = "soak-dns"
 protocol = "udp"
-port = 18053
+port = $dnsUdpPort
 bind_address = "127.0.0.1"
 enabled = true
 emulate_response = true
@@ -55,7 +79,7 @@ emulate_response = true
 [[listeners]]
 name = "dns"
 protocol = "tcp"
-port = 18054
+port = $dnsTcpPort
 bind_address = "127.0.0.1"
 enabled = true
 emulate_response = true
@@ -139,7 +163,7 @@ function Invoke-Http {
     $client = [Net.Sockets.TcpClient]::new()
     try {
         $client.ReceiveTimeout = 5000
-        $client.Connect("127.0.0.1", 18080)
+        $client.Connect("127.0.0.1", $httpPort)
         $stream = $client.GetStream()
         $stream.ReadTimeout = 5000
         $stream.Write($http, 0, $http.Length)
@@ -159,7 +183,7 @@ function Invoke-Dns {
     $udp = [Net.Sockets.UdpClient]::new()
     try {
         $udp.Client.ReceiveTimeout = 5000
-        $endpoint = [Net.IPEndPoint]::new([Net.IPAddress]::Loopback, 18053)
+        $endpoint = [Net.IPEndPoint]::new([Net.IPAddress]::Loopback, $dnsUdpPort)
         [void]$udp.Send($dns, $dns.Length, $endpoint)
         $response = $udp.Receive([ref]$endpoint)
         if ($response.Length -lt 12 -or ($response[2] -band 0x80) -eq 0) {
@@ -172,7 +196,7 @@ function Invoke-DnsTcp {
     $client = [Net.Sockets.TcpClient]::new()
     try {
         $client.ReceiveTimeout = 5000
-        $client.Connect("127.0.0.1", 18054)
+        $client.Connect("127.0.0.1", $dnsTcpPort)
         $stream = $client.GetStream()
         $stream.ReadTimeout = 5000
         $frame = [byte[]]::new($dns.Length + 2)
@@ -210,7 +234,7 @@ function Invoke-Churn([int] $Count) {
     for ($i = 0; $i -lt $Count; $i++) {
         $client = [Net.Sockets.TcpClient]::new()
         try {
-            $client.Connect("127.0.0.1", 18080)
+            $client.Connect("127.0.0.1", $httpPort)
             $stream = $client.GetStream()
             $stream.Write($http, 0, $http.Length)
             Reset-Connection $client
@@ -224,14 +248,14 @@ function Invoke-Malformed {
     $udp = [Net.Sockets.UdpClient]::new()
     try {
         for ($i = 0; $i -lt $concurrency; $i++) {
-            $endpoint = [Net.IPEndPoint]::new([Net.IPAddress]::Loopback, 18053)
+            $endpoint = [Net.IPEndPoint]::new([Net.IPAddress]::Loopback, $dnsUdpPort)
             [void]$udp.Send($bad, $bad.Length, $endpoint)
         }
     } finally { $udp.Dispose() }
     for ($i = 0; $i -lt $concurrency; $i++) {
         $client = [Net.Sockets.TcpClient]::new()
         try {
-            $client.Connect("127.0.0.1", 18080)
+            $client.Connect("127.0.0.1", $httpPort)
             $client.GetStream().Write($bad, 0, $bad.Length)
         } catch {
         } finally {
@@ -255,8 +279,8 @@ try {
     $process = Start-Process -FilePath $BinaryPath -ArgumentList @(
         "--stop-flag", $stopFlag, "run", "-c", $config
     ) -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
-    Wait-Tcp 18080
-    Wait-Tcp 18054
+    Wait-Tcp $httpPort
+    Wait-Tcp $dnsTcpPort
     Invoke-Http
     Invoke-Dns
     Invoke-DnsTcp
@@ -279,8 +303,8 @@ try {
     }
     if ($iterations -eq 0) { throw "Windows hostile soak completed no iterations" }
     Stop-NetTrap
-    Assert-TcpListenersClosed @(18080, 18054)
-    Assert-UdpListenersClosed @(18053)
+    Assert-TcpListenersClosed @($httpPort, $dnsTcpPort)
+    Assert-UdpListenersClosed @($dnsUdpPort)
     Write-Host ("PASS: {0}s Windows hostile soak completed ({1} iterations, {2}-connection churn)" -f
         $duration, $iterations, $churn)
 } catch {
