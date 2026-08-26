@@ -445,7 +445,11 @@ function Invoke-SocksConnectProbe([int] $Port) {
         }
 
         $request = [Text.Encoding]::ASCII.GetBytes("example.test")
-        $frame = [byte[]](0x05, 0x01, 0x00, 0x03, $request.Length) + $request + [byte[]](0x00, 0x50)
+        $frame = [byte[]]::new(5 + $request.Length + 2)
+        $prefix = [byte[]](0x05, 0x01, 0x00, 0x03, $request.Length)
+        [Array]::Copy($prefix, 0, $frame, 0, $prefix.Length)
+        [Array]::Copy($request, 0, $frame, $prefix.Length, $request.Length)
+        $frame[$prefix.Length + $request.Length + 1] = 0x50
         $stream.Write($frame, 0, $frame.Length)
         $response = Read-Exact $stream 10
         if ($response[0] -ne 0x05 -or $response[1] -ne 0x00 -or
