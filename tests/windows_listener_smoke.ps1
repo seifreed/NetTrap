@@ -42,6 +42,14 @@ enabled = true
 emulate_response = true
 
 [[listeners]]
+name = "dns-tcp-smoke"
+protocol = "tcp"
+port = 53541
+bind_address = "127.0.0.1"
+enabled = true
+emulate_response = true
+
+[[listeners]]
 name = "http-smoke-v6"
 protocol = "tcp"
 port = 18089
@@ -55,6 +63,19 @@ function Stop-NetTrap {
         Stop-Process -Id $script:process.Id -Force -ErrorAction SilentlyContinue
         $script:process.WaitForExit(5000)
     }
+}
+
+function Read-Exact($Stream, [int] $Count) {
+    $buffer = [byte[]]::new($Count)
+    $offset = 0
+    while ($offset -lt $Count) {
+        $read = $Stream.Read($buffer, $offset, $Count - $offset)
+        if ($read -le 0) {
+            throw "TCP stream closed before $Count bytes were received"
+        }
+        $offset += $read
+    }
+    return $buffer
 }
 
 try {
@@ -133,6 +154,42 @@ try {
     }
     if ($responseV6.Length -lt 12 -or ($responseV6[2] -band 0x80) -eq 0) {
         throw "IPv6 DNS listener smoke returned an invalid response"
+    }
+
+    $dnsTcpFrame = [byte[]]::new($query.Count + 2)
+    $dnsTcpFrame[0] = [byte]($query.Count -shr 8)
+    $dnsTcpFrame[1] = [byte]$query.Count
+    [Array]::Copy($query.ToArray(), 0, $dnsTcpFrame, 2, $query.Count)
+    $dnsTcp = [System.Net.Sockets.TcpClient]::new()
+    try {
+        $dnsTcp.ReceiveTimeout = 5000
+        $connected = $false
+        for ($attempt = 0; $attempt -lt 40 -and -not $connected; $attempt++) {
+            try {
+                $dnsTcp.Connect("127.0.0.1", 53541)
+                $connected = $true
+            } catch {
+                Start-Sleep -Milliseconds 250
+            }
+        }
+        if (-not $connected) {
+            throw "DNS TCP listener did not become ready"
+        }
+        $dnsTcpStream = $dnsTcp.GetStream()
+        $dnsTcpStream.ReadTimeout = 5000
+        $dnsTcpStream.Write($dnsTcpFrame, 0, $dnsTcpFrame.Length)
+        $dnsTcpStream.Flush()
+        $dnsTcpLength = Read-Exact $dnsTcpStream 2
+        $dnsTcpBodyLength = ($dnsTcpLength[0] -shl 8) -bor $dnsTcpLength[1]
+        if ($dnsTcpBodyLength -lt 12) {
+            throw "DNS TCP listener returned an invalid length"
+        }
+        $dnsTcpBody = Read-Exact $dnsTcpStream $dnsTcpBodyLength
+        if (($dnsTcpBody[2] -band 0x80) -eq 0) {
+            throw "DNS TCP listener response did not set QR"
+        }
+    } finally {
+        $dnsTcp.Dispose()
     }
 
     Write-Host "PASS: Windows IPv4/IPv6 TCP/UDP listener parity smoke"
