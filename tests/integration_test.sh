@@ -270,6 +270,13 @@ run_ntp_udp_probe() {
     run_udp_hex_probe "$NTP_UDP_PORT" "$payload_hex" 1
 }
 
+run_full_protocol_matrix() {
+    local matrix_script
+    matrix_script="$(dirname -- "$0")/protocol_matrix_smoke.sh"
+    NETTRAP_MATRIX_REPEAT="${NETTRAP_E2E_MATRIX_REPEAT:-2}" \
+        NETTRAP_BIN=nettrap "$matrix_script"
+}
+
 sed '/^output_format =/a smtp_dir = "/tmp/nettrap-integration-smtp"' \
     /etc/nettrap/config.toml >"$TEST_CONFIG"
 cat >>"$TEST_CONFIG" <<'EOF'
@@ -666,6 +673,11 @@ run_test "Telnet port open" \
     "nc -z 127.0.0.1 2323"
 
 run_test "Telnet login banner" run_telnet_banner
+
+echo ""
+echo "--- Complete Protocol Matrix ---"
+
+run_test "All protocol handlers hostile matrix" run_full_protocol_matrix
 
 echo ""
 
