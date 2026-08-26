@@ -282,7 +282,10 @@ function Get-TcpPayload([string] $Name) {
         "mqtt" { return [byte[]](0x10, 0x0c, 0x00, 0x04, 0x4d, 0x51, 0x54, 0x54, 0x04, 0x02, 0x00, 0x3c, 0x00, 0x00) }
         "tls" { return [byte[]](0x16, 0x03, 0x01, 0x00, 0x00) }
         "upnp" { return [Text.Encoding]::ASCII.GetBytes("GET /desc.xml HTTP/1.1`r`nHost: matrix.test`r`nConnection: close`r`n`r`n") }
-        "nkn" { return [Text.Encoding]::ASCII.GetBytes('{"jsonrpc":"2.0","method":"getnodestate","id":7}') }
+        "nkn" {
+            $payload = [Text.Encoding]::ASCII.GetBytes('{"jsonrpc":"2.0","method":"getnodestate","id":7}')
+            return $payload + [byte[]](0x0a)
+        }
         "postgres" { return [byte[]](0x00, 0x00, 0x00, 0x08, 0x00, 0x03, 0x00, 0x00) }
         default { return [Text.Encoding]::ASCII.GetBytes("probe`r`n") }
     }
@@ -298,6 +301,11 @@ function Get-UdpPayload([string] $Name) {
         "coap" { return [byte[]](0x41, 0x01, 0x12, 0x34, 0xaa) }
         "quic" { return [byte[]](0xc0, 0x00, 0x00, 0x00, 0x01, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00) }
         "upnp" { return [Text.Encoding]::ASCII.GetBytes("M-SEARCH * HTTP/1.1`r`nHOST: 239.255.255.250:1900`r`nMAN: `"ssdp:discover`"`r`nMX: 1`r`nST: ssdp:all`r`n`r`n") }
+        "daytime" { return [byte[]](0x0a) }
+        "time" { return [byte[]](0x0a) }
+        "chargen" { return [byte[]](0x0a) }
+        "quotd" { return [byte[]](0x0a) }
+        "syslogrecv" { return [byte[]](0x0a) }
         default { return [Text.Encoding]::ASCII.GetBytes("probe`n") }
     }
 }
