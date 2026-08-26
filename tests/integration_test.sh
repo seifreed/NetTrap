@@ -33,6 +33,14 @@ CHARGEN_UDP_PORT=11920
 QUOTD_UDP_PORT=11718
 SYSLOG_UDP_PORT=1514
 RAW_UDP_PORT=19099
+NKN_TCP_PORT=19090
+RAW_TCP_PORT=19091
+DUMMY_TCP_PORT=19092
+UPNP_TCP_PORT=19093
+RDP_TCP_PORT=13389
+TLS_TCP_PORT=19444
+SYSLOG_TCP_PORT=1515
+INTEGRATION_TIMEOUT_SECONDS=300
 
 cleanup() {
     if [ -n "${NETTRAP_PID:-}" ]; then
@@ -270,6 +278,62 @@ run_ntp_udp_probe() {
     run_udp_hex_probe "$NTP_UDP_PORT" "$payload_hex" 1
 }
 
+run_nkn_jsonrpc() {
+    python3 - "$NKN_TCP_PORT" <<'PY'
+import json
+import socket
+import sys
+
+payload = b'{"jsonrpc":"2.0","method":"getnodestate","id":7}'
+sock = socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=3)
+sock.settimeout(3)
+try:
+    sock.sendall(payload)
+    response = json.loads(sock.recv(4096))
+finally:
+    sock.close()
+if response.get("jsonrpc") != "2.0" or response.get("id") != 7:
+    raise SystemExit(f"unexpected NKN JSON-RPC response: {response!r}")
+PY
+}
+
+run_rdp_negotiation() {
+    local output
+    output="$(printf '\003\000\000\023\016\340\000\000\000\000\000\001\000\010\000\003\000\000\000' |
+        timeout 5 nc 127.0.0.1 "$RDP_TCP_PORT" 2>/dev/null | od -An -t x1 || true)"
+    test -n "$output"
+}
+
+run_upnp_tcp_description() {
+    local output
+    output="$(printf 'GET /desc.xml HTTP/1.1\r\nHost: matrix.test\r\nConnection: close\r\n\r\n' |
+        timeout 5 nc 127.0.0.1 "$UPNP_TCP_PORT" 2>/dev/null || true)"
+    grep -Fq 'HTTP/1.1 200' <<< "$output"
+}
+
+run_raw_tcp_echo() {
+    local output
+    output="$(printf 'raw-e2e\n' | timeout 5 nc 127.0.0.1 "$RAW_TCP_PORT" 2>/dev/null || true)"
+    grep -Fq 'raw-e2e' <<< "$output"
+}
+
+run_tcp_capture_probe() {
+    local port=$1
+    local payload_hex=$2
+    python3 - "$port" "$payload_hex" <<'PY'
+import socket
+import sys
+
+port = int(sys.argv[1])
+payload = bytes.fromhex(sys.argv[2])
+sock = socket.create_connection(("127.0.0.1", port), timeout=3)
+try:
+    sock.sendall(payload)
+finally:
+    sock.close()
+PY
+}
+
 run_full_protocol_matrix() {
     local matrix_script
     matrix_script="$(dirname -- "$0")/protocol_matrix_smoke.sh"
@@ -378,6 +442,63 @@ emulate_response = true
 name = "socks"
 protocol = "tcp"
 port = $SOCKS_PORT
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "nkn"
+protocol = "tcp"
+port = $NKN_TCP_PORT
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "raw-tcp"
+protocol = "tcp"
+port = $RAW_TCP_PORT
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "dummy-tcp"
+protocol = "tcp"
+port = $DUMMY_TCP_PORT
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "upnp-tcp"
+protocol = "tcp"
+port = $UPNP_TCP_PORT
+bind_address = "0.0.0.0"
+server_name = "nettrap.local"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "rdp"
+protocol = "tcp"
+port = $RDP_TCP_PORT
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "tls-tcp"
+protocol = "tcp"
+port = $TLS_TCP_PORT
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "syslogrecv-tcp"
+protocol = "tcp"
+port = $SYSLOG_TCP_PORT
 bind_address = "0.0.0.0"
 enabled = true
 emulate_response = true
@@ -491,14 +612,16 @@ emulate_response = true
 EOF
 
 echo "Starting NetTrap engine..."
-timeout 120 nettrap run -c "$TEST_CONFIG" &
+timeout "$INTEGRATION_TIMEOUT_SECONDS" nettrap run -c "$TEST_CONFIG" &
 NETTRAP_PID=$!
 sleep 3
 
 echo "Waiting for services..."
 for port in 445 5353 8080 110 143 1389 1883 2222 2323 3306 5432 6379 12121 12525 18443 \
     "$IRC_PORT" "$FINGER_PORT" "$IDENT_PORT" "$DAYTIME_PORT" "$TIME_PORT" \
-    "$CHARGEN_PORT" "$QUOTD_PORT" "$MEMCACHED_PORT" "$SOCKS_PORT"; do
+    "$CHARGEN_PORT" "$QUOTD_PORT" "$MEMCACHED_PORT" "$SOCKS_PORT" \
+    "$NKN_TCP_PORT" "$RAW_TCP_PORT" "$DUMMY_TCP_PORT" "$UPNP_TCP_PORT" \
+    "$RDP_TCP_PORT" "$TLS_TCP_PORT" "$SYSLOG_TCP_PORT"; do
     ready=false
     for _ in $(seq 1 40); do
         if if [ "$port" = 5353 ]; then
@@ -631,6 +754,23 @@ run_test "Redis PING" \
 run_test "Memcached version" run_memcached_version
 
 run_test "SOCKS5 handshake" run_socks_handshake
+
+run_test "NKN JSON-RPC request" run_nkn_jsonrpc
+
+run_test "Raw TCP echo" run_raw_tcp_echo
+
+run_test "RDP negotiation" run_rdp_negotiation
+
+run_test "UPnP TCP description" run_upnp_tcp_description
+
+run_test "TLS TCP capture" \
+    "run_tcp_capture_probe $TLS_TCP_PORT 160301000401000000"
+
+run_test "Syslog TCP capture" \
+    "run_tcp_capture_probe $SYSLOG_TCP_PORT 3c33343e3120323032362d30312d30315430303a30303a30305a20686f73742061707020312049443437202d20736d6f6b65"
+
+run_test "Dummy TCP capture" \
+    "run_tcp_capture_probe $DUMMY_TCP_PORT 70726f62650a"
 
 echo ""
 
