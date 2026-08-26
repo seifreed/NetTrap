@@ -12,6 +12,8 @@ for marker in \
     "cosign sign-blob --yes" \
     'cosign sign --yes "$image_ref"' \
     'cosign verify "$image_ref"' \
+    'gh attestation verify "$archive"' \
+    '--signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml"' \
     "scripts/verify-release-signatures.sh releases" \
     "Verify release Linux/Windows protocol parity" \
     "tests/compare_protocol_matrix_reports.py" \
@@ -28,7 +30,7 @@ for marker in \
     "codesign --verify --strict \"\$clean_dir/nettrap\"" \
     "sha256_file()" \
     "shasum -a 256 \"\$1\""; do
-    if ! grep -Fq "$marker" "$workflow"; then
+    if ! grep -Fq -- "$marker" "$workflow"; then
         echo "release signing contract is missing: $marker" >&2
         exit 1
     fi

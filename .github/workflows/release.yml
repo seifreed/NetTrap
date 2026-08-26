@@ -851,7 +851,9 @@ jobs:
           for archive in releases/nettrap-*.tar.gz releases/nettrap-*.zip \
               releases/nettrap-*.binary releases/nettrap-*.msi \
               releases/nettrap-*.deb releases/nettrap-*.rpm; do
-            gh attestation verify "$archive" --repo "$GITHUB_REPOSITORY"
+            gh attestation verify "$archive" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml"
           done
         env:
           GH_TOKEN: ${{ github.token }}

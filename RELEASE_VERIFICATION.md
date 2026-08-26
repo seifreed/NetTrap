@@ -12,7 +12,9 @@ macOS/Linux tarballs.
 Verify a downloaded archive or `.binary` executable with:
 
 ```bash
-gh attestation verify nettrap-linux-x86_64.tar.gz --repo seifreed/NetTrap
+gh attestation verify nettrap-linux-x86_64.tar.gz \
+  --repo seifreed/NetTrap \
+  --signer-workflow seifreed/NetTrap/.github/workflows/release.yml
 sha256sum --check SHA256SUMS
 cosign verify-blob \
   --bundle nettrap-linux-x86_64.tar.gz.sigstore.json \
