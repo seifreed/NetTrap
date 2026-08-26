@@ -144,6 +144,12 @@ run_ssh_handshake() {
     grep -Fq 'Remote protocol version 2.0' <<< "$output"
 }
 
+run_telnet_banner() {
+    local output
+    output="$({ printf '\r\n'; sleep 1; } | timeout 5 nc 127.0.0.1 2323 2>/dev/null | tr -d '\r' || true)"
+    grep -Fq 'login:' <<< "$output"
+}
+
 sed '/^output_format =/a smtp_dir = "/tmp/nettrap-integration-smtp"' \
     /etc/nettrap/config.toml >"$TEST_CONFIG"
 cat >>"$TEST_CONFIG" <<'EOF'
@@ -294,6 +300,8 @@ run_test "SSH client handshake" run_ssh_handshake
 
 run_test "Telnet port open" \
     "nc -z 127.0.0.1 2323"
+
+run_test "Telnet login banner" run_telnet_banner
 
 echo ""
 
