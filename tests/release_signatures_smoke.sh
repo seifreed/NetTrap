@@ -10,6 +10,8 @@ command -v cosign >/dev/null || {
 workflow="$(dirname -- "${BASH_SOURCE[0]}")/../.github/workflows/release.yml"
 for marker in \
     "cosign sign-blob --yes" \
+    'cosign sign --yes "$image_ref"' \
+    'cosign verify "$image_ref"' \
     "scripts/verify-release-signatures.sh releases" \
     "Sign Windows MSI (Authenticode)" \
     "Get-AuthenticodeSignature -LiteralPath \"nettrap-\${{ matrix.name }}.msi\"" \

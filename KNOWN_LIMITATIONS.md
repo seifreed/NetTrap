@@ -51,6 +51,9 @@ See [PROTOCOL_SUPPORT.md](PROTOCOL_SUPPORT.md) for the handler-by-handler matrix
   Authenticode and macOS Developer ID signing is available in the release
   workflow only when `NETTRAP_NATIVE_SIGNING=1` is configured with external
   identities; the repository does not contain those private keys.
+- The multi-architecture OCI image digest is signed and verified keylessly by
+  the release workflow; consumers should verify that signature before pulling
+  the image.
 - Release gates include a bounded hostile HTTP/DNS soak with malformed frames,
   64-connection churn, bounded file-descriptor/RSS growth checks, and a
   128-socket connection-exhaustion smoke. The scheduled weekly gate extends
