@@ -65,10 +65,10 @@ See [PROTOCOL_SUPPORT.md](PROTOCOL_SUPPORT.md) for the handler-by-handler matrix
   payloads into every handler plus truncated HTTP/DNS frames; unbounded
   production-scale hostile load is not a release gate. The scheduled gate
   runs the equivalent Windows HTTP/DNS hostile soak with concurrent sockets,
-  malformed payloads, and working-set/handle bounds. It does not prove
-  privileged WinDivert routing or production-scale hostile load.
-  runs every libFuzzer target for 60 seconds each; ordinary runs use 10 seconds
-  per target.
+  malformed payloads, and working-set/handle bounds. It also runs every
+  libFuzzer target for 60 seconds each; ordinary runs use 10 seconds per
+  target. It does not prove privileged WinDivert routing or production-scale
+  hostile load.
 - Real malware samples and private captures are not part of default regression
   tests; runtime behavior is sample-agnostic.
 
