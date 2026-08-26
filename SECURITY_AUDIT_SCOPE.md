@@ -10,8 +10,9 @@ The review should cover:
 - Untrusted TCP/UDP parsing, protocol dispatch, framing, and resource limits.
 - Linux firewall redirection, nftables/iptables cleanup, privilege boundaries,
   and crash recovery.
-- Windows listener/capture adapters and the experimental WinDivert TCP/UDP
-  NAT path used by `--intercept` on x86_64.
+- Windows listener/capture adapters and the disabled WinDivert bindings/parser;
+  any future TCP/UDP NAT path must preserve packets and fail closed until
+  independently validated.
 - TLS certificate generation, key storage, and local termination boundaries.
 - REST/API exposure, configuration migration, filesystem writes, and reports.
 - Docker/Kubernetes manifests, release workflows, Sigstore signing, SBOMs, and
@@ -35,7 +36,7 @@ cargo deny check
 ./scripts/quality-gates.sh quick
 actionlint .github/workflows/*.yml
 bash tests/verify_platform.sh
-# On a privileged Windows x86_64 runner with WinDivert files installed:
+# On Windows x86_64, verify that transparent interception fails closed:
 pwsh -File tests/windows_interception_smoke.ps1 -BinaryPath .\nettrap.exe
 # Requires authenticated gh CLI; writes only to target/.
 bash scripts/security-evidence.sh
