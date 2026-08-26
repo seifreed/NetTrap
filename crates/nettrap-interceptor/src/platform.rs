@@ -1428,6 +1428,11 @@ pub mod windivert {
                 "198.51.100.20:80".parse().unwrap()
             );
             assert_eq!(flow_table.reverse.len(), 1);
+            assert!(flow_table.reverse.contains_key(&ReverseFlowKey {
+                protocol: IPPROTO_TCP,
+                client: "192.0.2.10:40000".parse().unwrap(),
+                listener_port: 8080,
+            }));
             drop(flow_table);
 
             let mut reply = vec![
