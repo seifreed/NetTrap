@@ -253,7 +253,7 @@ function Get-TcpPayload([string] $Name) {
         "pop3" { return [Text.Encoding]::ASCII.GetBytes("CAPA`r`nQUIT`r`n") }
         "imap" { return [Text.Encoding]::ASCII.GetBytes("a001 CAPABILITY`r`na002 LOGOUT`r`n") }
         "irc" { return [Text.Encoding]::ASCII.GetBytes("NICK matrix`r`nUSER matrix 0 * :matrix`r`n") }
-        "telnet" { return [Text.Encoding]::ASCII.GetBytes("root`r`n") }
+        "telnet" { return [byte[]](0xff, 0xfb, 0x01, 0xff, 0xfb, 0x03) }
         "finger" { return [Text.Encoding]::ASCII.GetBytes("root`r`n") }
         "ident" { return [Text.Encoding]::ASCII.GetBytes("40000 , 80`r`n") }
         "daytime" { return [byte[]]::new(0) }
