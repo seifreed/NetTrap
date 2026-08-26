@@ -199,13 +199,13 @@ jobs:
 
       - name: Run bounded runtime soak
         env:
-          NETTRAP_SOAK_SECONDS: ${{ github.event_name == 'schedule' && '600' || '60' }}
+          NETTRAP_SOAK_SECONDS: ${{ github.event_name == 'schedule' && '1800' || '60' }}
         run: bash tests/soak_test.sh
 
       - name: Run repeated protocol matrix soak
         env:
           NETTRAP_BIN: ./target/release/nettrap
-          NETTRAP_MATRIX_REPEAT: ${{ github.event_name == 'schedule' && '10' || '2' }}
+          NETTRAP_MATRIX_REPEAT: ${{ github.event_name == 'schedule' && '32' || '2' }}
         run: bash tests/protocol_matrix_smoke.sh
 
       - name: Run benchmarks

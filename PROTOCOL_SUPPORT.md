@@ -23,7 +23,7 @@ where their configured loopback listener cannot synthesize a response; all
 other handlers must return non-empty wire data. TLS response behavior is also
 covered by the OpenSSL client path below.
 
-The scheduled heavy quality gate repeats that matrix ten times while checking
+The scheduled heavy quality gate repeats that matrix 32 times while checking
 process liveness and bounded file-descriptor/RSS growth, and injects truncated
 HTTP/DNS frames between rounds. This is a bounded hostile-load contract, not a
 claim of unrestricted production-scale soak coverage.
