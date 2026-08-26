@@ -132,7 +132,12 @@ function Invoke-DnsTcp {
         [Array]::Copy($dns, 0, $frame, 2, $dns.Length)
         $stream.Write($frame, 0, $frame.Length)
         $prefix = [byte[]]::new(2)
-        if ($stream.Read($prefix, 0, 2) -ne 2) { throw "DNS TCP prefix was truncated" }
+        $prefixRead = 0
+        while ($prefixRead -lt $prefix.Length) {
+            $read = $stream.Read($prefix, $prefixRead, $prefix.Length - $prefixRead)
+            if ($read -le 0) { throw "DNS TCP prefix was truncated" }
+            $prefixRead += $read
+        }
         $length = ($prefix[0] -shl 8) -bor $prefix[1]
         if ($length -lt 12) { throw "DNS TCP response declared an invalid length" }
         $body = [byte[]]::new($length)
