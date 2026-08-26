@@ -181,6 +181,10 @@ tcp_responses=0
 udp_responses=0
 tcp_observed_responses=()
 udp_observed_responses=()
+tcp_response_min=()
+tcp_response_max=()
+udp_response_min=()
+udp_response_max=()
 expected_event_listeners=("${tcp_names[@]}")
 for name in "${udp_names[@]}"; do
     expected_event_listeners+=("$name-udp")
@@ -241,6 +245,48 @@ missing = sorted(expected - seen)
 if missing:
     raise SystemExit(f"event log is missing handler activity: {', '.join(missing)}")
 PY
+}
+
+record_response_size() {
+    local transport=$1
+    local name=$2
+    local size=$3
+    local index
+    if [[ "$transport" == tcp ]]; then
+        for index in "${!tcp_names[@]}"; do
+            if [[ "${tcp_names[$index]}" == "$name" ]]; then
+                if [[ -z "${tcp_response_min[$index]+set}" ]]; then
+                    tcp_response_min[$index]=$size
+                    tcp_response_max[$index]=$size
+                else
+                    if (( size < tcp_response_min[$index] )); then
+                        tcp_response_min[$index]=$size
+                    fi
+                    if (( size > tcp_response_max[$index] )); then
+                        tcp_response_max[$index]=$size
+                    fi
+                fi
+                return
+            fi
+        done
+    else
+        for index in "${!udp_names[@]}"; do
+            if [[ "${udp_names[$index]}" == "$name" ]]; then
+                if [[ -z "${udp_response_min[$index]+set}" ]]; then
+                    udp_response_min[$index]=$size
+                    udp_response_max[$index]=$size
+                else
+                    if (( size < udp_response_min[$index] )); then
+                        udp_response_min[$index]=$size
+                    fi
+                    if (( size > udp_response_max[$index] )); then
+                        udp_response_max[$index]=$size
+                    fi
+                fi
+                return
+            fi
+        done
+    fi
 }
 
 run_tcp_malformed_burst() {
@@ -310,6 +356,9 @@ for index in "${!tcp_ports[@]}"; do
         if ! contains_name "$name" "${tcp_observed_responses[@]-}"; then
             tcp_observed_responses+=("$name")
         fi
+        record_response_size tcp "$name" "$(wc -c <"$response" | tr -d ' ')"
+    else
+        record_response_size tcp "$name" 0
     fi
 done
 
@@ -341,6 +390,9 @@ for index in "${!udp_ports[@]}"; do
         if ! contains_name "$name" "${udp_observed_responses[@]-}"; then
             udp_observed_responses+=("$name")
         fi
+        record_response_size udp "$name" "$(wc -c <"$response" | tr -d ' ')"
+    else
+        record_response_size udp "$name" 0
     fi
 done
 
@@ -378,13 +430,23 @@ if [[ -n "${NETTRAP_MATRIX_REPORT:-}" ]]; then
     tcp_malformed_probes=$(( ${#tcp_ports[@]} * rounds_completed ))
     udp_malformed_probes=$(( ${#udp_ports[@]} * rounds_completed ))
     {
-        printf 'schema=3\n'
+        printf 'schema=4\n'
         printf 'tcp_handlers=%s\n' "${#tcp_names[@]}"
         printf 'udp_handlers=%s\n' "${#udp_names[@]}"
         printf 'tcp_responses=%s\n' "$tcp_responses"
         printf 'udp_responses=%s\n' "$udp_responses"
         printf 'tcp_observed_responses=%s\n' "$(IFS=,; echo "${tcp_observed_responses[*]}")"
         printf 'udp_observed_responses=%s\n' "$(IFS=,; echo "${udp_observed_responses[*]}")"
+        tcp_sizes=()
+        for index in "${!tcp_names[@]}"; do
+            tcp_sizes+=("${tcp_names[$index]}:${tcp_response_min[$index]}-${tcp_response_max[$index]}")
+        done
+        udp_sizes=()
+        for index in "${!udp_names[@]}"; do
+            udp_sizes+=("${udp_names[$index]}:${udp_response_min[$index]}-${udp_response_max[$index]}")
+        done
+        printf 'tcp_response_sizes=%s\n' "$(IFS=,; echo "${tcp_sizes[*]}")"
+        printf 'udp_response_sizes=%s\n' "$(IFS=,; echo "${udp_sizes[*]}")"
         printf 'tcp_malformed_probes=%s\n' "$tcp_malformed_probes"
         printf 'udp_malformed_probes=%s\n' "$udp_malformed_probes"
         printf 'tcp_names=%s\n' "$(IFS=,; echo "${tcp_names[*]}")"

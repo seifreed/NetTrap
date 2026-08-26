@@ -13,6 +13,8 @@ REQUIRED_KEYS = {
     "udp_responses",
     "tcp_observed_responses",
     "udp_observed_responses",
+    "tcp_response_sizes",
+    "udp_response_sizes",
     "tcp_malformed_probes",
     "udp_malformed_probes",
     "tcp_names",
@@ -21,7 +23,7 @@ REQUIRED_KEYS = {
     "udp_capture_only",
     "event_listeners",
 }
-EXPECTED_SCHEMA = "3"
+EXPECTED_SCHEMA = "4"
 
 
 def read_report(path: Path) -> dict[str, str]:
@@ -83,6 +85,39 @@ def validate_observed_responses(report: dict[str, str], path: Path) -> None:
             )
 
 
+def canonical_response_sizes(report: dict[str, str], transport: str, path: Path) -> str:
+    names = report[f"{transport}_names"].split(",")
+    entries: dict[str, tuple[int, int]] = {}
+    raw = report[f"{transport}_response_sizes"]
+    for item in raw.split(","):
+        name, separator, value = item.partition(":")
+        minimum, range_separator, maximum = value.partition("-")
+        if not separator or not range_separator or not name or name in entries:
+            raise ValueError(
+                f"report {path} has invalid {transport}_response_sizes entry: {item!r}"
+            )
+        try:
+            parsed = (int(minimum), int(maximum))
+        except ValueError as error:
+            raise ValueError(
+                f"report {path} has non-numeric {transport}_response_sizes entry: {item!r}"
+            ) from error
+        if parsed[0] < 0 or parsed[1] < parsed[0]:
+            raise ValueError(
+                f"report {path} has invalid {transport}_response_sizes range: {item!r}"
+            )
+        entries[name] = parsed
+
+    if set(entries) != set(names):
+        missing = ", ".join(sorted(set(names) - set(entries))) or "none"
+        unexpected = ", ".join(sorted(set(entries) - set(names))) or "none"
+        raise ValueError(
+            f"report {path} has inconsistent {transport}_response_sizes "
+            f"(missing: {missing}; unexpected: {unexpected})"
+        )
+    return ",".join(f"{name}:{entries[name][0]}-{entries[name][1]}" for name in names)
+
+
 def main() -> int:
     if len(sys.argv) < 3:
         print(f"usage: {sys.argv[0]} <report> <report> [<report> ...]", file=sys.stderr)
@@ -91,6 +126,10 @@ def main() -> int:
     reports = [read_report(path) for path in paths]
     for report, path in zip(reports, paths):
         validate_observed_responses(report, path)
+        for transport in ("tcp", "udp"):
+            report[f"{transport}_response_sizes"] = canonical_response_sizes(
+                report, transport, path
+            )
         if report["schema"] != EXPECTED_SCHEMA:
             print(
                 f"unsupported protocol matrix schema in {path}: {report['schema']!r}; "

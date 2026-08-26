@@ -57,6 +57,10 @@ $tcpCaptureOnly = @($tcpRows | Where-Object Mode -eq "capture" | ForEach-Object 
 $udpCaptureOnly = @($udpRows | Where-Object Mode -eq "capture" | ForEach-Object Name)
 $tcpObservedResponses = [System.Collections.Generic.List[string]]::new()
 $udpObservedResponses = [System.Collections.Generic.List[string]]::new()
+$tcpResponseMin = @{}
+$tcpResponseMax = @{}
+$udpResponseMin = @{}
+$udpResponseMax = @{}
 $tcpResponses = 0
 $udpResponses = 0
 $tcpPorts = @{}
@@ -137,6 +141,18 @@ function Read-Bytes($Stream) {
     return [byte[]]$buffer[0..($count - 1)]
 }
 
+function Record-ResponseSize([string] $Transport, [string] $Name, [int] $Size) {
+    $minimum = if ($Transport -eq "tcp") { $script:tcpResponseMin } else { $script:udpResponseMin }
+    $maximum = if ($Transport -eq "tcp") { $script:tcpResponseMax } else { $script:udpResponseMax }
+    if (-not $minimum.ContainsKey($Name)) {
+        $minimum[$Name] = $Size
+        $maximum[$Name] = $Size
+        return
+    }
+    if ($Size -lt $minimum[$Name]) { $minimum[$Name] = $Size }
+    if ($Size -gt $maximum[$Name]) { $maximum[$Name] = $Size }
+}
+
 function Invoke-TcpProbe([string] $Name, [int] $Port, [byte[]] $Payload, [bool] $ServerFirst, [bool] $ExpectResponse) {
     $client = [System.Net.Sockets.TcpClient]::new()
     $client.ReceiveTimeout = 5000
@@ -148,6 +164,11 @@ function Invoke-TcpProbe([string] $Name, [int] $Port, [byte[]] $Payload, [bool] 
             $greeting = Read-Bytes $stream
             if ($ExpectResponse -and $greeting.Length -eq 0) {
                 throw "server-first listener on port $Port returned no greeting"
+            }
+            if ($ExpectResponse) {
+                Record-ResponseSize "tcp" $Name $greeting.Length
+            } else {
+                Record-ResponseSize "tcp" $Name 0
             }
             if ($Payload.Length -eq 0) {
                 if ($ExpectResponse -and -not $script:tcpObservedResponses.Contains($Name)) {
@@ -164,6 +185,7 @@ function Invoke-TcpProbe([string] $Name, [int] $Port, [byte[]] $Payload, [bool] 
             $stream.Flush()
         }
         if (-not $ExpectResponse) {
+            Record-ResponseSize "tcp" $Name 0
             return
         }
         $response = Read-Bytes $stream
@@ -173,6 +195,7 @@ function Invoke-TcpProbe([string] $Name, [int] $Port, [byte[]] $Payload, [bool] 
         if (-not $script:tcpObservedResponses.Contains($Name)) {
             [void]$script:tcpObservedResponses.Add($Name)
         }
+        Record-ResponseSize "tcp" $Name $response.Length
         $script:tcpResponses++
     } finally {
         $client.Dispose()
@@ -186,6 +209,7 @@ function Invoke-UdpProbe([string] $Name, [int] $Port, [byte[]] $Payload, [bool] 
         $endpoint = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Loopback, $Port)
         [void]$udp.Send($Payload, $Payload.Length, $endpoint)
         if (-not $ExpectResponse) {
+            Record-ResponseSize "udp" $Name 0
             return
         }
         $response = $udp.Receive([ref]$endpoint)
@@ -195,6 +219,7 @@ function Invoke-UdpProbe([string] $Name, [int] $Port, [byte[]] $Payload, [bool] 
         if (-not $script:udpObservedResponses.Contains($Name)) {
             [void]$script:udpObservedResponses.Add($Name)
         }
+        Record-ResponseSize "udp" $Name $response.Length
         $script:udpResponses++
     } finally {
         $udp.Dispose()
@@ -396,13 +421,15 @@ try {
     }
     if ($env:NETTRAP_MATRIX_REPORT) {
         @(
-            "schema=3"
+            "schema=4"
             "tcp_handlers=$($tcpNames.Count)"
             "udp_handlers=$($udpNames.Count)"
             "tcp_responses=$tcpResponses"
             "udp_responses=$udpResponses"
             "tcp_observed_responses=$($tcpObservedResponses -join ',')"
             "udp_observed_responses=$($udpObservedResponses -join ',')"
+            "tcp_response_sizes=$(($tcpNames | ForEach-Object { '{0}:{1}-{2}' -f $_, $tcpResponseMin[$_], $tcpResponseMax[$_] }) -join ',')"
+            "udp_response_sizes=$(($udpNames | ForEach-Object { '{0}:{1}-{2}' -f $_, $udpResponseMin[$_], $udpResponseMax[$_] }) -join ',')"
             "tcp_malformed_probes=$($tcpNames.Count * $roundsCompleted)"
             "udp_malformed_probes=$($udpNames.Count * $roundsCompleted)"
             "tcp_names=$($tcpNames -join ',')"
