@@ -421,7 +421,8 @@ try {
     }
     if ($env:NETTRAP_MATRIX_REPORT) {
         @(
-            "schema=4"
+            "schema=5"
+            "rounds_completed=$roundsCompleted"
             "tcp_handlers=$($tcpNames.Count)"
             "udp_handlers=$($udpNames.Count)"
             "tcp_responses=$tcpResponses"

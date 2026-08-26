@@ -7,6 +7,7 @@ import sys
 
 REQUIRED_KEYS = {
     "schema",
+    "rounds_completed",
     "tcp_handlers",
     "udp_handlers",
     "tcp_responses",
@@ -23,7 +24,7 @@ REQUIRED_KEYS = {
     "udp_capture_only",
     "event_listeners",
 }
-EXPECTED_SCHEMA = "4"
+EXPECTED_SCHEMA = "5"
 
 
 def read_report(path: Path) -> dict[str, str]:
@@ -43,6 +44,13 @@ def read_report(path: Path) -> dict[str, str]:
 
 
 def validate_observed_responses(report: dict[str, str], path: Path) -> None:
+    try:
+        rounds = int(report["rounds_completed"])
+    except ValueError as error:
+        raise ValueError(f"report {path} has an invalid rounds_completed value") from error
+    if rounds < 1:
+        raise ValueError(f"report {path} must contain at least one completed round")
+
     expected_events = report["tcp_names"].split(",") + [
         f"{name}-udp" for name in report["udp_names"].split(",")
     ]
@@ -78,10 +86,22 @@ def validate_observed_responses(report: dict[str, str], path: Path) -> None:
             malformed_probes = int(report[malformed_key])
         except ValueError as error:
             raise ValueError(f"report {path} has an invalid {malformed_key} value") from error
-        if malformed_probes < len(names):
+        expected_probes = len(names) * rounds
+        if malformed_probes != expected_probes:
             raise ValueError(
-                f"report {path} exercised only {malformed_probes} malformed {transport} probes; "
-                f"expected at least {len(names)}"
+                f"report {path} exercised {malformed_probes} malformed {transport} probes; "
+                f"expected exactly {expected_probes}"
+            )
+        response_key = f"{transport}_responses"
+        try:
+            responses = int(report[response_key])
+        except ValueError as error:
+            raise ValueError(f"report {path} has an invalid {response_key} value") from error
+        expected_responses = (len(names) - len(capture_only)) * rounds
+        if responses != expected_responses:
+            raise ValueError(
+                f"report {path} recorded {responses} {transport} responses; "
+                f"expected exactly {expected_responses}"
             )
 
 

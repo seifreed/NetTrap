@@ -430,7 +430,8 @@ if [[ -n "${NETTRAP_MATRIX_REPORT:-}" ]]; then
     tcp_malformed_probes=$(( ${#tcp_ports[@]} * rounds_completed ))
     udp_malformed_probes=$(( ${#udp_ports[@]} * rounds_completed ))
     {
-        printf 'schema=4\n'
+        printf 'schema=5\n'
+        printf 'rounds_completed=%s\n' "$rounds_completed"
         printf 'tcp_handlers=%s\n' "${#tcp_names[@]}"
         printf 'udp_handlers=%s\n' "${#udp_names[@]}"
         printf 'tcp_responses=%s\n' "$tcp_responses"
