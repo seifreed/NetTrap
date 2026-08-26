@@ -24,7 +24,14 @@ use output::validate_output_file_path;
 #[cfg(test)]
 use pcap::default_pcap_path;
 use pcap::init_pcap_writer;
-#[cfg(any(target_os = "linux", target_os = "windows", test))]
+#[cfg(any(
+    target_os = "linux",
+    all(
+        target_os = "windows",
+        any(target_arch = "x86_64", target_arch = "x86")
+    ),
+    test
+))]
 pub(crate) use redirects::resolve_default_listener_port;
 use redirects::{ValidatedRedirectDefaults, init_protocol_router, validate_redirect_defaults};
 use tls::init_tls_ca;

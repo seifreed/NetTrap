@@ -306,7 +306,10 @@ fn build_windows_interceptor(
     }))
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(all(
+    target_os = "windows",
+    any(target_arch = "x86_64", target_arch = "x86")
+))]
 fn build_windows_redirect_rules(
     config: &EngineConfig,
     port_forward_table: &crate::session::PortForwardTable,
