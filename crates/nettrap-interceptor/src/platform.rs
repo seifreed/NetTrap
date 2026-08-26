@@ -1415,6 +1415,21 @@ pub mod windivert {
             assert_eq!(&outbound[16..20], &[127, 0, 0, 1]);
             assert_eq!(&outbound[22..24], &8080u16.to_be_bytes());
 
+            let flow_table = flows.lock();
+            let flow_key = flow_table
+                .entries
+                .keys()
+                .next()
+                .expect("TCP flow should be tracked");
+            assert_eq!(flow_key.protocol, IPPROTO_TCP);
+            assert_eq!(flow_key.client, "192.0.2.10:40000".parse().unwrap());
+            assert_eq!(
+                flow_key.original_destination,
+                "198.51.100.20:80".parse().unwrap()
+            );
+            assert_eq!(flow_table.reverse.len(), 1);
+            drop(flow_table);
+
             let mut reply = vec![
                 0x45,
                 0,
