@@ -168,6 +168,14 @@ function Assert-TcpResponse([string] $Name, [byte[]] $Response) {
     }
     $text = [Text.Encoding]::ASCII.GetString($Response)
     switch ($Name) {
+        "dns" {
+            if ($Response.Length -lt 14) { throw "invalid DNS TCP response length" }
+            $declaredLength = ($Response[0] -shl 8) -bor $Response[1]
+            if ($declaredLength -lt 12 -or $Response.Length - 2 -lt $declaredLength) {
+                throw "invalid DNS TCP response framing"
+            }
+            if (($Response[4] -band 0x80) -eq 0) { throw "DNS TCP response did not set QR" }
+        }
         "http" { if ($text -notmatch '^HTTP/1\.[01] \d{3}') { throw "invalid HTTP response" } }
         "upnp" { if ($text -notmatch '^HTTP/1\.[01] 200') { throw "invalid UPnP response" } }
         "smtp" { if ($text -notmatch '^(220|250)') { throw "invalid SMTP response" } }

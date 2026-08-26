@@ -290,6 +290,67 @@ record_response_size() {
     fi
 }
 
+run_tcp_probe() {
+    local mode=$1
+    local port=$2
+    local request=$3
+    local response=${4:-}
+    python3 - "$mode" "$port" "$request" "$response" <<'PY'
+import socket
+import sys
+from pathlib import Path
+
+mode = sys.argv[1]
+port = int(sys.argv[2])
+request = Path(sys.argv[3]).read_bytes()
+with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+    sock.settimeout(5)
+    sock.sendall(request)
+    if mode == "send":
+        sock.shutdown(socket.SHUT_WR)
+        raise SystemExit(0)
+    if mode == "dns":
+        prefix = b""
+        while len(prefix) < 2:
+            chunk = sock.recv(2 - len(prefix))
+            if not chunk:
+                raise SystemExit("DNS TCP listener closed before its length prefix")
+            prefix += chunk
+        length = int.from_bytes(prefix, "big")
+        body = b""
+        while len(body) < length:
+            chunk = sock.recv(length - len(body))
+            if not chunk:
+                raise SystemExit("DNS TCP listener closed before its complete response")
+            body += chunk
+        if length < 12 or not body[2] & 0x80:
+            raise SystemExit("DNS TCP response has invalid framing or QR bit")
+        Path(sys.argv[4]).write_bytes(prefix + body)
+        raise SystemExit(0)
+    sock.shutdown(socket.SHUT_WR)
+    chunks = []
+    total = 0
+    first_chunk = True
+    while True:
+        try:
+            chunk = sock.recv(8192)
+        except socket.timeout:
+            break
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > 16 * 1024 * 1024:
+            raise SystemExit("TCP probe response exceeded 16 MiB")
+        chunks.append(chunk)
+        if first_chunk:
+            sock.settimeout(0.25)
+            first_chunk = False
+    if not chunks:
+        raise SystemExit("TCP listener returned no response")
+    Path(sys.argv[4]).write_bytes(b"".join(chunks))
+PY
+}
+
 run_tcp_malformed_burst() {
     python3 - "${tcp_ports[@]}" <<'PY'
 import socket
@@ -338,8 +399,18 @@ for index in "${!tcp_ports[@]}"; do
         daytime|time|chargen|quotd)
             timeout "$tcp_probe_timeout_seconds" nc 127.0.0.1 "${tcp_ports[$index]}" >"$response" 2>/dev/null || true
             ;;
+        dns)
+            run_tcp_probe dns "${tcp_ports[$index]}" "$request" "$response" || true
+            ;;
+        http)
+            run_tcp_probe stream "${tcp_ports[$index]}" "$request" "$response" || true
+            ;;
         *)
-            timeout "$tcp_probe_timeout_seconds" nc -N 127.0.0.1 "${tcp_ports[$index]}" <"$request" >"$response" 2>/dev/null || true
+            if contains_name "$name" "${tcp_capture_only[@]-}"; then
+                run_tcp_probe send "${tcp_ports[$index]}" "$request" >/dev/null 2>&1 || true
+            else
+                run_tcp_probe stream "${tcp_ports[$index]}" "$request" "$response" || true
+            fi
             ;;
     esac
     if ! kill -0 "$nettrap_pid" 2>/dev/null; then
