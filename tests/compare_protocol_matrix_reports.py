@@ -20,7 +20,10 @@ REQUIRED_KEYS = {
 
 def read_report(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
+    report = path.read_text(encoding="utf-8")
+    if report.startswith("\ufeff"):
+        report = report[1:]
+    for line in report.splitlines():
         key, separator, value = line.partition("=")
         if not separator or not key or key in values:
             raise ValueError(f"invalid report row in {path}: {line!r}")
