@@ -717,9 +717,7 @@ pub mod windivert {
                 let Some(listener_port) = listener_port else {
                     return Ok(());
                 };
-                if !flows.entries.contains_key(&key) {
-                    flows.insert(key, listener_port, now);
-                }
+                let new_flow = !flows.entries.contains_key(&key);
                 let loopback = if is_ipv6 {
                     IpAddr::V6(Ipv6Addr::LOCALHOST)
                 } else {
@@ -735,6 +733,9 @@ pub mod windivert {
                 ) {
                     return Err(Error::Packet("Failed to rewrite outbound endpoint".into()));
                 }
+                if new_flow {
+                    flows.insert(key, listener_port, now);
+                }
             }
 
             if total_len > data.len() {
@@ -743,6 +744,15 @@ pub mod windivert {
                 ));
             }
             Ok(())
+        }
+
+        fn restore_original_packet(data: &mut [u8], original: &[u8], len: usize) -> bool {
+            let (Some(destination), Some(source)) = (data.get_mut(..len), original.get(..len))
+            else {
+                return false;
+            };
+            destination.copy_from_slice(source);
+            true
         }
     }
 
@@ -791,9 +801,37 @@ pub mod windivert {
                     } as usize;
 
                     let original = packet_buf[..len].to_vec();
-                    let packet = Self::parse_packet(&original, len, &addr)?;
+                    let mut restore_original = false;
+                    let packet = match Self::parse_packet(&original, len, &addr) {
+                        Ok(packet) => packet,
+                        Err(err) => {
+                            tracing::warn!(
+                                "WinDivert packet parse failed; reinjecting original packet: {}",
+                                err
+                            );
+                            restore_original = true;
+                            None
+                        }
+                    };
 
-                    Self::redirect_packet(&mut packet_buf, len, &addr, &redirects, &flows)?;
+                    if !restore_original
+                        && let Err(err) =
+                            Self::redirect_packet(&mut packet_buf, len, &addr, &redirects, &flows)
+                    {
+                        tracing::warn!(
+                            "WinDivert packet rewrite failed; reinjecting original packet: {}",
+                            err
+                        );
+                        restore_original = true;
+                    }
+                    if restore_original
+                        && !Self::restore_original_packet(&mut packet_buf, &original, len)
+                    {
+                        return Err(Error::Packet(
+                            "Failed to restore original WinDivert packet after rewrite error"
+                                .into(),
+                        ));
+                    }
 
                     let guard = windivert.lock();
                     let api = guard
@@ -1039,6 +1077,20 @@ pub mod windivert {
             let packet = WinDivertInterceptor::parse_packet(&data, data.len(), &addr).unwrap();
 
             assert!(packet.is_none());
+        }
+
+        #[test]
+        fn restoring_original_packet_discards_partial_rewrite() {
+            let original = [0x45, 0x00, 0x00, 0x14];
+            let mut rewritten = [0x45, 0x00, 0x00, 0x14];
+            rewritten[1] = 0xff;
+
+            assert!(WinDivertInterceptor::restore_original_packet(
+                &mut rewritten,
+                &original,
+                original.len()
+            ));
+            assert_eq!(rewritten, original);
         }
 
         #[test]
