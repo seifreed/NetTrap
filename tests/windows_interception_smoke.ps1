@@ -46,6 +46,13 @@ function Stop-NetTrap {
     }
 }
 
+function Process-Output {
+    @(
+        if (Test-Path $stdoutPath) { Get-Content $stdoutPath -Raw }
+        if (Test-Path $stderrPath) { Get-Content $stderrPath -Raw }
+    ) -join "`n"
+}
+
 try {
     $process = Start-Process -FilePath $BinaryPath -ArgumentList @(
         "run", "--intercept", "-c", $configPath
@@ -62,12 +69,12 @@ try {
     $tcpOutput = & curl.exe --noproxy "*" --silent --show-error --connect-timeout 5 --max-time 10 `
         --header "Host: interception.test" http://198.51.100.1/ 2>&1
     if ($LASTEXITCODE -ne 0 -or $tcpOutput -notmatch "It Works") {
-        throw "TCP traffic was not redirected to the local listener: $tcpOutput"
+        throw "TCP traffic was not redirected to the local listener: $tcpOutput`n$(Process-Output)"
     }
 
     $dnsOutput = & nslookup.exe -timeout=3 -retry=0 example.test 198.51.100.1 2>&1
     if ($LASTEXITCODE -ne 0 -or $dnsOutput -notmatch "Address:\s+\d+\.\d+\.\d+\.\d+") {
-        throw "UDP traffic was not redirected to the local DNS listener: $dnsOutput"
+        throw "UDP traffic was not redirected to the local DNS listener: $dnsOutput`n$(Process-Output)"
     }
 
     Stop-NetTrap
