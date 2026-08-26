@@ -306,6 +306,15 @@ jobs:
           Copy-Item "target/${{ matrix.target }}/release/nettrap.exe" "nettrap-${{ matrix.name }}.binary"
         shell: pwsh
 
+      - name: Sign Windows MSI (Authenticode)
+        if: runner.os == 'Windows' && vars.NETTRAP_NATIVE_SIGNING == '1'
+        env:
+          NETTRAP_WINDOWS_PFX_BASE64: ${{ secrets.NETTRAP_WINDOWS_PFX_BASE64 }}
+          NETTRAP_WINDOWS_PFX_PASSWORD: ${{ secrets.NETTRAP_WINDOWS_PFX_PASSWORD }}
+          NETTRAP_WINDOWS_TIMESTAMP_URL: ${{ vars.NETTRAP_WINDOWS_TIMESTAMP_URL }}
+        run: ./scripts/sign_windows.ps1 -BinaryPath "nettrap-${{ matrix.name }}.msi"
+        shell: pwsh
+
       - name: Verify packaged Unix release in a clean directory
         if: matrix.archive == 'tar'
         run: |
@@ -373,6 +382,12 @@ jobs:
       - name: Verify packaged Windows MSI in a clean directory
         if: runner.os == 'Windows'
         run: |
+          if ('${{ vars.NETTRAP_NATIVE_SIGNING }}' -eq '1') {
+            $signature = Get-AuthenticodeSignature -LiteralPath "nettrap-${{ matrix.name }}.msi"
+            if ($signature.Status -ne 'Valid') {
+              throw "MSI Authenticode verification failed: $($signature.Status)"
+            }
+          }
           $cleanDir = Join-Path $env:RUNNER_TEMP "nettrap-msi-clean-${{ matrix.name }}"
           Remove-Item $cleanDir -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force -Path $cleanDir | Out-Null

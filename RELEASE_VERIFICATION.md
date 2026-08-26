@@ -37,7 +37,7 @@ The bundle signature covers the downloaded release artifact. Individual
 executables inside the published packages are hash-checked against the
 corresponding signed raw `.binary` before release publication. Releases with
 the repository variable `NETTRAP_NATIVE_SIGNING=1` additionally sign Windows
-executables with Authenticode and macOS executables with Developer ID; the
+executables and MSI installers with Authenticode and macOS executables with Developer ID; the
 required PFX/P12 identities stay in GitHub Actions secrets. Without that
 variable, platform-native signatures are intentionally omitted and must not be
 inferred from the artifact signature.
