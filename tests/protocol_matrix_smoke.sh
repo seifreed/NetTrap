@@ -201,6 +201,42 @@ assert_resource_bounds() {
     fi
 }
 
+run_tcp_malformed_burst() {
+    python3 - "${tcp_ports[@]}" <<'PY'
+import socket
+import sys
+
+payload = b"\xff" * 4096
+for value in sys.argv[1:]:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(0.25)
+    try:
+        sock.connect(("127.0.0.1", int(value)))
+        sock.sendall(payload)
+    except OSError:
+        pass
+    finally:
+        sock.close()
+PY
+}
+
+run_udp_malformed_burst() {
+    python3 - "${udp_ports[@]}" <<'PY'
+import socket
+import sys
+
+payload = b"\xff" * 4096
+for value in sys.argv[1:]:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.sendto(payload, ("127.0.0.1", int(value)))
+    except OSError:
+        pass
+    finally:
+        sock.close()
+PY
+}
+
 for round in $(seq 1 "$repeat"); do
 for index in "${!tcp_ports[@]}"; do
     name=${tcp_names[$index]}
@@ -263,6 +299,9 @@ for index in "${!udp_ports[@]}"; do
         fi
     fi
 done
+
+    run_tcp_malformed_burst
+    run_udp_malformed_burst
 
     malformed_http="$workdir/malformed-http-$round.request"
     {

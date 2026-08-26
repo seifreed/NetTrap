@@ -196,6 +196,45 @@ function Assert-ResourceBounds([long] $WorkingSetBaseline, [long] $HandleBaselin
     }
 }
 
+function Invoke-TcpMalformedBurst([object[]] $Ports) {
+    $payload = [byte[]]::new(4096)
+    for ($index = 0; $index -lt $payload.Length; $index++) {
+        $payload[$index] = 0xff
+    }
+    foreach ($port in $Ports) {
+        $client = [System.Net.Sockets.TcpClient]::new()
+        try {
+            $client.Connect("127.0.0.1", [int]$port)
+            $stream = $client.GetStream()
+            $stream.Write($payload, 0, $payload.Length)
+            $stream.Flush()
+        } catch [System.Net.Sockets.SocketException] {
+        } catch [System.IO.IOException] {
+        } finally {
+            $client.Dispose()
+        }
+    }
+}
+
+function Invoke-UdpMalformedBurst([object[]] $Ports) {
+    $payload = [byte[]]::new(4096)
+    for ($index = 0; $index -lt $payload.Length; $index++) {
+        $payload[$index] = 0xff
+    }
+    $udp = [System.Net.Sockets.UdpClient]::new()
+    try {
+        foreach ($port in $Ports) {
+            $endpoint = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Loopback, [int]$port)
+            try {
+                [void]$udp.Send($payload, $payload.Length, $endpoint)
+            } catch [System.Net.Sockets.SocketException] {
+            }
+        }
+    } finally {
+        $udp.Dispose()
+    }
+}
+
 function Get-TcpPayload([string] $Name) {
     switch ($Name) {
         "dns" { return [byte[]](0x00, 0x1d, 0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x03, 0x63, 0x6f, 0x6d, 0x00, 0x00, 0x01, 0x00, 0x01) }
@@ -282,6 +321,9 @@ try {
             $payload = [byte[]](Get-UdpPayload $name)
             Invoke-UdpProbe $name $udpPorts[$name] $payload $expectResponse
         }
+
+        Invoke-TcpMalformedBurst @($tcpPorts.Values)
+        Invoke-UdpMalformedBurst @($udpPorts.Values)
 
         $malformedHttp = [Text.Encoding]::ASCII.GetBytes(
             ("GET /" + ("A" * 4096) + " HTTP/1.1`r`nHost: matrix.test`r`n`r`n"))
