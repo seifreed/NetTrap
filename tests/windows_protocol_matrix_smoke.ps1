@@ -288,6 +288,19 @@ try {
     }
     $tcpResponses = ($tcpNames.Count - $tcpCaptureOnly.Count) * $repeat
     $udpResponses = ($udpNames.Count - $udpCaptureOnly.Count) * $repeat
+    if ($env:NETTRAP_MATRIX_REPORT) {
+        @(
+            "schema=1"
+            "tcp_handlers=$($tcpNames.Count)"
+            "udp_handlers=$($udpNames.Count)"
+            "tcp_responses=$tcpResponses"
+            "udp_responses=$udpResponses"
+            "tcp_names=$($tcpNames -join ',')"
+            "udp_names=$($udpNames -join ',')"
+            "tcp_capture_only=$($tcpCaptureOnly -join ',')"
+            "udp_capture_only=$($udpCaptureOnly -join ',')"
+        ) | Set-Content -LiteralPath $env:NETTRAP_MATRIX_REPORT -Encoding utf8
+    }
     Write-Host "PASS: Windows protocol matrix parity smoke ($($tcpNames.Count) TCP, $($udpNames.Count) UDP handlers; $tcpResponses TCP, $udpResponses UDP responses; $repeat round(s))"
 } catch {
     $stderr = if (Test-Path $stderrPath) { Get-Content $stderrPath -Raw } else { "" }

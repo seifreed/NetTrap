@@ -272,4 +272,19 @@ if ! kill -0 "$nettrap_pid" 2>/dev/null; then
     exit 1
 fi
 
+if [[ -n "${NETTRAP_MATRIX_REPORT:-}" ]]; then
+    mkdir -p "$(dirname "$NETTRAP_MATRIX_REPORT")"
+    {
+        printf 'schema=1\n'
+        printf 'tcp_handlers=%s\n' "${#tcp_names[@]}"
+        printf 'udp_handlers=%s\n' "${#udp_names[@]}"
+        printf 'tcp_responses=%s\n' "$tcp_responses"
+        printf 'udp_responses=%s\n' "$udp_responses"
+        printf 'tcp_names=%s\n' "$(IFS=,; echo "${tcp_names[*]}")"
+        printf 'udp_names=%s\n' "$(IFS=,; echo "${udp_names[*]}")"
+        printf 'tcp_capture_only=%s\n' "$(IFS=,; echo "${tcp_capture_only[*]}")"
+        printf 'udp_capture_only=%s\n' "$(IFS=,; echo "${udp_capture_only[*]}")"
+    } >"$NETTRAP_MATRIX_REPORT"
+fi
+
 echo "PASS: protocol matrix smoke exercised ${#tcp_names[@]} TCP and ${#udp_names[@]} UDP handlers for ${repeat} round(s) (${tcp_responses} TCP, ${udp_responses} UDP responses)"
