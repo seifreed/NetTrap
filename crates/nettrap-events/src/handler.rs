@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::prelude::*;
-use nettrap_fsutil::append_regular_file;
+use nettrap_fsutil::append_regular_file_line;
 
 const LOG_EVENT_PREVIEW_CHARS: usize = 240;
 
@@ -133,10 +133,9 @@ impl EventHandlerTrait for JsonFileHandler {
         let json = serde_json::to_string(event).map_err(|e| Error::Storage(e.to_string()))?;
         let path = self.path.as_path();
 
-        use std::io::Write;
-        let mut file = append_regular_file(path).map_err(|e| Error::Storage(e.to_string()))?;
-
-        writeln!(file, "{}", json).map_err(|e| Error::Storage(e.to_string()))?;
+        let line = format!("{json}\n");
+        append_regular_file_line(path, line.as_bytes())
+            .map_err(|e| Error::Storage(e.to_string()))?;
 
         Ok(())
     }

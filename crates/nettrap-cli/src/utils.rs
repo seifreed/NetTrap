@@ -13,7 +13,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::session::normalize_session_ip;
-use nettrap_fsutil::append_regular_file;
+use nettrap_fsutil::append_regular_file_line;
 
 pub use http_dump::dump_http_post;
 #[cfg(test)]
@@ -97,16 +97,12 @@ pub async fn log_event(
             "event": event,
             "detail": detail,
         });
-        match append_regular_file(path) {
-            Ok(mut file) => {
-                use std::io::Write;
-
-                let line = format!("{}\n", line);
-                if let Err(e) = file.write_all(line.as_bytes()) {
-                    tracing::warn!("Failed to write event log entry to {:?}: {}", path, e);
-                }
+        let line = format!("{}\n", line);
+        match append_regular_file_line(path, line.as_bytes()) {
+            Ok(()) => {}
+            Err(e) => {
+                tracing::warn!("Failed to write event log entry to {:?}: {}", path, e);
             }
-            Err(e) => tracing::warn!("Failed to open event log {:?}: {}", path, e),
         }
     }
 }

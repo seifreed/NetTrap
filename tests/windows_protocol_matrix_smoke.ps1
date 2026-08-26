@@ -7,6 +7,7 @@ $ErrorActionPreference = "Stop"
 $runnerTemp = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } elseif ($env:TEMP) { $env:TEMP } else { [IO.Path]::GetTempPath() }
 $workDir = Join-Path $runnerTemp "nettrap-protocol-matrix"
 $configPath = Join-Path $workDir "config.toml"
+$eventLogPath = Join-Path $workDir "events.jsonl"
 $stdoutPath = Join-Path $workDir "stdout.log"
 $stderrPath = Join-Path $workDir "stderr.log"
 $process = $null
@@ -51,6 +52,7 @@ $durationSeconds = [int]$durationText
 
 $tcpNames = @($tcpRows.Name)
 $udpNames = @($udpRows.Name)
+$expectedEventListeners = @($tcpNames) + @($udpNames | ForEach-Object { "$_-udp" })
 $tcpCaptureOnly = @($tcpRows | Where-Object Mode -eq "capture" | ForEach-Object Name)
 $udpCaptureOnly = @($udpRows | Where-Object Mode -eq "capture" | ForEach-Object Name)
 $tcpObservedResponses = [System.Collections.Generic.List[string]]::new()
@@ -67,6 +69,7 @@ $config = [System.Collections.Generic.List[string]]::new()
 [void]$config.Add('default_decision = "emulate"')
 [void]$config.Add("pcap_enabled = false")
 [void]$config.Add('output_format = "jsonl"')
+[void]$config.Add(('output_path = "{0}"' -f $eventLogPath.Replace('\', '/')))
 
 $port = 19000
 foreach ($name in $tcpNames) {
@@ -366,6 +369,26 @@ try {
 
     if ($process.HasExited) {
         throw "NetTrap exited during protocol matrix smoke (code $($process.ExitCode))"
+    }
+    if (-not (Test-Path -LiteralPath $eventLogPath -PathType Leaf)) {
+        throw "event log is missing: $eventLogPath"
+    }
+    $seenEventListeners = [System.Collections.Generic.HashSet[string]]::new()
+    $lineNumber = 0
+    foreach ($line in Get-Content -LiteralPath $eventLogPath) {
+        $lineNumber++
+        try {
+            $event = $line | ConvertFrom-Json -ErrorAction Stop
+        } catch {
+            throw "invalid event JSON on line $lineNumber`: $($_.Exception.Message)"
+        }
+        if ($event.listener -is [string]) {
+            [void]$seenEventListeners.Add($event.listener)
+        }
+    }
+    $missingEventListeners = @($expectedEventListeners | Where-Object { -not $seenEventListeners.Contains($_) })
+    if ($missingEventListeners.Count -gt 0) {
+        throw "event log is missing listeners: $($missingEventListeners -join ', ')"
     }
     if ($env:NETTRAP_MATRIX_REPORT) {
         @(

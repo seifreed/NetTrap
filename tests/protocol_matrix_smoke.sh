@@ -66,11 +66,12 @@ cleanup() {
 
 trap cleanup EXIT
 
-cat >"$config" <<'EOF'
+cat >"$config" <<EOF
 attribution_enabled = false
 default_decision = "emulate"
 pcap_enabled = false
 output_format = "jsonl"
+output_path = "$workdir/events.jsonl"
 EOF
 
 tcp_ports=()
@@ -179,6 +180,10 @@ tcp_responses=0
 udp_responses=0
 tcp_observed_responses=()
 udp_observed_responses=()
+expected_event_listeners=("${tcp_names[@]}")
+for name in "${udp_names[@]}"; do
+    expected_event_listeners+=("$name-udp")
+done
 fd_baseline=""
 rss_baseline_kb=""
 if [[ -d "/proc/$nettrap_pid/fd" ]]; then
@@ -204,6 +209,33 @@ assert_resource_bounds() {
             exit 1
         fi
     fi
+}
+
+assert_event_coverage() {
+    python3 - "$workdir/events.jsonl" "${expected_event_listeners[@]}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+event_path = Path(sys.argv[1])
+expected = set(sys.argv[2:])
+if not event_path.is_file():
+    raise SystemExit(f"event log is missing: {event_path}")
+
+seen = set()
+for line_number, line in enumerate(event_path.read_text(encoding="utf-8").splitlines(), 1):
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError as error:
+        raise SystemExit(f"invalid event JSON on line {line_number}: {error}") from error
+    listener = event.get("listener")
+    if isinstance(listener, str):
+        seen.add(listener)
+
+missing = sorted(expected - seen)
+if missing:
+    raise SystemExit(f"event log is missing listeners: {', '.join(missing)}")
+PY
 }
 
 run_tcp_malformed_burst() {
@@ -327,6 +359,8 @@ if ! kill -0 "$nettrap_pid" 2>/dev/null; then
     cat "$log" >&2
     exit 1
 fi
+
+assert_event_coverage
 
 if [[ -n "${NETTRAP_MATRIX_REPORT:-}" ]]; then
     mkdir -p "$(dirname "$NETTRAP_MATRIX_REPORT")"
