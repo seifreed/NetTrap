@@ -4,18 +4,29 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$workDir = Join-Path $env:RUNNER_TEMP "nettrap-listener-smoke"
+$runnerTemp = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } elseif ($env:TEMP) { $env:TEMP } else { [IO.Path]::GetTempPath() }
+$curlCommand = Get-Command curl.exe -ErrorAction SilentlyContinue
+if ($null -eq $curlCommand) {
+    $curlCommand = Get-Command curl -ErrorAction Stop
+}
+$curlPath = $curlCommand.Source
+$workDir = Join-Path $runnerTemp "nettrap-listener-smoke"
 $configPath = Join-Path $workDir "config.toml"
+$smtpDir = Join-Path $workDir "smtp"
+$messagePath = Join-Path $workDir "message.eml"
+$httpV6BodyPath = Join-Path $workDir "http-v6.body"
 $stdoutPath = Join-Path $workDir "stdout.log"
 $stderrPath = Join-Path $workDir "stderr.log"
 $process = $null
 
 New-Item -ItemType Directory -Force -Path $workDir | Out-Null
+New-Item -ItemType Directory -Force -Path $smtpDir | Out-Null
 @"
 attribution_enabled = false
 default_decision = "emulate"
 pcap_enabled = false
 output_format = "jsonl"
+smtp_dir = "$($smtpDir.Replace('\', '/'))"
 
 [[listeners]]
 name = "dns-smoke"
@@ -65,6 +76,39 @@ bind_address = "127.0.0.1"
 enabled = true
 emulate_response = true
 use_ssl = true
+
+[[listeners]]
+name = "smtp-smoke"
+protocol = "tcp"
+port = 12526
+bind_address = "127.0.0.1"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "ftp-smoke"
+protocol = "tcp"
+port = 12122
+bind_address = "127.0.0.1"
+enabled = true
+emulate_response = true
+pasv_ports = "30110-30115"
+
+[[listeners]]
+name = "pop3-smoke"
+protocol = "tcp"
+port = 11110
+bind_address = "127.0.0.1"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "imap-smoke"
+protocol = "tcp"
+port = 1143
+bind_address = "127.0.0.1"
+enabled = true
+emulate_response = true
 "@ | Set-Content -Path $configPath -Encoding utf8
 
 function Stop-NetTrap {
@@ -108,8 +152,8 @@ try {
         throw "HTTP listener smoke failed"
     }
 
-    $httpV6Status = (& curl.exe --noproxy "*" --silent --show-error --max-time 2 `
-        --output $null --write-out "%{http_code}" --header "Host: example.test" `
+    $httpV6Status = (& $curlPath --noproxy "*" --silent --show-error --max-time 2 `
+        --output $httpV6BodyPath --write-out "%{http_code}" --header "Host: example.test" `
         "http://[::1]:18089/")
     if ($LASTEXITCODE -ne 0 -or $httpV6Status -ne "200") {
         throw "IPv6 HTTP listener smoke failed (status $httpV6Status)"
@@ -221,7 +265,37 @@ try {
         $tlsClient.Dispose()
     }
 
-    Write-Host "PASS: Windows IPv4/IPv6 TCP/UDP listener parity smoke"
+    "Subject: NetTrap Windows E2E`r`n`r`nclient delivery`r`n" |
+        Set-Content -Path $messagePath -NoNewline -Encoding ascii
+    $smtpResult = & $curlPath --noproxy "*" --silent --show-error --url "smtp://127.0.0.1:12526" `
+        --mail-from "sender@example.test" --mail-rcpt "receiver@example.test" `
+        --upload-file $messagePath 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "SMTP client delivery failed: $($smtpResult -join ' ')"
+    }
+    if ($null -eq (Get-ChildItem -Path $smtpDir -Filter "*.eml" -Recurse -File -ErrorAction SilentlyContinue)) {
+        throw "SMTP listener did not persist the client message"
+    }
+
+    $ftpResult = & $curlPath --noproxy "*" --silent --show-error --user "malware:secret" `
+        "ftp://127.0.0.1:12122/readme.txt" 2>&1
+    if ($LASTEXITCODE -ne 0 -or ($ftpResult -join "`n").Trim() -ne "NetTrap default text file") {
+        throw "FTP client download failed: $($ftpResult -join ' ')"
+    }
+
+    $pop3Result = & $curlPath --noproxy "*" --silent --show-error --user "malware:secret" `
+        "pop3://127.0.0.1:11110/" 2>&1
+    if ($LASTEXITCODE -ne 0 -or ($pop3Result -join "`n") -notmatch '(?m)^\d+\s+\d+$') {
+        throw "POP3 client capability probe failed: $($pop3Result -join ' ')"
+    }
+
+    $imapResult = & $curlPath --noproxy "*" --silent --show-error --user "malware:secret" `
+        "imap://127.0.0.1:1143/" 2>&1
+    if ($LASTEXITCODE -ne 67 -or ($imapResult -join "`n") -notmatch "Access denied") {
+        throw "IMAP client auth probe did not return the expected denial"
+    }
+
+    Write-Host "PASS: Windows IPv4/IPv6 TCP/UDP plus SMTP/FTP/POP3/IMAP client parity smoke"
 } finally {
     Stop-NetTrap
 }

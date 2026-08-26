@@ -37,6 +37,8 @@ handler, truncated HTTP/DNS probes, and bounded working-set/handle growth.
 Scheduled CI runs the Windows matrix for a bounded 30-minute window (and at
 least 32 rounds); release and non-scheduled runs repeat it twice. This makes
 the protocol smoke a parity check rather than a Windows-only subset.
+The Windows listener smoke also runs real `curl.exe` client probes for HTTP,
+DNS, TLS, SMTP, FTP, POP3, and IMAP, including SMTP message persistence.
 
 The required client contract is `dig` 9.x, `curl` 8.x, OpenSSL 3.x or
 LibreSSL 3.x, plus `ldapsearch` when installed. `tests/verify_platform.sh`
