@@ -45,8 +45,9 @@ See [PROTOCOL_SUPPORT.md](PROTOCOL_SUPPORT.md) for the handler-by-handler matrix
 - Event, report, API, and configuration schemas carry explicit version fields,
   and `config --migrate` handles older configuration versions; long-term
   compatibility guarantees are not yet provided.
-- Linux release binaries and all packages are keylessly signed with Sigstore
-  bundles and include checksums, SBOMs, and provenance attestations. Windows
+- All release binaries, packages, checksums, SBOMs, formulas, and deployment
+  metadata are keylessly signed with Sigstore bundles and include checksums,
+  SBOMs, and provenance attestations. Windows
   Authenticode and macOS Developer ID signing is available in the release
   workflow only when `NETTRAP_NATIVE_SIGNING=1` is configured with external
   identities; the repository does not contain those private keys.

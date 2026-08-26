@@ -575,9 +575,14 @@ jobs:
         env:
           COSIGN_EXPERIMENTAL: "1"
         run: |
-          for artifact in releases/nettrap-*.tar.gz releases/nettrap-*.zip \
-              releases/nettrap-*.binary releases/nettrap-*.msi \
-              releases/nettrap-*.deb releases/nettrap-*.rpm; do
+          release_artifacts=(
+            releases/nettrap-*.tar.gz releases/nettrap-*.zip
+            releases/nettrap-*.binary releases/nettrap-*.msi
+            releases/nettrap-*.deb releases/nettrap-*.rpm
+            releases/nettrap.rb releases/SHA256SUMS releases/nettrap.spdx.json
+            releases/nettrap-oci-image.txt releases/nettrap-kubernetes-deployment.yaml
+          )
+          for artifact in "${release_artifacts[@]}"; do
             cosign sign-blob --yes --bundle "${artifact}.sigstore.json" "$artifact"
           done
 
@@ -586,9 +591,14 @@ jobs:
           COSIGN_EXPERIMENTAL: "1"
           COSIGN_IDENTITY: "https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/tags/${{ github.ref_name }}"
         run: |
-          for artifact in releases/nettrap-*.tar.gz releases/nettrap-*.zip \
-              releases/nettrap-*.binary releases/nettrap-*.msi \
-              releases/nettrap-*.deb releases/nettrap-*.rpm; do
+          release_artifacts=(
+            releases/nettrap-*.tar.gz releases/nettrap-*.zip
+            releases/nettrap-*.binary releases/nettrap-*.msi
+            releases/nettrap-*.deb releases/nettrap-*.rpm
+            releases/nettrap.rb releases/SHA256SUMS releases/nettrap.spdx.json
+            releases/nettrap-oci-image.txt releases/nettrap-kubernetes-deployment.yaml
+          )
+          for artifact in "${release_artifacts[@]}"; do
             cosign verify-blob \
               --bundle "${artifact}.sigstore.json" \
               --certificate-identity "$COSIGN_IDENTITY" \

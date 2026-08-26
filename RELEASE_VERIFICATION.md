@@ -1,7 +1,8 @@
 # Release Verification
 
-Every NetTrap release archive, raw platform binary, Linux package, and Windows MSI has a keyless
-Sigstore bundle, a GitHub artifact attestation, and an SBOM attestation. The
+Every NetTrap release archive, raw platform binary, Linux package, Windows MSI,
+checksum, SBOM, formula, and deployment metadata has a keyless Sigstore bundle.
+Release binaries and packages also have a GitHub artifact attestation and an SBOM attestation. The
 draft release is not published unless the workflow verifies every raw `.binary`,
 Linux/macOS `.tar.gz`, Linux `.deb`/`.rpm`, and Windows `.zip`/`.msi` against this
 repository. A Homebrew formula is generated from the checksums for the four
