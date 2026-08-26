@@ -180,6 +180,28 @@ function Read-DnsTcpResponse($Stream) {
     return $frame
 }
 
+function Read-StreamResponse($Stream) {
+    $chunks = [System.Collections.Generic.List[byte]]::new()
+    $Stream.ReadTimeout = 5000
+    $first = Read-Bytes $Stream
+    if ($first.Length -eq 0) {
+        return [byte[]]::new(0)
+    }
+    $chunks.AddRange($first)
+    $Stream.ReadTimeout = 250
+    while ($true) {
+        $chunk = Read-Bytes $Stream
+        if ($chunk.Length -eq 0) {
+            break
+        }
+        $chunks.AddRange($chunk)
+        if ($chunks.Count -gt (16 * 1024 * 1024)) {
+            throw "TCP probe response exceeded 16 MiB"
+        }
+    }
+    return $chunks.ToArray()
+}
+
 function Record-ResponseSize([string] $Transport, [string] $Name, [int] $Size) {
     $minimum = if ($Transport -eq "tcp") { $script:tcpResponseMin } else { $script:udpResponseMin }
     $maximum = if ($Transport -eq "tcp") { $script:tcpResponseMax } else { $script:udpResponseMax }
@@ -330,7 +352,7 @@ function Invoke-TcpProbe([string] $Name, [int] $Port, [byte[]] $Payload, [bool] 
         $stream = $client.GetStream()
         $stream.ReadTimeout = 5000
         if ($ServerFirst) {
-            $greeting = Read-Bytes $stream
+            $greeting = Read-StreamResponse $stream
             if ($ExpectResponse -and $greeting.Length -eq 0) {
                 throw "server-first listener on port $Port returned no greeting"
             }
@@ -361,7 +383,7 @@ function Invoke-TcpProbe([string] $Name, [int] $Port, [byte[]] $Payload, [bool] 
         $response = if ($Name -eq "dns") {
             Read-DnsTcpResponse $stream
         } else {
-            Read-Bytes $stream
+            Read-StreamResponse $stream
         }
         if ($response.Length -eq 0) {
             throw "TCP listener on port $Port returned no response"
