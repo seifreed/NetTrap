@@ -99,7 +99,11 @@ jobs:
         run: docker run --rm --entrypoint /bin/bash nettrap:release-test /app/integration_test.sh
 
       - name: Run protocol matrix smoke
-        run: docker run --rm --entrypoint /bin/bash nettrap:release-test /app/protocol_matrix_smoke.sh
+        run: |
+          docker run --rm \
+            -e NETTRAP_MATRIX_REPEAT=2 \
+            -e NETTRAP_MATRIX_DURATION_SECONDS=60 \
+            --entrypoint /bin/bash nettrap:release-test /app/protocol_matrix_smoke.sh
 
   build:
     name: Build ${{ matrix.name }}
@@ -332,6 +336,7 @@ jobs:
         if: runner.os == 'Windows'
         env:
           NETTRAP_MATRIX_REPEAT: "2"
+          NETTRAP_MATRIX_DURATION_SECONDS: "60"
         run: ./tests/windows_protocol_matrix_smoke.ps1 -BinaryPath "${{ github.workspace }}\target\${{ matrix.target }}\release\nettrap.exe"
         shell: pwsh
 
