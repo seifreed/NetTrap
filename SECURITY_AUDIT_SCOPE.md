@@ -10,9 +10,11 @@ The review should cover:
 - Untrusted TCP/UDP parsing, protocol dispatch, framing, and resource limits.
 - Linux firewall redirection, nftables/iptables cleanup, privilege boundaries,
   and crash recovery.
-- Windows listener/capture adapters and the disabled WinDivert bindings/parser;
-  any future TCP/UDP NAT path must preserve packets and fail closed until
-  independently validated.
+- Windows listener/capture adapters and the active x86_64 WinDivert path:
+  bounded TCP/UDP NAT flow tracking, IPv4/IPv6 header rewrites, checksum
+  recalculation, reinjection failure recovery, and fail-closed startup. The
+  ARM64 path remains Npcap listener/capture only. Real-host validation is still
+  required before treating Windows transparent interception as production-ready.
 - TLS certificate generation, key storage, and local termination boundaries.
 - REST/API exposure, configuration migration, filesystem writes, and reports.
 - Docker/Kubernetes manifests, release workflows, Sigstore signing, SBOMs, and
