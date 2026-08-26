@@ -57,7 +57,7 @@ after the same E2E suite passes with it.
 | POP3 | USER/PASS and mailbox-command emulation | Yes (curl POP3) | Synthetic mailbox only |
 | IRC | Registration/channel command emulation and logging | No | Partial IRC session behavior |
 | IMAP/IMAPS | Explicit listener banner and command subset | Yes (curl IMAP auth probe) | No content detector; must be selected by listener name |
-| TFTP | RRQ/WRQ block handling and configured file root | No | No required real-client transfer E2E |
+| TFTP | RRQ/WRQ block handling and configured file root | Yes (Python/PowerShell UDP transfer probes) | No required broad TFTP-client compatibility gate |
 | Telnet | Negotiation/prompt responses and command capture | No | Port-open smoke only; not a full terminal server |
 | SSH | Banner and partial KEX/authentication responses | Yes (`ssh`, banner/KEX handshake) | Does not complete a normal OpenSSH authentication session |
 | SMB | SMB1/SMB2 parsing and synthetic negotiation | Yes (`smbclient`, negotiation probe) | Fixed partial SMB2 behavior; the client does not establish file sharing or a full SMB2/SMB3 session |

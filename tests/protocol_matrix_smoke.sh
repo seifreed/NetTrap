@@ -488,6 +488,29 @@ for value in sys.argv[1:]:
 PY
 }
 
+run_tftp_wrq() {
+    local port=$1
+    local filename=$2
+    python3 - "$port" "$filename" <<'PY'
+import socket
+import sys
+
+port = int(sys.argv[1])
+filename = sys.argv[2].encode("ascii")
+payload = b"matrix-tftp"
+with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+    sock.settimeout(5)
+    sock.sendto(b"\x00\x02" + filename + b"\x00octet\x00", ("127.0.0.1", port))
+    response, peer = sock.recvfrom(516)
+    if response != b"\x00\x04\x00\x00":
+        raise SystemExit(f"invalid TFTP WRQ ACK: {response[:8].hex()}")
+    sock.sendto(b"\x00\x03\x00\x01" + payload, peer)
+    response, _ = sock.recvfrom(516)
+    if response != b"\x00\x04\x00\x01":
+        raise SystemExit(f"invalid TFTP DATA ACK: {response[:8].hex()}")
+PY
+}
+
 deadline=$((SECONDS + duration))
 round=1
 while (( round <= repeat || (duration > 0 && SECONDS < deadline) )); do
@@ -568,6 +591,9 @@ for index in "${!udp_ports[@]}"; do
         record_response_size udp "$name" "$(wc -c <"$response" | tr -d ' ')"
     else
         record_response_size udp "$name" 0
+    fi
+    if [[ "$name" == tftp ]]; then
+        run_tftp_wrq "${udp_ports[$index]}" "matrix-$round.bin"
     fi
 done
 

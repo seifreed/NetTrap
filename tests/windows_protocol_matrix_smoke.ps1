@@ -432,6 +432,40 @@ function Invoke-UdpProbe([string] $Name, [int] $Port, [byte[]] $Payload, [bool] 
     }
 }
 
+function Invoke-TftpWriteProbe([int] $Port, [string] $Filename) {
+    $udp = [System.Net.Sockets.UdpClient]::new()
+    try {
+        $udp.Client.ReceiveTimeout = 5000
+        $endpoint = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Loopback, $Port)
+        $wrq = [System.Collections.Generic.List[byte]]::new()
+        [void]$wrq.Add(0); [void]$wrq.Add(2)
+        $filenameBytes = [Text.Encoding]::ASCII.GetBytes($Filename)
+        $wrq.AddRange($filenameBytes)
+        [void]$wrq.Add(0)
+        $wrq.AddRange([Text.Encoding]::ASCII.GetBytes("octet"))
+        [void]$wrq.Add(0)
+        [void]$udp.Send($wrq.ToArray(), $wrq.Count, $endpoint)
+        $response = $udp.Receive([ref]$endpoint)
+        if ($response.Length -ne 4 -or $response[0] -ne 0 -or $response[1] -ne 4 -or
+            $response[2] -ne 0 -or $response[3] -ne 0) {
+            throw "invalid TFTP WRQ ACK"
+        }
+
+        $payload = [Text.Encoding]::ASCII.GetBytes("matrix-tftp")
+        $data = [System.Collections.Generic.List[byte]]::new()
+        [void]$data.Add(0); [void]$data.Add(3); [void]$data.Add(0); [void]$data.Add(1)
+        $data.AddRange($payload)
+        [void]$udp.Send($data.ToArray(), $data.Count, $endpoint)
+        $response = $udp.Receive([ref]$endpoint)
+        if ($response.Length -ne 4 -or $response[0] -ne 0 -or $response[1] -ne 4 -or
+            $response[2] -ne 0 -or $response[3] -ne 1) {
+            throw "invalid TFTP DATA ACK"
+        }
+    } finally {
+        $udp.Dispose()
+    }
+}
+
 function Invoke-SocksConnectProbe([int] $Port) {
     $client = [System.Net.Sockets.TcpClient]::new()
     $client.ReceiveTimeout = 5000
@@ -666,6 +700,9 @@ try {
             $expectResponse = $udpCaptureOnly -notcontains $name
             $payload = [byte[]](Get-UdpPayload $name)
             Invoke-UdpProbe $name $udpPorts[$name] $payload $expectResponse
+            if ($name -eq "tftp" -and $expectResponse) {
+                Invoke-TftpWriteProbe $udpPorts[$name] "matrix-$round.bin"
+            }
         }
 
         Invoke-TcpMalformedBurst @($tcpPorts.Values)
