@@ -10,6 +10,7 @@ grep -Fq '          type: RuntimeDefault' "$manifest"
 grep -Fq '          allowPrivilegeEscalation: false' "$manifest"
 grep -Fq '          readOnlyRootFilesystem: true' "$manifest"
 grep -Fq '            - ALL' "$manifest"
+grep -Fq '        prometheus.io/port: "9091"' "$manifest"
 grep -Fq '    iptables' "$runtime_image"
 grep -Fq '    nftables' "$runtime_image"
 

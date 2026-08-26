@@ -17,7 +17,7 @@ spec:
         component: honeypot
       annotations:
         prometheus.io/scrape: "true"
-        prometheus.io/port: "9090"
+        prometheus.io/port: "9091"
         prometheus.io/path: "/metrics"
     spec:
       automountServiceAccountToken: false
