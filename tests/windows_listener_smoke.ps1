@@ -14,6 +14,7 @@ $workDir = Join-Path $runnerTemp "nettrap-listener-smoke"
 $configPath = Join-Path $workDir "config.toml"
 $smtpDir = Join-Path $workDir "smtp"
 $messagePath = Join-Path $workDir "message.eml"
+$eventsPath = Join-Path $workDir "events.jsonl"
 $httpV6BodyPath = Join-Path $workDir "http-v6.body"
 $stdoutPath = Join-Path $workDir "stdout.log"
 $stderrPath = Join-Path $workDir "stderr.log"
@@ -27,6 +28,7 @@ default_decision = "emulate"
 pcap_enabled = false
 output_format = "jsonl"
 smtp_dir = "$($smtpDir.Replace('\', '/'))"
+output_path = "$($eventsPath.Replace('\', '/'))"
 
 [[listeners]]
 name = "dns-smoke"
@@ -341,6 +343,12 @@ try {
         "imap://127.0.0.1:1143/" 2>&1
     if ($LASTEXITCODE -ne 67 -or ($imapResult -join "`n") -notmatch "Access denied") {
         throw "IMAP client auth probe did not return the expected denial"
+    }
+
+    Stop-NetTrap
+    if (-not (Test-Path -LiteralPath $eventsPath -PathType Leaf) -or
+        (Get-Item -LiteralPath $eventsPath).Length -le 0) {
+        throw "Windows listener smoke did not persist JSONL events"
     }
 
     Write-Host "PASS: Windows IPv4/IPv6 TCP/UDP plus SMTP/FTP/POP3/IMAP client parity smoke"
