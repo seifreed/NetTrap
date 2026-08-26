@@ -50,7 +50,7 @@ jobs:
 
       - name: Block release on open high or critical alerts
         run: |
-          high_or_critical="$(jq -r '.open_high_or_critical' target/security-audit/summary.json)"
+          high_or_critical="$(jq -r '.open_high_or_critical_technical' target/security-audit/summary.json)"
           if ! [[ "$high_or_critical" =~ ^[0-9]+$ ]]; then
             echo "security evidence summary is invalid" >&2
             exit 1

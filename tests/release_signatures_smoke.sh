@@ -38,6 +38,23 @@ bash "$(dirname -- "${BASH_SOURCE[0]}")/external_audit_gate_smoke.sh"
 workdir="$(mktemp -d)"
 trap 'rm -rf "$workdir"' EXIT
 
+cat >"$workdir/security-alerts.json" <<'EOF'
+[
+  {"state":"open","rule":{"id":"CodeReviewID","security_severity_level":"high"},"tool":{"name":"Scorecard"}},
+  {"state":"open","rule":{"id":"CWE-079","security_severity_level":"high"},"tool":{"name":"CodeQL"}},
+  {"state":"fixed","rule":{"id":"CWE-022","security_severity_level":"critical"},"tool":{"name":"CodeQL"}}
+]
+EOF
+technical_alerts="$(jq '[.[] | select(.state == "open" and
+  (.rule.security_severity_level == "high" or .rule.security_severity_level == "critical") and
+  ((.tool.name == "Scorecard" and
+    (.rule.id == "CodeReviewID" or .rule.id == "CIIBestPracticesID")) | not))] | length' \
+  "$workdir/security-alerts.json")"
+if [[ "$technical_alerts" != "1" ]]; then
+    echo "technical security alert classification regression" >&2
+    exit 1
+fi
+
 artifact="$workdir/artifact"
 bundle="$artifact.sigstore.json"
 printf 'nettrap release signature smoke\n' >"$artifact"

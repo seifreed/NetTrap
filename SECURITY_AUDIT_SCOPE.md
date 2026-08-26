@@ -49,6 +49,11 @@ alert set for an auditor handoff; generated files are intentionally kept under
 The release workflow verifies Sigstore bundles, GitHub artifact attestations,
 SBOMs, and checksums before publishing.
 
+The security evidence keeps the complete Code Scanning alert count. Release
+admission blocks open high or critical technical findings; Scorecard's
+`CodeReviewID` and `CIIBestPracticesID` process checks remain visible in the
+evidence but are not exploitable-code findings.
+
 Tagged releases also require `SECURITY_AUDIT_REPORT.md` (or the path supplied by
 `NETTRAP_EXTERNAL_AUDIT_REPORT`). `scripts/verify-external-audit.sh` rejects a
 missing, undated, placeholder, or incomplete report before publication. This

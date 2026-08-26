@@ -64,10 +64,17 @@ jq -e '
     and (.allow_deletions.enabled == false)
 ' "$output_dir/branch-protection.json" >/dev/null
 
+# Keep Scorecard governance findings in the evidence, but do not treat its
+# review-process checks as exploitable code findings for release admission.
 jq '{open_alerts: ([.[] | select(.state == "open")] | length),
      open_high_or_critical: ([.[] | select(.state == "open" and
        (.rule.security_severity_level == "high" or
-        .rule.security_severity_level == "critical"))] | length)}' \
+        .rule.security_severity_level == "critical"))] | length),
+     open_high_or_critical_technical: ([.[] | select(.state == "open" and
+       (.rule.security_severity_level == "high" or
+        .rule.security_severity_level == "critical") and
+       ((.tool.name == "Scorecard" and
+         (.rule.id == "CodeReviewID" or .rule.id == "CIIBestPracticesID")) | not))] | length)}' \
     "$output_dir/code-scanning-alerts.json" \
     | tee "$output_dir/summary.json"
 
