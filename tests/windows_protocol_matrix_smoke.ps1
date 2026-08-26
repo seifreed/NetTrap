@@ -150,6 +150,36 @@ function Read-Bytes($Stream) {
     return [byte[]]$buffer[0..($count - 1)]
 }
 
+function Read-Exact($Stream, [int] $Count) {
+    $buffer = [byte[]]::new($Count)
+    $offset = 0
+    while ($offset -lt $Count) {
+        try {
+            $read = $Stream.Read($buffer, $offset, $Count - $offset)
+        } catch [System.IO.IOException] {
+            throw "stream timed out while reading $Count bytes"
+        }
+        if ($read -le 0) {
+            throw "stream closed while reading $Count bytes"
+        }
+        $offset += $read
+    }
+    return $buffer
+}
+
+function Read-DnsTcpResponse($Stream) {
+    $prefix = Read-Exact $Stream 2
+    $length = ($prefix[0] -shl 8) -bor $prefix[1]
+    if ($length -lt 12) {
+        throw "DNS TCP response declared an invalid length"
+    }
+    $frame = [byte[]]::new($length + 2)
+    [Array]::Copy($prefix, 0, $frame, 0, 2)
+    $body = Read-Exact $Stream $length
+    [Array]::Copy($body, 0, $frame, 2, $length)
+    return $frame
+}
+
 function Record-ResponseSize([string] $Transport, [string] $Name, [int] $Size) {
     $minimum = if ($Transport -eq "tcp") { $script:tcpResponseMin } else { $script:udpResponseMin }
     $maximum = if ($Transport -eq "tcp") { $script:tcpResponseMax } else { $script:udpResponseMax }
@@ -328,7 +358,11 @@ function Invoke-TcpProbe([string] $Name, [int] $Port, [byte[]] $Payload, [bool] 
             Record-ResponseSize "tcp" $Name 0
             return
         }
-        $response = Read-Bytes $stream
+        $response = if ($Name -eq "dns") {
+            Read-DnsTcpResponse $stream
+        } else {
+            Read-Bytes $stream
+        }
         if ($response.Length -eq 0) {
             throw "TCP listener on port $Port returned no response"
         }
