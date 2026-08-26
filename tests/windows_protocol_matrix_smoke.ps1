@@ -153,6 +153,68 @@ function Record-ResponseSize([string] $Transport, [string] $Name, [int] $Size) {
     if ($Size -gt $maximum[$Name]) { $maximum[$Name] = $Size }
 }
 
+function Assert-TcpResponse([string] $Name, [byte[]] $Response) {
+    if ($Response.Length -eq 0) {
+        throw "TCP listener on port $($tcpPorts[$Name]) returned an empty response"
+    }
+    $text = [Text.Encoding]::ASCII.GetString($Response)
+    switch ($Name) {
+        "http" { if ($text -notmatch '^HTTP/1\.[01] \d{3}') { throw "invalid HTTP response" } }
+        "upnp" { if ($text -notmatch '^HTTP/1\.[01] 200') { throw "invalid UPnP response" } }
+        "smtp" { if ($text -notmatch '^(220|250)') { throw "invalid SMTP response" } }
+        "ftp" { if ($text -notmatch '^(220|215|200|221)') { throw "invalid FTP response" } }
+        "pop3" { if ($text -notmatch '^\+OK') { throw "invalid POP3 response" } }
+        "imap" { if ($text -notmatch '^\* (OK|CAPABILITY)') { throw "invalid IMAP response" } }
+        "irc" { if ($text -notmatch '\s001\s') { throw "invalid IRC response" } }
+        "finger" { if ($text -notmatch 'Login:') { throw "invalid finger response" } }
+        "ident" { if ($text -notmatch 'USERID') { throw "invalid ident response" } }
+        "daytime" { if ($text -notmatch '\d{2}:\d{2}:\d{2}') { throw "invalid daytime response" } }
+        "time" { if ($Response.Length -lt 4) { throw "invalid RFC 868 response" } }
+        "chargen" { if ($text.Length -lt 1) { throw "invalid chargen response" } }
+        "quotd" { if ($text.Length -lt 1) { throw "invalid QOTD response" } }
+        "ssh" { if ($text -notmatch '^SSH-2\.0-') { throw "invalid SSH response" } }
+        "redis" { if ($text -notmatch '^\+PONG') { throw "invalid Redis response" } }
+        "memcached" { if ($text -notmatch '^VERSION ') { throw "invalid Memcached response" } }
+        "socks" { if ($Response.Length -lt 2 -or $Response[0] -ne 0x05) { throw "invalid SOCKS response" } }
+        "ldap" { if ($Response[0] -ne 0x30) { throw "invalid LDAP response" } }
+        "mqtt" { if ($Response[0] -ne 0x20) { throw "invalid MQTT response" } }
+        "nkn" {
+            try { $null = $text | ConvertFrom-Json -ErrorAction Stop }
+            catch { throw "invalid NKN JSON-RPC response" }
+        }
+        "rdp" { if ($Response[0] -ne 0x03) { throw "invalid RDP response" } }
+    }
+}
+
+function Assert-UdpResponse([string] $Name, [byte[]] $Response) {
+    if ($Response.Length -eq 0) {
+        throw "UDP listener on port $($udpPorts[$Name]) returned an empty response"
+    }
+    $text = [Text.Encoding]::ASCII.GetString($Response)
+    switch ($Name) {
+        "dns" { if ($Response.Length -lt 12 -or ($Response[2] -band 0x80) -eq 0) { throw "invalid DNS response" } }
+        "tftp" {
+            $opcode = ($Response[0] -shl 8) -bor $Response[1]
+            if ($Response.Length -lt 4 -or $opcode -notin @(3, 5)) { throw "invalid TFTP response" }
+        }
+        "snmp" { if ($Response[0] -ne 0x30 -or -not ($Response -contains [byte]0xA2)) { throw "invalid SNMP response" } }
+        "sip" { if ($text -notmatch '^SIP/2\.0 200') { throw "invalid SIP response" } }
+        "ntp" {
+            if ($Response.Length -lt 48 -or ($Response[0] -band 0x07) -ne 4) { throw "invalid NTP response" }
+        }
+        "coap" {
+            if ($Response.Length -lt 5 -or ($Response[0] -shr 6) -ne 1 -or $Response[1] -lt 0x40) {
+                throw "invalid CoAP response"
+            }
+        }
+        "daytime" { if ($text -notmatch '\d{2}:\d{2}:\d{2}') { throw "invalid daytime response" } }
+        "time" { if ($Response.Length -lt 4) { throw "invalid RFC 868 response" } }
+        "chargen" { if ($Response.Length -lt 1) { throw "invalid chargen response" } }
+        "quotd" { if ($Response.Length -lt 1) { throw "invalid QOTD response" } }
+        "raw" { if ($text -notmatch 'probe') { throw "invalid raw UDP response" } }
+    }
+}
+
 function Invoke-TcpProbe([string] $Name, [int] $Port, [byte[]] $Payload, [bool] $ServerFirst, [bool] $ExpectResponse) {
     $client = [System.Net.Sockets.TcpClient]::new()
     $client.ReceiveTimeout = 5000
@@ -166,6 +228,7 @@ function Invoke-TcpProbe([string] $Name, [int] $Port, [byte[]] $Payload, [bool] 
                 throw "server-first listener on port $Port returned no greeting"
             }
             if ($ExpectResponse) {
+                Assert-TcpResponse $Name $greeting
                 Record-ResponseSize "tcp" $Name $greeting.Length
             } else {
                 Record-ResponseSize "tcp" $Name 0
@@ -192,6 +255,7 @@ function Invoke-TcpProbe([string] $Name, [int] $Port, [byte[]] $Payload, [bool] 
         if ($response.Length -eq 0) {
             throw "TCP listener on port $Port returned no response"
         }
+        Assert-TcpResponse $Name $response
         if (-not $script:tcpObservedResponses.Contains($Name)) {
             [void]$script:tcpObservedResponses.Add($Name)
         }
@@ -216,6 +280,7 @@ function Invoke-UdpProbe([string] $Name, [int] $Port, [byte[]] $Payload, [bool] 
         if ($response.Length -eq 0) {
             throw "UDP listener on port $Port returned no response"
         }
+        Assert-UdpResponse $Name $response
         if (-not $script:udpObservedResponses.Contains($Name)) {
             [void]$script:udpObservedResponses.Add($Name)
         }
