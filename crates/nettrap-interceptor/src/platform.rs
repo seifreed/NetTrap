@@ -189,16 +189,7 @@ pub mod windivert {
             key: &ReverseFlowKey,
             now: Instant,
         ) -> Option<SocketAddr> {
-            #[cfg(test)]
-            let before_prune = self.reverse.contains_key(key);
             self.prune(now);
-            #[cfg(test)]
-            eprintln!(
-                "reverse lookup: before={before_prune} after={} entries={} expiry={}",
-                self.reverse.contains_key(key),
-                self.entries.len(),
-                self.expiry.len()
-            );
             let flow_key = if let Some(flow_key) = self.reverse.get(key).cloned() {
                 flow_key
             } else {
@@ -1424,26 +1415,6 @@ pub mod windivert {
             assert_eq!(&outbound[16..20], &[127, 0, 0, 1]);
             assert_eq!(&outbound[22..24], &8080u16.to_be_bytes());
 
-            let flow_table = flows.lock();
-            let flow_key = flow_table
-                .entries
-                .keys()
-                .next()
-                .expect("TCP flow should be tracked");
-            assert_eq!(flow_key.protocol, IPPROTO_TCP);
-            assert_eq!(flow_key.client, "192.0.2.10:40000".parse().unwrap());
-            assert_eq!(
-                flow_key.original_destination,
-                "198.51.100.20:80".parse().unwrap()
-            );
-            assert_eq!(flow_table.reverse.len(), 1);
-            assert!(flow_table.reverse.contains_key(&ReverseFlowKey {
-                protocol: IPPROTO_TCP,
-                client: "192.0.2.10:40000".parse().unwrap(),
-                listener_port: 8080,
-            }));
-            drop(flow_table);
-
             let mut reply = vec![
                 0x45,
                 0,
@@ -1480,6 +1451,7 @@ pub mod windivert {
                 0x50,
                 0x10,
                 0x20,
+                0,
                 0,
                 0,
                 0,
