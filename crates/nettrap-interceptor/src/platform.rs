@@ -876,7 +876,7 @@ pub mod windivert {
     }
 
     fn build_filter(config: &InterceptorConfig) -> Result<String> {
-        let mut clauses = vec!["(ip or ipv6) and (tcp or udp)".to_string()];
+        let mut clauses = vec!["(ip or ipv6) and (tcp or udp) and !impostor".to_string()];
 
         if let Some(iface) = &config.interface
             && let Some(ifidx) = parse_windivert_interface_index(Some(iface.as_str()))?
@@ -1051,7 +1051,7 @@ pub mod windivert {
 
             assert_eq!(
                 build_filter(&config).unwrap(),
-                "(ip or ipv6) and (tcp or udp) and ifIdx == 7"
+                "(ip or ipv6) and (tcp or udp) and !impostor and ifIdx == 7"
             );
         }
 
@@ -1064,7 +1064,7 @@ pub mod windivert {
 
             assert_eq!(
                 build_filter(&config).unwrap(),
-                "(ip or ipv6) and (tcp or udp)"
+                "(ip or ipv6) and (tcp or udp) and !impostor"
             );
         }
 
