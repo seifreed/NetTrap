@@ -317,7 +317,12 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Run tests
-        run: cargo test --all --target ${{ matrix.target }} -- --test-threads=1
+        run: |
+          if ("${{ matrix.arch }}" -eq "arm64") {
+            $env:RUSTFLAGS = "-C link-arg=/DELAYLOAD:wpcap.dll -C link-arg=/DEFAULTLIB:delayimp.lib"
+          }
+          cargo test --all --target ${{ matrix.target }} -- --test-threads=1
+        shell: pwsh
 
       - name: Create config for testing
         run: |

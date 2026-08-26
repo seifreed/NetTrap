@@ -183,6 +183,8 @@ jobs:
         run: bash scripts/sign_macos.sh "target/${{ matrix.target }}/release/nettrap"
 
       - name: Run platform tests
+        env:
+          RUSTFLAGS: ${{ runner.os == 'Windows' && matrix.arch == 'arm64' && '-C link-arg=/DELAYLOAD:wpcap.dll -C link-arg=/DEFAULTLIB:delayimp.lib' || '' }}
         run: cargo test --all --locked --target ${{ matrix.target }} -- --test-threads=1
 
       - name: Smoke test binary
