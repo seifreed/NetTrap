@@ -229,6 +229,8 @@ if not event_path.is_file():
     raise SystemExit(f"event log is missing: {event_path}")
 
 seen = set()
+policy_seen = set()
+policy_decisions = set()
 for line_number, line in enumerate(event_path.read_text(encoding="utf-8").splitlines(), 1):
     try:
         event = json.loads(line)
@@ -236,6 +238,11 @@ for line_number, line in enumerate(event_path.read_text(encoding="utf-8").splitl
         raise SystemExit(f"invalid event JSON on line {line_number}: {error}") from error
     listener = event.get("listener")
     event_name = event.get("event")
+    if isinstance(listener, str) and event_name == "policy_decision":
+        policy_seen.add(listener)
+        detail = event.get("detail")
+        if isinstance(detail, str) and "decision=" in detail:
+            policy_decisions.add(detail.split("decision=", 1)[1].split(" ", 1)[0])
     handler_activity = "event_id" in event or (
         isinstance(event_name, str) and event_name not in {"connect", "policy_decision"}
     )
@@ -245,6 +252,15 @@ for line_number, line in enumerate(event_path.read_text(encoding="utf-8").splitl
 missing = sorted(expected - seen)
 if missing:
     raise SystemExit(f"event log is missing handler activity: {', '.join(missing)}")
+missing_policy = sorted(expected - policy_seen)
+if missing_policy:
+    raise SystemExit(
+        f"event log is missing policy decisions: {', '.join(missing_policy)}"
+    )
+if policy_decisions != {"emulate"}:
+    raise SystemExit(
+        f"unexpected protocol matrix policy decisions: {', '.join(sorted(policy_decisions))}"
+    )
 PY
 }
 
@@ -682,7 +698,7 @@ if [[ -n "${NETTRAP_MATRIX_REPORT:-}" ]]; then
     tcp_malformed_probes=$(( ${#tcp_ports[@]} * rounds_completed ))
     udp_malformed_probes=$(( ${#udp_ports[@]} * rounds_completed ))
     {
-        printf 'schema=5\n'
+        printf 'schema=6\n'
         printf 'rounds_completed=%s\n' "$rounds_completed"
         printf 'tcp_handlers=%s\n' "${#tcp_names[@]}"
         printf 'udp_handlers=%s\n' "${#udp_names[@]}"
@@ -703,6 +719,7 @@ if [[ -n "${NETTRAP_MATRIX_REPORT:-}" ]]; then
         printf 'tcp_malformed_probes=%s\n' "$tcp_malformed_probes"
         printf 'udp_malformed_probes=%s\n' "$udp_malformed_probes"
         printf 'stateful_probes=socks_connect,memcached_set,tftp_wrq\n'
+        printf 'policy_decisions=emulate\n'
         printf 'tcp_names=%s\n' "$(IFS=,; echo "${tcp_names[*]}")"
         printf 'udp_names=%s\n' "$(IFS=,; echo "${udp_names[*]}")"
         printf 'tcp_capture_only=%s\n' "$(IFS=,; echo "${tcp_capture_only[*]}")"

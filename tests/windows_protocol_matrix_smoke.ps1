@@ -385,7 +385,9 @@ function Invoke-TcpProbe([string] $Name, [int] $Port, [byte[]] $Payload, [bool] 
             $stream.Flush()
         }
         if (-not $ExpectResponse) {
-            Record-ResponseSize "tcp" $Name 0
+            if ($tcpCaptureOnly -contains $Name) {
+                Record-ResponseSize "tcp" $Name 0
+            }
             return
         }
         $response = if ($Name -eq "dns") {
@@ -414,7 +416,9 @@ function Invoke-UdpProbe([string] $Name, [int] $Port, [byte[]] $Payload, [bool] 
         $endpoint = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Loopback, $Port)
         [void]$udp.Send($Payload, $Payload.Length, $endpoint)
         if (-not $ExpectResponse) {
-            Record-ResponseSize "udp" $Name 0
+            if ($udpCaptureOnly -contains $Name) {
+                Record-ResponseSize "udp" $Name 0
+            }
             return
         }
         $response = $udp.Receive([ref]$endpoint)
@@ -732,6 +736,8 @@ try {
         throw "event log is missing: $eventLogPath"
     }
     $seenEventListeners = [System.Collections.Generic.HashSet[string]]::new()
+    $seenPolicyListeners = [System.Collections.Generic.HashSet[string]]::new()
+    $policyDecisions = [System.Collections.Generic.HashSet[string]]::new()
     $lineNumber = 0
     foreach ($line in Get-Content -LiteralPath $eventLogPath) {
         $lineNumber++
@@ -742,6 +748,14 @@ try {
         }
         $hasEventId = $event.PSObject.Properties.Name -contains "event_id"
         $eventName = $event.event
+        if ($event.listener -is [string] -and $eventName -eq "policy_decision") {
+            [void]$seenPolicyListeners.Add($event.listener)
+            $detail = if ($event.detail -is [string]) { $event.detail } else { "" }
+            $decisionMatch = [regex]::Match($detail, '(?:^|\s)decision=([^\s]+)')
+            if ($decisionMatch.Success) {
+                [void]$policyDecisions.Add($decisionMatch.Groups[1].Value)
+            }
+        }
         $handlerActivity = $hasEventId -or (($eventName -is [string]) -and
             $eventName -notin @("connect", "policy_decision"))
         if ($event.listener -is [string] -and $handlerActivity) {
@@ -752,11 +766,19 @@ try {
     if ($missingEventListeners.Count -gt 0) {
         throw "event log is missing handler activity: $($missingEventListeners -join ', ')"
     }
+    $missingPolicyListeners = @($expectedEventListeners |
+        Where-Object { -not $seenPolicyListeners.Contains($_) })
+    if ($missingPolicyListeners.Count -gt 0) {
+        throw "event log is missing policy decisions: $($missingPolicyListeners -join ', ')"
+    }
+    if ($policyDecisions.Count -ne 1 -or -not $policyDecisions.Contains("emulate")) {
+        throw "unexpected protocol matrix policy decisions: $($policyDecisions -join ', ')"
+    }
     Stop-NetTrap
     Test-ArtifactExports
     if ($env:NETTRAP_MATRIX_REPORT) {
         @(
-            "schema=5"
+            "schema=6"
             "rounds_completed=$roundsCompleted"
             "tcp_handlers=$($tcpNames.Count)"
             "udp_handlers=$($udpNames.Count)"
@@ -769,6 +791,7 @@ try {
             "tcp_malformed_probes=$($tcpNames.Count * $roundsCompleted)"
             "udp_malformed_probes=$($udpNames.Count * $roundsCompleted)"
             "stateful_probes=socks_connect,memcached_set,tftp_wrq"
+            "policy_decisions=emulate"
             "tcp_names=$($tcpNames -join ',')"
             "udp_names=$($udpNames -join ',')"
             "tcp_capture_only=$($tcpCaptureOnly -join ',')"

@@ -24,8 +24,9 @@ REQUIRED_KEYS = {
     "tcp_capture_only",
     "udp_capture_only",
     "event_listeners",
+    "policy_decisions",
 }
-EXPECTED_SCHEMA = "5"
+EXPECTED_SCHEMA = "6"
 EXPECTED_STATEFUL_PROBES = "socks_connect,memcached_set,tftp_wrq"
 
 
@@ -150,7 +151,18 @@ def canonical_response_sizes(report: dict[str, str], transport: str, path: Path)
             raise ValueError(
                 f"report {path} records an empty response for {transport} handler {name}"
             )
-    return ",".join(f"{name}:{entries[name][0]}-{entries[name][1]}" for name in names)
+    def size_class(minimum: int, maximum: int) -> str:
+        if maximum == 0:
+            return "empty"
+        if maximum < 128:
+            return "small"
+        if maximum < 512:
+            return "medium"
+        return "large"
+
+    return ",".join(
+        f"{name}:{size_class(entries[name][0], entries[name][1])}" for name in names
+    )
 
 
 def main() -> int:
@@ -176,6 +188,13 @@ def main() -> int:
             print(
                 f"unsupported stateful protocol contract in {path}: "
                 f"{report['stateful_probes']!r}; expected {EXPECTED_STATEFUL_PROBES!r}",
+                file=sys.stderr,
+            )
+            return 1
+        if report["policy_decisions"] != "emulate":
+            print(
+                f"unsupported policy decision contract in {path}: "
+                f"{report['policy_decisions']!r}; expected 'emulate'",
                 file=sys.stderr,
             )
             return 1
