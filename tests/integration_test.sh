@@ -9,6 +9,7 @@ echo ""
 FAILED=0
 PASSED=0
 TEST_CONFIG="$(mktemp /tmp/nettrap-integration.XXXXXX.toml)"
+ARTIFACT_DIR="$(mktemp -d /tmp/nettrap-integration-artifacts.XXXXXX)"
 SMTP_DIR="/tmp/nettrap-integration-smtp"
 SMTP_MESSAGE="/tmp/nettrap-integration-message.eml"
 IRC_PORT=16667
@@ -48,7 +49,7 @@ cleanup() {
         wait "$NETTRAP_PID" 2>/dev/null || true
     fi
     rm -f /tmp/test_output.txt "$TEST_CONFIG" "$SMTP_MESSAGE"
-    rm -rf "$SMTP_DIR"
+    rm -rf "$SMTP_DIR" "$ARTIFACT_DIR"
 }
 
 trap cleanup EXIT
@@ -481,7 +482,29 @@ run_full_protocol_matrix() {
         NETTRAP_BIN=nettrap "$matrix_script"
 }
 
-sed '/^output_format =/a smtp_dir = "/tmp/nettrap-integration-smtp"' \
+run_artifact_exports() {
+    kill -TERM "$NETTRAP_PID" 2>/dev/null || true
+    wait "$NETTRAP_PID" 2>/dev/null || true
+    NETTRAP_PID=""
+
+    local events="$ARTIFACT_DIR/events.jsonl"
+    test -s "$events"
+    test -s "$ARTIFACT_DIR/events.html"
+    test -s "$ARTIFACT_DIR/events.toon"
+    test -s "$ARTIFACT_DIR/events.sarif.json"
+    test -s "$ARTIFACT_DIR/events.csv"
+    test -s "$ARTIFACT_DIR/traffic.pcap"
+
+    for format in json jsonl toon sarif csv; do
+        nettrap report -i "$events" -o "$ARTIFACT_DIR/report.$format" --format "$format" >/dev/null
+        test -s "$ARTIFACT_DIR/report.$format"
+    done
+
+    nettrap pcap -i "$ARTIFACT_DIR/traffic.pcap" -o "$ARTIFACT_DIR/replayed.jsonl" >/dev/null
+    test -s "$ARTIFACT_DIR/replayed.jsonl"
+}
+
+sed 's/^output_format =.*/output_format = "toon"/; s/^pcap_enabled =.*/pcap_enabled = true/; /^output_format =/a output_path = "'"$ARTIFACT_DIR"'/events.jsonl"\npcap_path = "'"$ARTIFACT_DIR"'/traffic.pcap"\nsmtp_dir = "/tmp/nettrap-integration-smtp"' \
     /etc/nettrap/config.toml >"$TEST_CONFIG"
 cat >>"$TEST_CONFIG" <<'EOF'
 
@@ -957,6 +980,9 @@ echo ""
 echo "--- Complete Protocol Matrix ---"
 
 run_test "All protocol handlers hostile matrix" run_full_protocol_matrix
+
+echo "--- Artifact Output Tests ---"
+run_test "Report and PCAP artifact exports" run_artifact_exports
 
 echo ""
 
