@@ -223,7 +223,8 @@ jobs:
           mkdir -p package
           cp "target/${{ matrix.target }}/release/nettrap" \
             LICENSE README.md CHANGELOG.md SECURITY.md KNOWN_LIMITATIONS.md \
-            THIRD_PARTY_NOTICES.md PLATFORM_SUPPORT.md PROTOCOL_SUPPORT.md package/
+            SECURITY_AUDIT_SCOPE.md THIRD_PARTY_NOTICES.md PLATFORM_SUPPORT.md \
+            PROTOCOL_SUPPORT.md package/
           "target/${{ matrix.target }}/release/nettrap" config --defaults > package/config.toml
           tar -czf "nettrap-${{ matrix.name }}.tar.gz" -C package .
           cp "target/${{ matrix.target }}/release/nettrap" "nettrap-${{ matrix.name }}.binary"
@@ -245,7 +246,7 @@ jobs:
           $releaseFiles = @(
             "target/${{ matrix.target }}/release/nettrap.exe",
             "LICENSE", "README.md", "CHANGELOG.md", "SECURITY.md",
-            "KNOWN_LIMITATIONS.md", "THIRD_PARTY_NOTICES.md",
+            "KNOWN_LIMITATIONS.md", "SECURITY_AUDIT_SCOPE.md", "THIRD_PARTY_NOTICES.md",
             "PLATFORM_SUPPORT.md", "PROTOCOL_SUPPORT.md"
           )
           Copy-Item $releaseFiles -Destination package
@@ -281,6 +282,7 @@ jobs:
             "ChangelogPath=$((Resolve-Path "CHANGELOG.md").Path)",
             "SecurityPath=$((Resolve-Path "SECURITY.md").Path)",
             "KnownLimitationsPath=$((Resolve-Path "KNOWN_LIMITATIONS.md").Path)",
+            "SecurityAuditScopePath=$((Resolve-Path "SECURITY_AUDIT_SCOPE.md").Path)",
             "ThirdPartyNoticesPath=$((Resolve-Path "THIRD_PARTY_NOTICES.md").Path)",
             "PlatformSupportPath=$((Resolve-Path "PLATFORM_SUPPORT.md").Path)",
             "ProtocolSupportPath=$((Resolve-Path "PROTOCOL_SUPPORT.md").Path)",
@@ -310,7 +312,7 @@ jobs:
           tar -xzf "nettrap-${{ matrix.name }}.tar.gz" -C "$clean_dir"
           test -x "$clean_dir/nettrap"
           test -s "$clean_dir/config.toml"
-          for document in LICENSE README.md CHANGELOG.md SECURITY.md KNOWN_LIMITATIONS.md THIRD_PARTY_NOTICES.md PLATFORM_SUPPORT.md PROTOCOL_SUPPORT.md; do
+          for document in LICENSE README.md CHANGELOG.md SECURITY.md KNOWN_LIMITATIONS.md SECURITY_AUDIT_SCOPE.md THIRD_PARTY_NOTICES.md PLATFORM_SUPPORT.md PROTOCOL_SUPPORT.md; do
             test -s "$clean_dir/$document"
           done
           "$clean_dir/nettrap" --version
@@ -350,7 +352,7 @@ jobs:
           Expand-Archive -Path "nettrap-${{ matrix.name }}.zip" -DestinationPath $cleanDir
           if (-not (Test-Path "$cleanDir/nettrap.exe")) { throw "Missing nettrap.exe" }
           if (-not (Test-Path "$cleanDir/config.toml")) { throw "Missing config.toml" }
-          foreach ($document in @("LICENSE", "README.md", "CHANGELOG.md", "SECURITY.md", "KNOWN_LIMITATIONS.md", "THIRD_PARTY_NOTICES.md", "PLATFORM_SUPPORT.md", "PROTOCOL_SUPPORT.md")) {
+          foreach ($document in @("LICENSE", "README.md", "CHANGELOG.md", "SECURITY.md", "KNOWN_LIMITATIONS.md", "SECURITY_AUDIT_SCOPE.md", "THIRD_PARTY_NOTICES.md", "PLATFORM_SUPPORT.md", "PROTOCOL_SUPPORT.md")) {
             if (-not (Test-Path "$cleanDir/$document")) { throw "Missing $document" }
           }
           if ("${{ matrix.arch }}" -eq "x64") {
