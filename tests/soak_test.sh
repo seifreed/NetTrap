@@ -43,6 +43,32 @@ assert_tcp_listeners_closed() {
     done
 }
 
+assert_udp_listeners_closed() {
+    local port closed
+    for port in "$@"; do
+        closed=false
+        for _ in $(seq 1 20); do
+            if python3 - "$port" <<'PY' >/dev/null 2>&1
+import socket
+import sys
+
+with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+    sock.bind(("127.0.0.1", int(sys.argv[1])))
+PY
+            then
+                closed=true
+                break
+            fi
+            sleep 0.25
+        done
+        if [[ "$closed" != true ]]; then
+            echo "FAIL: UDP listener remained open after shutdown on port $port" >&2
+            cat "$log" >&2
+            exit 1
+        fi
+    done
+}
+
 trap cleanup EXIT
 
 if [[ ! "$duration" =~ ^[1-9][0-9]*$ ]] || (( duration > 1800 )); then
@@ -244,5 +270,6 @@ fi
 assert_resource_bounds
 stop_nettrap
 assert_tcp_listeners_closed "$http_port" "$dns_tcp_port"
+assert_udp_listeners_closed "$dns_udp_port"
 
 echo "PASS: ${duration}s hostile soak completed (${http_requests} HTTP, ${dns_requests} DNS UDP, ${dns_tcp_requests} DNS TCP, ${malformed_requests} malformed requests, ${connection_churn}-connection churn)"
