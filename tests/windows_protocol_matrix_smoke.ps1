@@ -311,7 +311,7 @@ function Get-UdpPayload([string] $Name) {
 }
 
 function Is-ServerFirst([string] $Name) {
-    return @("smtp", "ftp", "pop3", "imap", "telnet", "ssh", "mysql", "daytime", "time", "chargen", "quotd") -contains $Name
+    return @("daytime", "time", "chargen", "quotd") -contains $Name
 }
 
 try {
