@@ -24,6 +24,11 @@ command -v jq >/dev/null 2>&1 || {
 }
 
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$output_dir/generated-at.txt"
+git rev-parse HEAD >"$output_dir/commit.txt"
+git diff --check >"$output_dir/diff-check.txt"
+cargo audit --version >"$output_dir/tool-versions.txt"
+cargo deny --version >>"$output_dir/tool-versions.txt"
+gh --version | head -n 1 >>"$output_dir/tool-versions.txt"
 cargo audit --json >"$output_dir/cargo-audit.json"
 cargo deny check >"$output_dir/cargo-deny.txt" 2>&1
 gh api "repos/$repo/branches/main/protection" >"$output_dir/branch-protection.json"
