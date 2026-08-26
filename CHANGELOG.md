@@ -46,8 +46,8 @@ event contracts before `1.0.0`.
 
 ### Security
 
-- Windows `--intercept` now fails closed instead of opening the incomplete
-  WinDivert path.
+- Windows x86_64 `--intercept` now uses the bounded experimental WinDivert
+  TCP/UDP NAT path; full outbound routing remains a privileged-runner check.
 - DNS query summaries reject non-EDNS additional records before invoking the
   third-party parser, avoiding malformed TSIG panic paths.
 - Kubernetes and Docker examples no longer grant packet/network capabilities.
