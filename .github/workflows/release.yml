@@ -69,6 +69,16 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
 
+  external-security-audit:
+    name: External Security Audit Evidence
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Require independent audit report
+        run: bash scripts/verify-external-audit.sh
+
   e2e:
     name: End-to-End Tests
     needs: [quality-gates, security-audit]
@@ -623,7 +633,7 @@ jobs:
 
   publish:
     name: Publish Draft Release
-    needs: [build, e2e, image-manifest, protocol-parity, quality-gates, security-audit]
+    needs: [build, e2e, image-manifest, protocol-parity, quality-gates, security-audit, external-security-audit]
     runs-on: ubuntu-latest
     permissions:
       artifact-metadata: write

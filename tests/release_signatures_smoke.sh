@@ -18,6 +18,8 @@ for marker in \
     "Block release on open high or critical alerts" \
     "bash scripts/security-evidence.sh target/security-audit" \
     "Upload release security evidence" \
+    "Require independent audit report" \
+    "scripts/verify-external-audit.sh" \
     "Sign Windows MSI (Authenticode)" \
     "Get-AuthenticodeSignature -LiteralPath \"nettrap-\${{ matrix.name }}.msi\"" \
     "Packaged executable Authenticode verification failed" \
@@ -27,6 +29,8 @@ for marker in \
         exit 1
     fi
 done
+
+bash "$(dirname -- "${BASH_SOURCE[0]}")/external_audit_gate_smoke.sh"
 
 workdir="$(mktemp -d)"
 trap 'rm -rf "$workdir"' EXIT

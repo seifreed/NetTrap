@@ -49,6 +49,12 @@ alert set for an auditor handoff; generated files are intentionally kept under
 The release workflow verifies Sigstore bundles, GitHub artifact attestations,
 SBOMs, and checksums before publishing.
 
+Tagged releases also require `SECURITY_AUDIT_REPORT.md` (or the path supplied by
+`NETTRAP_EXTERNAL_AUDIT_REPORT`). `scripts/verify-external-audit.sh` rejects a
+missing, undated, placeholder, or incomplete report before publication. This
+gate deliberately fails until an independent auditor supplies the report; the
+repository does not claim that audit has been performed.
+
 ## Acceptance Criteria
 
 An independent review is complete only when the auditor provides a dated report
