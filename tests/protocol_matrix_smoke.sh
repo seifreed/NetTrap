@@ -11,6 +11,7 @@ log="$workdir/nettrap.log"
 nettrap_pid=""
 repeat="${NETTRAP_MATRIX_REPEAT:-1}"
 duration="${NETTRAP_MATRIX_DURATION_SECONDS:-0}"
+tcp_probe_timeout_seconds=5
 
 if [[ ! -r "$manifest" ]]; then
     echo "protocol matrix manifest is missing: $manifest" >&2
@@ -335,10 +336,10 @@ for index in "${!tcp_ports[@]}"; do
     write_tcp_probe "$name" "$request"
     case "$name" in
         daytime|time|chargen|quotd)
-            timeout 2 nc 127.0.0.1 "${tcp_ports[$index]}" >"$response" 2>/dev/null || true
+            timeout "$tcp_probe_timeout_seconds" nc 127.0.0.1 "${tcp_ports[$index]}" >"$response" 2>/dev/null || true
             ;;
         *)
-            timeout 2 nc 127.0.0.1 "${tcp_ports[$index]}" <"$request" >"$response" 2>/dev/null || true
+            timeout "$tcp_probe_timeout_seconds" nc -N 127.0.0.1 "${tcp_ports[$index]}" <"$request" >"$response" 2>/dev/null || true
             ;;
     esac
     if ! kill -0 "$nettrap_pid" 2>/dev/null; then
@@ -405,7 +406,7 @@ done
         head -c 4096 /dev/zero | tr '\0' 'A'
         printf ' HTTP/1.1\r\nHost: matrix.test\r\n\r\n'
     } >"$malformed_http"
-    timeout 2 nc 127.0.0.1 "${tcp_ports[1]}" <"$malformed_http" >/dev/null 2>&1 || true
+    timeout "$tcp_probe_timeout_seconds" nc -N 127.0.0.1 "${tcp_ports[1]}" <"$malformed_http" >/dev/null 2>&1 || true
     printf '\xff\x00\xff\x00' | timeout 2 nc -u -w 1 127.0.0.1 "${udp_ports[0]}" >/dev/null 2>&1 || true
     assert_resource_bounds
     round=$((round + 1))

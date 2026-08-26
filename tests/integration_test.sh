@@ -232,6 +232,10 @@ run_udp_hex_probe() {
     local port=$1
     local payload_hex=$2
     local minimum_bytes=$3
+    if [[ "$port" == "$SIP_UDP_PORT" ]]; then
+        run_sip_options
+        return
+    fi
     python3 - "$port" "$payload_hex" "$minimum_bytes" <<'PY'
 import socket
 import sys
@@ -272,10 +276,111 @@ run_udp_empty_probe() {
     run_udp_hex_probe "$1" "" "$2"
 }
 
-run_ntp_udp_probe() {
-    local payload_hex
-    payload_hex="1b$(printf '00%.0s' $(seq 1 47))"
-    run_udp_hex_probe "$NTP_UDP_PORT" "$payload_hex" 1
+run_tftp_rrq() {
+    python3 - "$TFTP_UDP_PORT" <<'PY'
+import socket
+import sys
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.settimeout(3)
+try:
+    sock.sendto(b"\x00\x01smoke.txt\x00octet\x00", ("127.0.0.1", int(sys.argv[1])))
+    response, _ = sock.recvfrom(65535)
+finally:
+    sock.close()
+
+if len(response) < 4 or int.from_bytes(response[:2], "big") not in (3, 5):
+    raise SystemExit(f"invalid TFTP RRQ response: {response[:8].hex()}")
+PY
+}
+
+run_snmp_get() {
+    python3 - "$SNMP_UDP_PORT" <<'PY'
+import socket
+import sys
+
+payload = bytes.fromhex(
+    "302602010004067075626c6963a019020101020100020100300e300c"
+    "06082b060102010101000500"
+)
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.settimeout(3)
+try:
+    sock.sendto(payload, ("127.0.0.1", int(sys.argv[1])))
+    response, _ = sock.recvfrom(65535)
+finally:
+    sock.close()
+
+if len(response) < 8 or response[0] != 0x30 or 0xA2 not in response:
+    raise SystemExit(f"invalid SNMP GET response: {response[:16].hex()}")
+PY
+}
+
+run_sip_options() {
+    python3 - "$SIP_UDP_PORT" <<'PY'
+import socket
+import sys
+
+payload = (
+    b"OPTIONS sip:matrix.test SIP/2.0\r\n"
+    b"Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-matrix\r\n"
+    b"From: <sip:matrix@matrix.test>;tag=matrix\r\n"
+    b"To: <sip:matrix@matrix.test>\r\n"
+    b"Call-ID: matrix-call\r\n"
+    b"CSeq: 1 OPTIONS\r\n"
+    b"Content-Length: 0\r\n\r\n"
+)
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.settimeout(3)
+try:
+    sock.sendto(payload, ("127.0.0.1", int(sys.argv[1])))
+    response, _ = sock.recvfrom(65535)
+finally:
+    sock.close()
+
+if not response.startswith(b"SIP/2.0 200 OK"):
+    raise SystemExit(f"invalid SIP OPTIONS response: {response[:80]!r}")
+PY
+}
+
+run_ntp_semantic_probe() {
+    python3 - "$NTP_UDP_PORT" <<'PY'
+import socket
+import sys
+
+request = bytes([0x1B]) + bytes(47)
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.settimeout(3)
+try:
+    sock.sendto(request, ("127.0.0.1", int(sys.argv[1])))
+    response, _ = sock.recvfrom(65535)
+finally:
+    sock.close()
+
+if len(response) < 48 or (response[0] & 0x07) != 4 or ((response[0] >> 3) & 0x07) != 3:
+    raise SystemExit(f"invalid NTP server response: {response[:8].hex()}")
+PY
+}
+
+run_coap_get() {
+    python3 - "$COAP_UDP_PORT" <<'PY'
+import socket
+import sys
+
+request = bytes.fromhex("41011234aa")
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.settimeout(3)
+try:
+    sock.sendto(request, ("127.0.0.1", int(sys.argv[1])))
+    response, _ = sock.recvfrom(65535)
+finally:
+    sock.close()
+
+if len(response) < 4 or (response[0] >> 6) != 1 or response[1] < 0x40:
+    raise SystemExit(f"invalid CoAP response: {response[:16].hex()}")
+if response[2:4] != request[2:4] or response[4] != request[4]:
+    raise SystemExit("CoAP response did not preserve message ID and token")
+PY
 }
 
 run_nkn_jsonrpc() {
@@ -657,19 +762,16 @@ echo ""
 
 echo "--- UDP Protocol Tests ---"
 
-run_test "TFTP RRQ" \
-    "run_udp_hex_probe $TFTP_UDP_PORT 0001736d6f6b652e747874006f6374657400 1"
+run_test "TFTP RRQ" run_tftp_rrq
 
-run_test "SNMP GET" \
-    "run_udp_hex_probe $SNMP_UDP_PORT 302602010004067075626c6963a019020101020100020100300e300c06082b060102010101000500 1"
+run_test "SNMP GET" run_snmp_get
 
 run_test "SIP OPTIONS" \
     "run_udp_hex_probe $SIP_UDP_PORT 4f5054494f4e53207369703a6d61747269782e74657374205349502f322e300d0a5669613a205349502f322e302f554450203132372e302e302e313a353036303b6272616e63683d7a39684734624b2d6d61747269780d0a46726f6d3a203c7369703a6d6174726978406d61747269782e746573743e3b7461673d6d61747269780d0a546f3a203c7369703a6d6174726978406d61747269782e746573743e0d0a43616c6c2d49443a206d61747269782d63616c6c0d0a435365713a2031204f5054494f4e530d0a436f6e74656e742d4c656e6774683a20300d0a0d0a 1"
 
-run_test "NTP request" run_ntp_udp_probe
+run_test "NTP request" run_ntp_semantic_probe
 
-run_test "CoAP request" \
-    "run_udp_hex_probe $COAP_UDP_PORT 41011234aa 1"
+run_test "CoAP request" run_coap_get
 
 run_test "Daytime UDP response" "run_udp_empty_probe $DAYTIME_UDP_PORT 1"
 
