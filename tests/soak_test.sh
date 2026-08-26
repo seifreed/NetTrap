@@ -13,11 +13,34 @@ log="$workdir/nettrap.log"
 nettrap_pid=""
 
 cleanup() {
+    stop_nettrap
+    rm -rf "$workdir"
+}
+
+stop_nettrap() {
     if [[ -n "$nettrap_pid" ]] && kill -0 "$nettrap_pid" 2>/dev/null; then
         kill -TERM "$nettrap_pid" 2>/dev/null || true
         wait "$nettrap_pid" 2>/dev/null || true
     fi
-    rm -rf "$workdir"
+}
+
+assert_tcp_listeners_closed() {
+    local port closed
+    for port in "$@"; do
+        closed=false
+        for _ in $(seq 1 20); do
+            if ! (echo >/dev/tcp/127.0.0.1/"$port") >/dev/null 2>&1; then
+                closed=true
+                break
+            fi
+            sleep 0.25
+        done
+        if [[ "$closed" != true ]]; then
+            echo "FAIL: TCP listener remained open after shutdown on port $port" >&2
+            cat "$log" >&2
+            exit 1
+        fi
+    done
 }
 
 trap cleanup EXIT
@@ -43,7 +66,23 @@ if [[ ! -x "$binary" ]]; then
     exit 1
 fi
 
-cat >"$config" <<'EOF'
+read -r http_port dns_udp_port dns_tcp_port < <(python3 - <<'PY'
+import socket
+
+sockets = []
+try:
+    for _ in range(3):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        sockets.append(sock)
+    print(*(sock.getsockname()[1] for sock in sockets))
+finally:
+    for sock in sockets:
+        sock.close()
+PY
+)
+
+cat >"$config" <<EOF
 attribution_enabled = false
 default_decision = "emulate"
 pcap_enabled = false
@@ -52,7 +91,7 @@ output_format = "jsonl"
 [[listeners]]
 name = "soak-http"
 protocol = "tcp"
-port = 18080
+port = $http_port
 bind_address = "127.0.0.1"
 enabled = true
 emulate_response = true
@@ -60,7 +99,7 @@ emulate_response = true
 [[listeners]]
 name = "soak-dns"
 protocol = "udp"
-port = 18053
+port = $dns_udp_port
 bind_address = "127.0.0.1"
 enabled = true
 emulate_response = true
@@ -68,7 +107,7 @@ emulate_response = true
 [[listeners]]
 name = "dns-tcp"
 protocol = "tcp"
-port = 18054
+port = $dns_tcp_port
 bind_address = "127.0.0.1"
 enabled = true
 emulate_response = true
@@ -87,7 +126,7 @@ nettrap_pid=$!
 
 for _ in $(seq 1 40); do
     if curl --noproxy '*' --silent --fail --max-time 1 \
-        -H 'Host: soak.example.test' http://127.0.0.1:18080/ >/dev/null 2>&1; then
+        -H 'Host: soak.example.test' "http://127.0.0.1:$http_port/" >/dev/null 2>&1; then
         break
     fi
     if ! kill -0 "$nettrap_pid" 2>/dev/null; then
@@ -98,11 +137,11 @@ for _ in $(seq 1 40); do
 done
 
 if ! curl --noproxy '*' --silent --fail --max-time 1 \
-    -H 'Host: soak.example.test' http://127.0.0.1:18080/ >/dev/null 2>&1; then
+    -H 'Host: soak.example.test' "http://127.0.0.1:$http_port/" >/dev/null 2>&1; then
     cat "$log" >&2
     exit 1
 fi
-if ! dig +tcp @127.0.0.1 -p 18054 soak.example.test A +short \
+if ! dig +tcp @127.0.0.1 -p "$dns_tcp_port" soak.example.test A +short \
     | grep -Eq '^[0-9]+(\.[0-9]+){3}$'; then
     cat "$log" >&2
     exit 1
@@ -139,9 +178,9 @@ run_malformed_burst() {
     local -a hostile_pids=()
     for _ in $(seq 1 "$concurrency"); do
         (
-            timeout 2 nc 127.0.0.1 18080 <"$malformed_http" >/dev/null 2>&1 || true
-            printf '\xff\x00\xff\x00' | timeout 2 nc -u -w 1 127.0.0.1 18053 >/dev/null 2>&1 || true
-            timeout 2 nc 127.0.0.1 18054 <"$workdir/malformed-dns-tcp.request" >/dev/null 2>&1 || true
+            timeout 2 nc 127.0.0.1 "$http_port" <"$malformed_http" >/dev/null 2>&1 || true
+            printf '\xff\x00\xff\x00' | timeout 2 nc -u -w 1 127.0.0.1 "$dns_udp_port" >/dev/null 2>&1 || true
+            timeout 2 nc 127.0.0.1 "$dns_tcp_port" <"$workdir/malformed-dns-tcp.request" >/dev/null 2>&1 || true
         ) &
         hostile_pids+=("$!")
     done
@@ -161,10 +200,10 @@ while (( SECONDS < deadline )); do
         (
             curl --noproxy '*' --silent --fail --max-time 2 \
                 --no-keepalive -H 'Host: soak.example.test' \
-                http://127.0.0.1:18080/ >/dev/null
-            dig @127.0.0.1 -p 18053 soak.example.test A +short \
+                "http://127.0.0.1:$http_port/" >/dev/null
+            dig @127.0.0.1 -p "$dns_udp_port" soak.example.test A +short \
                 | grep -Eq '^[0-9]+(\.[0-9]+){3}$'
-            dig +tcp @127.0.0.1 -p 18054 soak.example.test A +short \
+            dig +tcp @127.0.0.1 -p "$dns_tcp_port" soak.example.test A +short \
                 | grep -Eq '^[0-9]+(\.[0-9]+){3}$'
         ) &
         pids+=("$!")
@@ -176,7 +215,7 @@ while (( SECONDS < deadline )); do
     churn_pids=()
     for _ in $(seq 1 "$connection_churn"); do
         (
-            exec 3<>/dev/tcp/127.0.0.1/18080
+            exec 3<>/dev/tcp/127.0.0.1/"$http_port"
             sleep 0.2
             exec 3>&-
         ) &
@@ -184,7 +223,7 @@ while (( SECONDS < deadline )); do
     done
     sleep 0.1
     curl --noproxy '*' --silent --fail --max-time 2 \
-        -H 'Host: soak.example.test' http://127.0.0.1:18080/ >/dev/null
+        -H 'Host: soak.example.test' "http://127.0.0.1:$http_port/" >/dev/null
     for pid in "${churn_pids[@]}"; do
         wait "$pid" 2>/dev/null || true
     done
@@ -203,5 +242,7 @@ if ! kill -0 "$nettrap_pid" 2>/dev/null; then
     exit 1
 fi
 assert_resource_bounds
+stop_nettrap
+assert_tcp_listeners_closed "$http_port" "$dns_tcp_port"
 
 echo "PASS: ${duration}s hostile soak completed (${http_requests} HTTP, ${dns_requests} DNS UDP, ${dns_tcp_requests} DNS TCP, ${malformed_requests} malformed requests, ${connection_churn}-connection churn)"
