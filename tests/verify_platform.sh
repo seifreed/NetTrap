@@ -78,7 +78,7 @@ case "$OS" in
     MINGW*|MSYS*|CYGWIN*)
         echo "Checking Windows interception contract..."
         if [ "$ARCH" = "x86_64" ] || [ "$ARCH" = "amd64" ]; then
-            echo "✓ WinDivert transparent interception is disabled and fails closed until NAT is validated"
+            echo "✓ WinDivert transparent interception uses bounded NAT; live driver validation is covered by the Windows smoke"
         else
             echo "✓ Windows ARM64 remains listener/capture-only through Npcap"
         fi

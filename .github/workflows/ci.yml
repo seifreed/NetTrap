@@ -338,7 +338,7 @@ jobs:
       - name: Setup Npcap notice
         run: |
           Write-Host "::notice::Windows builds support listener mode and Npcap-backed capture"
-          Write-Host "::notice::Windows transparent interception is disabled until packet-preserving NAT is validated"
+          Write-Host "::notice::Windows transparent interception uses experimental packet-preserving NAT; the x64 smoke requires the WinDivert driver"
           Write-Host "::notice::Install Npcap from https://nmap.org/npcap/"
         shell: pwsh
 
@@ -455,7 +455,7 @@ jobs:
           if-no-files-found: error
           archive: false
 
-      - name: Run Windows interception fail-closed smoke (x64)
+      - name: Run Windows interception NAT smoke (x64)
         if: matrix.arch == 'x64'
         run: ./tests/windows_interception_smoke.ps1 -BinaryPath "${{ github.workspace }}\target\${{ matrix.target }}\release\nettrap.exe"
         shell: pwsh

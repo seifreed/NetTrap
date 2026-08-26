@@ -13,11 +13,11 @@ suite.
   leave redirect rules and multi-host forwarding enabled until that restart or
   manual cleanup. The opt-in Linux network-namespace E2E covers redirection,
   crash recovery, and graceful cleanup.
-- Windows x86_64 transparent redirection is disabled and fails closed before
-  opening WinDivert because packet-preserving NAT and reinjection are not yet
-  validated. Release ZIP/MSI artifacts bundle the pinned WinDivert runtime and
-  license for future implementation. Windows ARM64 stays in listener/capture
-  mode.
+- Windows x86_64 transparent redirection uses bounded packet-preserving NAT and
+  fails closed when no redirectable listener is configured. It remains
+  experimental until a real Windows host validates connectivity, checksums,
+  cleanup, and crash recovery. Release ZIP/MSI artifacts bundle the pinned
+  WinDivert runtime and license. Windows ARM64 stays in listener/capture mode.
 - macOS has no transparent redirection implementation.
 - Live capture and process attribution depend on OS facilities, privileges, and
   external packet-capture runtimes.

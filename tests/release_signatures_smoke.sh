@@ -24,7 +24,7 @@ for marker in \
     "Require independent audit report" \
     "scripts/verify-external-audit.sh" \
     "Run macOS listener E2E smoke" \
-    "Run Windows interception fail-closed smoke (x64)" \
+    "Run Windows interception NAT smoke (x64)" \
     "Sign Windows MSI (Authenticode)" \
     "Get-AuthenticodeSignature -LiteralPath \"nettrap-\${{ matrix.name }}.msi\"" \
     "Packaged executable Authenticode verification failed" \

@@ -36,7 +36,7 @@ cargo deny check
 ./scripts/quality-gates.sh quick
 actionlint .github/workflows/*.yml
 bash tests/verify_platform.sh
-# On Windows x86_64, verify that transparent interception fails closed:
+# On Windows x86_64, verify transparent interception and fail-closed startup:
 pwsh -File tests/windows_interception_smoke.ps1 -BinaryPath .\nettrap.exe
 # Requires authenticated gh CLI; writes only to target/.
 bash scripts/security-evidence.sh

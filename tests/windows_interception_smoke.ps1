@@ -6,6 +6,7 @@ param(
 $ErrorActionPreference = "Stop"
 $workDir = Join-Path $env:RUNNER_TEMP "nettrap-interception-smoke"
 $configPath = Join-Path $workDir "config.toml"
+$eventsPath = Join-Path $workDir "events.jsonl"
 $stdoutPath = Join-Path $workDir "stdout.log"
 $stderrPath = Join-Path $workDir "stderr.log"
 $process = $null
@@ -19,6 +20,7 @@ default_tcp_listener = "http-smoke"
 default_udp_listener = "dns-smoke"
 pcap_enabled = false
 output_format = "jsonl"
+output_path = "$eventsPath"
 
 [[listeners]]
 name = "http-smoke"
@@ -48,18 +50,32 @@ try {
     $process = Start-Process -FilePath $BinaryPath -ArgumentList @(
         "run", "--intercept", "-c", $configPath
     ) -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
-    if (-not $process.WaitForExit(10000)) {
-        Stop-NetTrap
-        throw "Windows transparent interception did not fail closed"
+    Start-Sleep -Seconds 3
+    if ($process.HasExited) {
+        $output = @(
+            if (Test-Path $stdoutPath) { Get-Content $stdoutPath -Raw }
+            if (Test-Path $stderrPath) { Get-Content $stderrPath -Raw }
+        ) -join "`n"
+        throw "Windows transparent interception exited during startup (code $($process.ExitCode)): $output"
     }
-    $output = @(
-        if (Test-Path $stdoutPath) { Get-Content $stdoutPath -Raw }
-        if (Test-Path $stderrPath) { Get-Content $stderrPath -Raw }
-    ) -join "`n"
-    if ($process.ExitCode -eq 0 -or $output -notmatch "disabled|not supported|packet-preserving NAT") {
-        throw "Windows transparent interception was not rejected safely (code $($process.ExitCode)): $output"
+
+    $tcpOutput = & curl.exe --noproxy "*" --silent --show-error --connect-timeout 5 --max-time 10 `
+        --header "Host: interception.test" http://198.51.100.1/ 2>&1
+    if ($LASTEXITCODE -ne 0 -or $tcpOutput -notmatch "It Works") {
+        throw "TCP traffic was not redirected to the local listener: $tcpOutput"
     }
-    Write-Host "PASS: Windows transparent interception fails closed before opening WinDivert"
+
+    $dnsOutput = & nslookup.exe -timeout=3 -retry=0 example.test 198.51.100.1 2>&1
+    if ($LASTEXITCODE -ne 0 -or $dnsOutput -notmatch "Address:\s+\d+\.\d+\.\d+\.\d+") {
+        throw "UDP traffic was not redirected to the local DNS listener: $dnsOutput"
+    }
+
+    Stop-NetTrap
+    if (-not (Test-Path -LiteralPath $eventsPath -PathType Leaf) -or
+        (Get-Item -LiteralPath $eventsPath).Length -le 0) {
+        throw "Interception did not persist any event records"
+    }
+    Write-Host "PASS: Windows transparent interception redirected TCP/UDP traffic and persisted events"
 } finally {
     Stop-NetTrap
 }

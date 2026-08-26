@@ -43,11 +43,14 @@ event contracts before `1.0.0`.
 - Platform integration tests now fail closed on DNS/HTTP errors.
 - Release publication now waits for the explicit security audit and heavy
   reusable quality gates, and creates the checksum workspace before attestation.
+- Windows x86_64 WinDivert now runs the bounded packet-preserving NAT adapter;
+  modified-packet reinjection falls back to the untouched frame on checksum or
+  send errors.
 
 ### Security
 
-- Windows x86_64 `--intercept` now fails closed before opening WinDivert until
-  packet-preserving NAT and reinjection are implemented and validated.
+- Windows x86_64 `--intercept` rejects startup without redirect rules and keeps
+  the original frame available as a reinjection fallback on NAT errors.
 - DNS query summaries reject non-EDNS additional records before invoking the
   third-party parser, avoiding malformed TSIG panic paths.
 - Kubernetes and Docker examples no longer grant packet/network capabilities.

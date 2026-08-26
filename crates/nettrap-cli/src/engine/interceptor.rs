@@ -285,7 +285,7 @@ fn build_windows_interceptor(
         .map_err(|e| crate::Error::Other(format!("Failed to build Npcap interceptor: {}", e)))?;
 
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-    let active_message = "WinDivert transparent interception disabled; use listener mode";
+    let active_message = "WinDivert transparent interception active with bounded NAT redirection";
 
     #[cfg(target_arch = "aarch64")]
     let active_message = "Npcap capture active";
