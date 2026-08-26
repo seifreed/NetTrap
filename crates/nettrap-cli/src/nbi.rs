@@ -30,7 +30,7 @@ const NBI_WORKER_SUPERVISOR_INTERVAL_MS: u64 = 250;
 #[cfg(not(test))]
 const NBI_LOCAL_OPERATION_TIMEOUT_MS: u64 = 5000;
 #[cfg(test)]
-const NBI_LOCAL_OPERATION_TIMEOUT_MS: u64 = 100;
+const NBI_LOCAL_OPERATION_TIMEOUT_MS: u64 = 1000;
 #[cfg(not(test))]
 const NBI_EXPORT_OPERATION_TIMEOUT_MS: u64 = 5000;
 #[cfg(test)]

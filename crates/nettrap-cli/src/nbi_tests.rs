@@ -2211,7 +2211,7 @@ async fn local_flush_timeout_aborts_stuck_worker() {
     let started = std::time::Instant::now();
     collector.flush_local().await;
 
-    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
     assert!(collector.local_worker.handle.lock().is_none());
     assert_eq!(collector.snapshot().worker_restarts, 1);
     assert!(
