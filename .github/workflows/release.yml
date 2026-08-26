@@ -20,6 +20,10 @@ jobs:
   security-audit:
     name: Security Audit
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -34,6 +38,27 @@ jobs:
 
       - name: Run security audit
         run: cargo audit
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+
+      - name: Generate repository security evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: bash scripts/security-evidence.sh target/security-audit
+
+      - name: Block release on open high or critical alerts
+        run: |
+          high_or_critical="$(jq -r '.open_high_or_critical' target/security-audit/summary.json)"
+          if ! [[ "$high_or_critical" =~ ^[0-9]+$ ]]; then
+            echo "security evidence summary is invalid" >&2
+            exit 1
+          fi
+          if (( high_or_critical > 0 )); then
+            echo "release blocked by $high_or_critical open high/critical Code Scanning alert(s)" >&2
+            exit 1
+          fi
 
   e2e:
     name: End-to-End Tests

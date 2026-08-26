@@ -15,6 +15,8 @@ for marker in \
     "scripts/verify-release-signatures.sh releases" \
     "Verify release Linux/Windows protocol parity" \
     "tests/compare_protocol_matrix_reports.py" \
+    "Block release on open high or critical alerts" \
+    "bash scripts/security-evidence.sh target/security-audit" \
     "Sign Windows MSI (Authenticode)" \
     "Get-AuthenticodeSignature -LiteralPath \"nettrap-\${{ matrix.name }}.msi\"" \
     "Packaged executable Authenticode verification failed" \

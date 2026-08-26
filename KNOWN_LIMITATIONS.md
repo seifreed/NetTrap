@@ -54,6 +54,9 @@ See [PROTOCOL_SUPPORT.md](PROTOCOL_SUPPORT.md) for the handler-by-handler matrix
 - The multi-architecture OCI image digest is signed and verified keylessly by
   the release workflow; consumers should verify that signature before pulling
   the image.
+- Tagged releases are blocked when the repository security-evidence bundle
+  reports an open high or critical Code Scanning alert. This gate is not a
+  substitute for an independent third-party security audit.
 - Release gates include a bounded hostile HTTP/DNS soak with malformed frames,
   64-connection churn, bounded file-descriptor/RSS growth checks, and a
   128-socket connection-exhaustion smoke. The scheduled weekly gate extends
