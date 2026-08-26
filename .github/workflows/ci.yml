@@ -210,6 +210,30 @@ jobs:
           enabled = true
           emulate_response = true
           response_delay_ms = 0
+
+          [[listeners]]
+          name = "dns-tcp"
+          protocol = "tcp"
+          port = 53532
+          bind_address = "127.0.0.1"
+          enabled = true
+          emulate_response = true
+
+          [[listeners]]
+          name = "dns-v6"
+          protocol = "udp"
+          port = 53531
+          bind_address = "::1"
+          enabled = true
+          emulate_response = true
+
+          [[listeners]]
+          name = "http-v6"
+          protocol = "tcp"
+          port = 8089
+          bind_address = "::1"
+          enabled = true
+          emulate_response = true
           EOF
 
       - name: Run integration tests
@@ -222,7 +246,10 @@ jobs:
 
           echo "=== macOS Integration Tests ==="
           dig @127.0.0.1 -p 53530 example.com A +short | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
-          curl --fail --silent --header 'Host: example.test' http://127.0.0.1:8088/ | grep -F 'It Works!'
+          dig +tcp @127.0.0.1 -p 53532 example.com A +short | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
+          dig @::1 -p 53531 example.com A +short | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
+          curl --noproxy '*' --fail --silent --header 'Host: example.test' http://127.0.0.1:8088/ | grep -F 'It Works!'
+          curl --noproxy '*' --fail --silent --header 'Host: example.test' 'http://[::1]:8089/' | grep -F 'It Works!'
 
           kill $NETTRAP_PID
           wait $NETTRAP_PID || true
