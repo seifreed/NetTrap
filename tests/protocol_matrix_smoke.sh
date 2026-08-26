@@ -511,6 +511,46 @@ with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
 PY
 }
 
+run_socks_connect() {
+    local port=$1
+    python3 - "$port" <<'PY'
+import socket
+import sys
+
+port = int(sys.argv[1])
+host = b"example.test"
+with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+    sock.sendall(b"\x05\x01\x00")
+    method = sock.recv(2)
+    if method != b"\x05\x00":
+        raise SystemExit(f"invalid SOCKS5 method response: {method.hex()}")
+    sock.sendall(b"\x05\x01\x00\x03" + bytes([len(host)]) + host + b"\x00\x50")
+    response = b""
+    while len(response) < 10:
+        chunk = sock.recv(10 - len(response))
+        if not chunk:
+            raise SystemExit("SOCKS5 CONNECT response was truncated")
+        response += chunk
+    if response[:4] != b"\x05\x00\x00\x01":
+        raise SystemExit(f"invalid SOCKS5 CONNECT response: {response[:4].hex()}")
+PY
+}
+
+run_memcached_set() {
+    local port=$1
+    python3 - "$port" <<'PY'
+import socket
+import sys
+
+port = int(sys.argv[1])
+with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+    sock.sendall(b"set e2e 0 0 5\r\nhello\r\n")
+    response = sock.recv(256)
+    if not response.startswith(b"STORED\r\n"):
+        raise SystemExit(f"invalid Memcached SET response: {response[:32]!r}")
+PY
+}
+
 deadline=$((SECONDS + duration))
 round=1
 while (( round <= repeat || (duration > 0 && SECONDS < deadline) )); do
@@ -542,7 +582,7 @@ for index in "${!tcp_ports[@]}"; do
         echo "TCP handler crashed after $name probe" >&2
         exit 1
     fi
-    if ! contains_name "$name" "${tcp_capture_only[@]}"; then
+        if ! contains_name "$name" "${tcp_capture_only[@]}"; then
         if [[ ! -s "$response" ]]; then
             echo "TCP handler returned no response for $name (probe bytes=$(wc -c <"$request"), response bytes=$(wc -c <"$response"))" >&2
             tail -20 "$log" >&2
@@ -556,6 +596,12 @@ for index in "${!tcp_ports[@]}"; do
         record_response_size tcp "$name" "$(wc -c <"$response" | tr -d ' ')"
     else
         record_response_size tcp "$name" 0
+    fi
+    if [[ "$name" == socks ]] && ! contains_name "$name" "${tcp_capture_only[@]}"; then
+        run_socks_connect "${tcp_ports[$index]}"
+    fi
+    if [[ "$name" == memcached ]] && ! contains_name "$name" "${tcp_capture_only[@]}"; then
+        run_memcached_set "${tcp_ports[$index]}"
     fi
 done
 
