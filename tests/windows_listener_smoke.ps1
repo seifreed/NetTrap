@@ -160,15 +160,18 @@ try {
     $dnsTcpFrame[0] = [byte]($query.Count -shr 8)
     $dnsTcpFrame[1] = [byte]$query.Count
     [Array]::Copy($query.ToArray(), 0, $dnsTcpFrame, 2, $query.Count)
-    $dnsTcp = [System.Net.Sockets.TcpClient]::new()
+    $dnsTcp = $null
     try {
-        $dnsTcp.ReceiveTimeout = 5000
         $connected = $false
         for ($attempt = 0; $attempt -lt 40 -and -not $connected; $attempt++) {
+            $candidate = [System.Net.Sockets.TcpClient]::new()
             try {
-                $dnsTcp.Connect("127.0.0.1", 53541)
+                $candidate.ReceiveTimeout = 5000
+                $candidate.Connect("127.0.0.1", 53541)
+                $dnsTcp = $candidate
                 $connected = $true
             } catch {
+                $candidate.Dispose()
                 Start-Sleep -Milliseconds 250
             }
         }
@@ -189,7 +192,9 @@ try {
             throw "DNS TCP listener response did not set QR"
         }
     } finally {
-        $dnsTcp.Dispose()
+        if ($null -ne $dnsTcp) {
+            $dnsTcp.Dispose()
+        }
     }
 
     Write-Host "PASS: Windows IPv4/IPv6 TCP/UDP listener parity smoke"
