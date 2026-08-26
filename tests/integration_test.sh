@@ -34,6 +34,7 @@ CHARGEN_UDP_PORT=11920
 QUOTD_UDP_PORT=11718
 SYSLOG_UDP_PORT=1514
 RAW_UDP_PORT=19099
+DNS_TCP_PORT=5354
 NKN_TCP_PORT=19090
 RAW_TCP_PORT=19091
 DUMMY_TCP_PORT=19092
@@ -509,6 +510,14 @@ sed 's/^output_format =.*/output_format = "toon"/; s/^pcap_enabled =.*/pcap_enab
 cat >>"$TEST_CONFIG" <<'EOF'
 
 [[listeners]]
+name = "dns-tcp"
+protocol = "tcp"
+port = 5354
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+
+[[listeners]]
 name = "https"
 protocol = "tcp"
 port = 18443
@@ -780,7 +789,7 @@ NETTRAP_PID=$!
 sleep 3
 
 echo "Waiting for services..."
-for port in 445 5353 8080 110 143 1389 1883 2222 2323 3306 5432 6379 12121 12525 18443 \
+for port in 445 5353 "$DNS_TCP_PORT" 8080 110 143 1389 1883 2222 2323 3306 5432 6379 12121 12525 18443 \
     "$IRC_PORT" "$FINGER_PORT" "$IDENT_PORT" "$DAYTIME_PORT" "$TIME_PORT" \
     "$CHARGEN_PORT" "$QUOTD_PORT" "$MEMCACHED_PORT" "$SOCKS_PORT" \
     "$NKN_TCP_PORT" "$RAW_TCP_PORT" "$DUMMY_TCP_PORT" "$UPNP_TCP_PORT" \
@@ -809,6 +818,9 @@ echo "--- DNS Protocol Tests ---"
 
 run_test "DNS A query" \
     "dig @127.0.0.1 -p 5353 example.com A +short | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'"
+
+run_test "DNS TCP A query" \
+    "dig +tcp @127.0.0.1 -p $DNS_TCP_PORT example.com A +short | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'"
 
 run_test "DNS AAAA query" \
     "dig @127.0.0.1 -p 5353 example.com AAAA +short"
