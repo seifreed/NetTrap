@@ -1277,6 +1277,149 @@ pub mod windivert {
         }
 
         #[test]
+        fn redirects_ipv6_udp_and_restores_original_source_on_reply() {
+            let mut outbound = vec![
+                0x60,
+                0,
+                0,
+                0,
+                0,
+                8,
+                IPPROTO_UDP,
+                64,
+                0x20,
+                0x01,
+                0x0d,
+                0xb8,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0x10,
+                0x20,
+                0x01,
+                0x0d,
+                0xb8,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0x20,
+                0x9c,
+                0x40,
+                0,
+                53,
+                0,
+                8,
+                0,
+                0,
+            ];
+            let redirects = vec![PortRedirect::new(53, false, 5353)];
+            let flows = Arc::new(Mutex::new(RedirectFlowTable::default()));
+            let mut outbound_addr = WindivertAddress::default();
+            outbound_addr.set_direction(WINDIVERT_DIRECTION_OUT);
+            let outbound_len = outbound.len();
+
+            WinDivertInterceptor::redirect_packet(
+                &mut outbound,
+                outbound_len,
+                &outbound_addr,
+                &redirects,
+                &flows,
+            )
+            .expect("outbound IPv6 rewrite should succeed");
+
+            assert_eq!(&outbound[24..40], &Ipv6Addr::LOCALHOST.octets());
+            assert_eq!(&outbound[42..44], &5353u16.to_be_bytes());
+
+            let mut reply = vec![
+                0x60,
+                0,
+                0,
+                0,
+                0,
+                8,
+                IPPROTO_UDP,
+                64,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+                0x20,
+                0x01,
+                0x0d,
+                0xb8,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0x10,
+                0x14,
+                0xe9,
+                0x9c,
+                0x40,
+                0,
+                8,
+                0,
+                0,
+            ];
+            let mut reply_addr = WindivertAddress::default();
+            reply_addr.set_direction(WINDIVERT_DIRECTION_OUT);
+            let reply_len = reply.len();
+
+            WinDivertInterceptor::redirect_packet(
+                &mut reply,
+                reply_len,
+                &reply_addr,
+                &redirects,
+                &flows,
+            )
+            .expect("loopback IPv6 reply rewrite should succeed");
+
+            assert_eq!(
+                &reply[8..24],
+                &"2001:db8::20".parse::<Ipv6Addr>().unwrap().octets()
+            );
+            assert_eq!(&reply[40..42], &53u16.to_be_bytes());
+        }
+
+        #[test]
         fn rejects_non_windivert_interception_modes() {
             let config = InterceptorConfig {
                 mode: nettrap_core::config::InterceptionMode::Userspace,
