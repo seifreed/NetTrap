@@ -21,6 +21,14 @@ cosign verify-blob \
   nettrap-linux-x86_64.tar.gz
 ```
 
+To verify every downloaded release asset and metadata file in one pass, set the
+workflow identity and run the repository verifier from the release directory:
+
+```bash
+COSIGN_CERTIFICATE_IDENTITY="https://github.com/seifreed/NetTrap/.github/workflows/release.yml@refs/tags/v0.1.0-alpha.1" \
+  scripts/verify-release-signatures.sh releases
+```
+
 Use the corresponding archive or raw `.binary` name on macOS or Windows. The attestation binds
 the archive digest to the GitHub Actions release workflow and commit; the
 checksum detects local corruption and is also published as a release asset.

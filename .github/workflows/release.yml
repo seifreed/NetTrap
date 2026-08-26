@@ -589,22 +589,9 @@ jobs:
       - name: Verify release artifact signatures
         env:
           COSIGN_EXPERIMENTAL: "1"
-          COSIGN_IDENTITY: "https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/tags/${{ github.ref_name }}"
+          COSIGN_CERTIFICATE_IDENTITY: "https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/tags/${{ github.ref_name }}"
         run: |
-          release_artifacts=(
-            releases/nettrap-*.tar.gz releases/nettrap-*.zip
-            releases/nettrap-*.binary releases/nettrap-*.msi
-            releases/nettrap-*.deb releases/nettrap-*.rpm
-            releases/nettrap.rb releases/SHA256SUMS releases/nettrap.spdx.json
-            releases/nettrap-oci-image.txt releases/nettrap-kubernetes-deployment.yaml
-          )
-          for artifact in "${release_artifacts[@]}"; do
-            cosign verify-blob \
-              --bundle "${artifact}.sigstore.json" \
-              --certificate-identity "$COSIGN_IDENTITY" \
-              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-              "$artifact"
-          done
+          scripts/verify-release-signatures.sh releases
 
       - name: Attest build provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
