@@ -675,30 +675,28 @@ pub mod windivert {
             let now = Instant::now();
             let mut flows = flow_table.lock();
 
-            // WinDivert can report loopback replies as outbound packets. Match
-            // the reverse flow before applying the outbound request rewrite so
-            // the client sees the original destination on either direction.
-            if src.is_loopback() {
-                let reverse = ReverseFlowKey {
-                    protocol,
-                    client: SocketAddr::new(dst, dst_port),
-                    listener_port: src_port,
-                };
-                if let Some(original_destination) = flows.inbound_destination(&reverse, now) {
-                    if !Self::rewrite_endpoint(
-                        data,
-                        is_ipv6,
-                        transport_offset,
-                        true,
-                        original_destination.ip(),
-                        original_destination.port(),
-                    ) {
-                        return Err(Error::Packet(
-                            "Failed to rewrite loopback reply endpoint".into(),
-                        ));
-                    }
-                    return Ok(());
+            // Match replies before applying the outbound request rewrite. WinDivert
+            // may classify replies as outbound and the local source can vary by
+            // listener binding, so the flow key is the authoritative discriminator.
+            let reverse = ReverseFlowKey {
+                protocol,
+                client: SocketAddr::new(dst, dst_port),
+                listener_port: src_port,
+            };
+            if let Some(original_destination) = flows.inbound_destination(&reverse, now) {
+                if !Self::rewrite_endpoint(
+                    data,
+                    is_ipv6,
+                    transport_offset,
+                    true,
+                    original_destination.ip(),
+                    original_destination.port(),
+                ) {
+                    return Err(Error::Packet(
+                        "Failed to rewrite loopback reply endpoint".into(),
+                    ));
                 }
+                return Ok(());
             }
 
             if addr.direction() == WINDIVERT_DIRECTION_OUT {
@@ -1451,6 +1449,10 @@ pub mod windivert {
                 0,
                 0,
             ];
+            outbound.truncate(48);
+            outbound[8..24].copy_from_slice(&"2001:db8::10".parse::<Ipv6Addr>().unwrap().octets());
+            outbound[24..40].copy_from_slice(&"2001:db8::20".parse::<Ipv6Addr>().unwrap().octets());
+            outbound[40..48].copy_from_slice(&[0x9c, 0x40, 0, 53, 0, 8, 0, 0]);
             let redirects = vec![PortRedirect::new(53, false, 5353)];
             let flows = Arc::new(Mutex::new(RedirectFlowTable::default()));
             let mut outbound_addr = WindivertAddress::default();
@@ -1519,6 +1521,10 @@ pub mod windivert {
                 0,
                 0,
             ];
+            reply.truncate(48);
+            reply[8..24].copy_from_slice(&Ipv6Addr::LOCALHOST.octets());
+            reply[24..40].copy_from_slice(&"2001:db8::10".parse::<Ipv6Addr>().unwrap().octets());
+            reply[40..48].copy_from_slice(&[0x14, 0xe9, 0x9c, 0x40, 0, 8, 0, 0]);
             let mut reply_addr = WindivertAddress::default();
             reply_addr.set_direction(WINDIVERT_DIRECTION_OUT);
             let reply_len = reply.len();
