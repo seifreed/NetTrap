@@ -28,13 +28,19 @@ $stdout = Join-Path $workDir "stdout.log"
 $stderr = Join-Path $workDir "stderr.log"
 $process = $null
 
-function Get-FreeTcpPort {
-    $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+function Get-FreeTcpPortPair {
+    $listeners = @()
     try {
-        $listener.Start()
-        return ([Net.IPEndPoint]$listener.LocalEndpoint).Port
+        foreach ($index in 1..2) {
+            $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+            $listener.Start()
+            $listeners += $listener
+        }
+        return @($listeners | ForEach-Object { ([Net.IPEndPoint]$_.LocalEndpoint).Port })
     } finally {
-        $listener.Stop()
+        foreach ($listener in $listeners) {
+            $listener.Stop()
+        }
     }
 }
 
@@ -48,9 +54,10 @@ function Get-FreeUdpPort {
     }
 }
 
-$httpPort = Get-FreeTcpPort
+$tcpPortPair = Get-FreeTcpPortPair
+$httpPort = [int]$tcpPortPair[0]
 $dnsUdpPort = Get-FreeUdpPort
-$dnsTcpPort = Get-FreeTcpPort
+$dnsTcpPort = [int]$tcpPortPair[1]
 
 New-Item -ItemType Directory -Force -Path $workDir | Out-Null
 Remove-Item -LiteralPath $stopFlag -Force -ErrorAction SilentlyContinue
