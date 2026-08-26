@@ -471,7 +471,7 @@ run_rdp_negotiation() {
     local output
     output="$(printf '\003\000\000\023\016\340\000\000\000\000\000\001\000\010\000\003\000\000\000' |
         timeout 5 nc 127.0.0.1 "$RDP_TCP_PORT" 2>/dev/null | od -An -t x1 || true)"
-    grep -Eq '(^|[[:space:]])03[[:space:]]+00[[:space:]]+00' <<< "$output"
+    grep -Eq '(^|[[:space:]])03[[:space:]]+00[[:space:]]+00[[:space:]]+00' <<< "$output"
 }
 
 run_upnp_tcp_description() {

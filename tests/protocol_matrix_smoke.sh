@@ -348,7 +348,9 @@ elif name == "nkn":
         json.loads(text)
     except json.JSONDecodeError as error:
         raise SystemExit(f"invalid NKN JSON-RPC response: {error}") from error
-elif name == "rdp" and data[0] != 3:
+elif name == "rdp" and (
+    len(data) < 4 or data[0] != 3 or data[2] != 0 or data[3] != 0
+):
     raise SystemExit("invalid RDP response")
 PY
 }
