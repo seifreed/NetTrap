@@ -252,6 +252,13 @@ run_memcached_version() {
     grep -Fq 'VERSION 1.6.22' <<< "$output"
 }
 
+run_memcached_set() {
+    local output
+    output="$(printf 'set e2e 0 0 5\r\nhello\r\n' |
+        timeout 5 nc 127.0.0.1 "$MEMCACHED_PORT" 2>/dev/null || true)"
+    grep -Fxq 'STORED' <<< "${output//$'\r'/}"
+}
+
 run_socks_handshake() {
     local response_path status
     response_path="$(mktemp /tmp/nettrap-socks.XXXXXX)"
@@ -263,6 +270,27 @@ run_socks_handshake() {
     fi
     rm -f "$response_path"
     return "$status"
+}
+
+run_socks_connect() {
+    python3 - "$SOCKS_PORT" <<'PY'
+import socket
+import sys
+
+sock = socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=3)
+sock.settimeout(3)
+try:
+    sock.sendall(b"\x05\x01\x00")
+    if sock.recv(2) != b"\x05\x00":
+        raise SystemExit("SOCKS5 no-auth negotiation failed")
+    sock.sendall(b"\x05\x01\x00\x03\x0bexample.test\x00\x50")
+    response = sock.recv(10)
+finally:
+    sock.close()
+
+if len(response) != 10 or response[:4] != b"\x05\x00\x00\x01":
+    raise SystemExit(f"invalid SOCKS5 CONNECT response: {response.hex()}")
+PY
 }
 
 run_udp_hex_probe() {
@@ -443,7 +471,7 @@ run_rdp_negotiation() {
     local output
     output="$(printf '\003\000\000\023\016\340\000\000\000\000\000\001\000\010\000\003\000\000\000' |
         timeout 5 nc 127.0.0.1 "$RDP_TCP_PORT" 2>/dev/null | od -An -t x1 || true)"
-    test -n "$output"
+    grep -Eq '(^|[[:space:]])03[[:space:]]+00[[:space:]]+00' <<< "$output"
 }
 
 run_upnp_tcp_description() {
@@ -925,7 +953,11 @@ run_test "Redis PING" \
 
 run_test "Memcached version" run_memcached_version
 
+run_test "Memcached SET" run_memcached_set
+
 run_test "SOCKS5 handshake" run_socks_handshake
+
+run_test "SOCKS5 CONNECT" run_socks_connect
 
 run_test "NKN JSON-RPC request" run_nkn_jsonrpc
 
