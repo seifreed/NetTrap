@@ -81,7 +81,7 @@ jobs:
 
   e2e:
     name: End-to-End Tests
-    needs: [quality-gates, security-audit]
+    needs: [quality-gates, security-audit, external-security-audit]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -107,7 +107,7 @@ jobs:
 
   build:
     name: Build ${{ matrix.name }}
-    needs: [quality-gates, security-audit]
+    needs: [quality-gates, security-audit, external-security-audit]
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false

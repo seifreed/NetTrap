@@ -23,6 +23,7 @@ for marker in \
     "Upload release security evidence" \
     "Require independent audit report" \
     "scripts/verify-external-audit.sh" \
+    "needs: [quality-gates, security-audit, external-security-audit]" \
     "Run macOS listener E2E smoke" \
     "Run Windows interception NAT smoke (x64)" \
     "Sign Windows MSI (Authenticode)" \
