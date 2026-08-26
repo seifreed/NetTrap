@@ -190,7 +190,14 @@ pub mod windivert {
             now: Instant,
         ) -> Option<SocketAddr> {
             self.prune(now);
-            let flow_key = self.reverse.get(key)?.clone();
+            let flow_key = self.reverse.get(key).cloned().or_else(|| {
+                self.entries.iter().find_map(|(flow_key, flow)| {
+                    (flow_key.protocol == key.protocol
+                        && flow_key.client == key.client
+                        && flow.listener_port == key.listener_port)
+                        .then(|| flow_key.clone())
+                })
+            })?;
             let destination = self
                 .entries
                 .get(&flow_key)
@@ -1160,6 +1167,31 @@ pub mod windivert {
                 table.insert(key, 1000, now);
             }
             assert!(table.entries.len() <= MAX_REDIRECT_FLOWS);
+        }
+
+        #[test]
+        fn redirect_flow_table_recovers_when_reverse_index_is_missing() {
+            let mut table = RedirectFlowTable::default();
+            let key = FlowKey {
+                protocol: IPPROTO_TCP,
+                client: "192.0.2.10:40000".parse().unwrap(),
+                original_destination: "198.51.100.20:443".parse().unwrap(),
+            };
+            let now = Instant::now();
+            table.insert(key, 8443, now);
+            table.reverse.clear();
+
+            assert_eq!(
+                table.inbound_destination(
+                    &ReverseFlowKey {
+                        protocol: IPPROTO_TCP,
+                        client: "192.0.2.10:40000".parse().unwrap(),
+                        listener_port: 8443,
+                    },
+                    now,
+                ),
+                Some("198.51.100.20:443".parse().unwrap())
+            );
         }
 
         #[test]
