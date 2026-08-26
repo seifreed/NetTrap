@@ -18,6 +18,7 @@ REQUIRED_KEYS = {
     "udp_response_sizes",
     "tcp_malformed_probes",
     "udp_malformed_probes",
+    "stateful_probes",
     "tcp_names",
     "udp_names",
     "tcp_capture_only",
@@ -25,6 +26,7 @@ REQUIRED_KEYS = {
     "event_listeners",
 }
 EXPECTED_SCHEMA = "5"
+EXPECTED_STATEFUL_PROBES = "socks_connect,memcached_set,tftp_wrq"
 
 
 def read_report(path: Path) -> dict[str, str]:
@@ -167,6 +169,13 @@ def main() -> int:
             print(
                 f"unsupported protocol matrix schema in {path}: {report['schema']!r}; "
                 f"expected {EXPECTED_SCHEMA!r}",
+                file=sys.stderr,
+            )
+            return 1
+        if report["stateful_probes"] != EXPECTED_STATEFUL_PROBES:
+            print(
+                f"unsupported stateful protocol contract in {path}: "
+                f"{report['stateful_probes']!r}; expected {EXPECTED_STATEFUL_PROBES!r}",
                 file=sys.stderr,
             )
             return 1

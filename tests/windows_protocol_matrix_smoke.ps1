@@ -768,6 +768,7 @@ try {
             "udp_response_sizes=$(($udpNames | ForEach-Object { '{0}:{1}-{2}' -f $_, $udpResponseMin[$_], $udpResponseMax[$_] }) -join ',')"
             "tcp_malformed_probes=$($tcpNames.Count * $roundsCompleted)"
             "udp_malformed_probes=$($udpNames.Count * $roundsCompleted)"
+            "stateful_probes=socks_connect,memcached_set,tftp_wrq"
             "tcp_names=$($tcpNames -join ',')"
             "udp_names=$($udpNames -join ',')"
             "tcp_capture_only=$($tcpCaptureOnly -join ',')"

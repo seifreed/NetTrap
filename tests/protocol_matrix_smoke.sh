@@ -702,6 +702,7 @@ if [[ -n "${NETTRAP_MATRIX_REPORT:-}" ]]; then
         printf 'udp_response_sizes=%s\n' "$(IFS=,; echo "${udp_sizes[*]}")"
         printf 'tcp_malformed_probes=%s\n' "$tcp_malformed_probes"
         printf 'udp_malformed_probes=%s\n' "$udp_malformed_probes"
+        printf 'stateful_probes=socks_connect,memcached_set,tftp_wrq\n'
         printf 'tcp_names=%s\n' "$(IFS=,; echo "${tcp_names[*]}")"
         printf 'udp_names=%s\n' "$(IFS=,; echo "${udp_names[*]}")"
         printf 'tcp_capture_only=%s\n' "$(IFS=,; echo "${tcp_capture_only[*]}")"
