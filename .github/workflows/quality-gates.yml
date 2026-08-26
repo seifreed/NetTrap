@@ -159,6 +159,7 @@ jobs:
         env:
           NETTRAP_BIN: ./target/release/nettrap
           NETTRAP_MATRIX_REPEAT: "2"
+          NETTRAP_MATRIX_DURATION_SECONDS: "60"
         run: bash tests/protocol_matrix_smoke.sh
 
   scheduled-heavy-gates:
