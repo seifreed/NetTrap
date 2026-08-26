@@ -25,6 +25,12 @@ fn main() -> BuildResult<()> {
         return Ok(());
     }
 
+    // Unit-test binaries must start on runners without Npcap installed. Keep
+    // the import available, but resolve the runtime DLL only if capture code
+    // is actually exercised.
+    println!("cargo:rustc-link-lib=delayimp");
+    println!("cargo:rustc-link-arg-tests=/DELAYLOAD:wpcap.dll");
+
     let Some(dll_dir) = find_npcap_dir() else {
         // No ARM64 Npcap runtime available; leave linking to whatever the
         // environment provides (LIB, etc.). Emitting nothing keeps non-Npcap

@@ -36,6 +36,7 @@ fn run() -> Result<(), String> {
 
     println!("cargo:rustc-link-lib=delayimp");
     println!("cargo:rustc-link-arg-bin=nettrap=/DELAYLOAD:wpcap.dll");
+    println!("cargo:rustc-link-arg-tests=/DELAYLOAD:wpcap.dll");
 
     if let Some(dll_dir) = find_npcap_dir() {
         let profile_dir = output_profile_dir()?;
