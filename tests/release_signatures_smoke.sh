@@ -75,3 +75,14 @@ if cosign verify-blob --key "$workdir/key.pub" --bundle "$bundle" "$artifact" >/
 fi
 
 echo "PASS: release signature verification rejects tampering"
+
+release_dir="$workdir/release"
+mkdir -p "$release_dir"
+printf 'unsigned release artifact\n' >"$release_dir/nettrap-linux-x86_64.binary"
+if COSIGN_CERTIFICATE_IDENTITY="test-identity" \
+    scripts/verify-release-signatures.sh "$release_dir" >/dev/null 2>&1; then
+    echo "release verifier accepted an artifact without a Sigstore bundle" >&2
+    exit 1
+fi
+
+echo "PASS: release verifier rejects missing Sigstore bundles"
