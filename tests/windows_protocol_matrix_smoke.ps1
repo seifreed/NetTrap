@@ -48,6 +48,8 @@ $tcpNames = @($tcpRows.Name)
 $udpNames = @($udpRows.Name)
 $tcpCaptureOnly = @($tcpRows | Where-Object Mode -eq "capture" | ForEach-Object Name)
 $udpCaptureOnly = @($udpRows | Where-Object Mode -eq "capture" | ForEach-Object Name)
+$tcpObservedResponses = [System.Collections.Generic.List[string]]::new()
+$udpObservedResponses = [System.Collections.Generic.List[string]]::new()
 $tcpPorts = @{}
 $udpPorts = @{}
 
@@ -125,7 +127,7 @@ function Read-Bytes($Stream) {
     return [byte[]]$buffer[0..($count - 1)]
 }
 
-function Invoke-TcpProbe([int] $Port, [byte[]] $Payload, [bool] $ServerFirst, [bool] $ExpectResponse) {
+function Invoke-TcpProbe([string] $Name, [int] $Port, [byte[]] $Payload, [bool] $ServerFirst, [bool] $ExpectResponse) {
     $client = [System.Net.Sockets.TcpClient]::new()
     $client.ReceiveTimeout = 5000
     try {
@@ -138,6 +140,9 @@ function Invoke-TcpProbe([int] $Port, [byte[]] $Payload, [bool] $ServerFirst, [b
                 throw "server-first listener on port $Port returned no greeting"
             }
             if ($Payload.Length -eq 0) {
+                if ($ExpectResponse -and -not $script:tcpObservedResponses.Contains($Name)) {
+                    [void]$script:tcpObservedResponses.Add($Name)
+                }
                 return
             }
         }
@@ -152,12 +157,15 @@ function Invoke-TcpProbe([int] $Port, [byte[]] $Payload, [bool] $ServerFirst, [b
         if ($response.Length -eq 0) {
             throw "TCP listener on port $Port returned no response"
         }
+        if (-not $script:tcpObservedResponses.Contains($Name)) {
+            [void]$script:tcpObservedResponses.Add($Name)
+        }
     } finally {
         $client.Dispose()
     }
 }
 
-function Invoke-UdpProbe([int] $Port, [byte[]] $Payload, [bool] $ExpectResponse) {
+function Invoke-UdpProbe([string] $Name, [int] $Port, [byte[]] $Payload, [bool] $ExpectResponse) {
     $udp = [System.Net.Sockets.UdpClient]::new()
     try {
         $udp.Client.ReceiveTimeout = 5000
@@ -169,6 +177,9 @@ function Invoke-UdpProbe([int] $Port, [byte[]] $Payload, [bool] $ExpectResponse)
         $response = $udp.Receive([ref]$endpoint)
         if ($response.Length -eq 0) {
             throw "UDP listener on port $Port returned no response"
+        }
+        if (-not $script:udpObservedResponses.Contains($Name)) {
+            [void]$script:udpObservedResponses.Add($Name)
         }
     } finally {
         $udp.Dispose()
@@ -263,19 +274,19 @@ try {
         foreach ($name in $tcpNames) {
             $expectResponse = $tcpCaptureOnly -notcontains $name
             $payload = [byte[]](Get-TcpPayload $name)
-            Invoke-TcpProbe $tcpPorts[$name] $payload (Is-ServerFirst $name) $expectResponse
+            Invoke-TcpProbe $name $tcpPorts[$name] $payload (Is-ServerFirst $name) $expectResponse
         }
 
         foreach ($name in $udpNames) {
             $expectResponse = $udpCaptureOnly -notcontains $name
             $payload = [byte[]](Get-UdpPayload $name)
-            Invoke-UdpProbe $udpPorts[$name] $payload $expectResponse
+            Invoke-UdpProbe $name $udpPorts[$name] $payload $expectResponse
         }
 
         $malformedHttp = [Text.Encoding]::ASCII.GetBytes(
             ("GET /" + ("A" * 4096) + " HTTP/1.1`r`nHost: matrix.test`r`n`r`n"))
-        Invoke-TcpProbe $tcpPorts["http"] $malformedHttp $false $false
-        Invoke-UdpProbe $udpPorts["dns"] ([byte[]](0xff, 0x00, 0xff, 0x00)) $false
+        Invoke-TcpProbe "http" $tcpPorts["http"] $malformedHttp $false $false
+        Invoke-UdpProbe "dns" $udpPorts["dns"] ([byte[]](0xff, 0x00, 0xff, 0x00)) $false
 
         if ($process.HasExited) {
             throw "NetTrap exited during Windows protocol matrix round $round (code $($process.ExitCode))"
@@ -290,11 +301,13 @@ try {
     $udpResponses = ($udpNames.Count - $udpCaptureOnly.Count) * $repeat
     if ($env:NETTRAP_MATRIX_REPORT) {
         @(
-            "schema=1"
+            "schema=2"
             "tcp_handlers=$($tcpNames.Count)"
             "udp_handlers=$($udpNames.Count)"
             "tcp_responses=$tcpResponses"
             "udp_responses=$udpResponses"
+            "tcp_observed_responses=$($tcpObservedResponses -join ',')"
+            "udp_observed_responses=$($udpObservedResponses -join ',')"
             "tcp_names=$($tcpNames -join ',')"
             "udp_names=$($udpNames -join ',')"
             "tcp_capture_only=$($tcpCaptureOnly -join ',')"

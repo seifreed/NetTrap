@@ -172,6 +172,8 @@ PY
 
 tcp_responses=0
 udp_responses=0
+tcp_observed_responses=()
+udp_observed_responses=()
 fd_baseline=""
 rss_baseline_kb=""
 if [[ -d "/proc/$nettrap_pid/fd" ]]; then
@@ -225,6 +227,9 @@ for index in "${!tcp_ports[@]}"; do
             exit 1
         fi
         tcp_responses=$((tcp_responses + 1))
+        if ! contains_name "$name" "${tcp_observed_responses[@]-}"; then
+            tcp_observed_responses+=("$name")
+        fi
     fi
 done
 
@@ -253,6 +258,9 @@ for index in "${!udp_ports[@]}"; do
             exit 1
         fi
         udp_responses=$((udp_responses + 1))
+        if ! contains_name "$name" "${udp_observed_responses[@]-}"; then
+            udp_observed_responses+=("$name")
+        fi
     fi
 done
 
@@ -275,11 +283,13 @@ fi
 if [[ -n "${NETTRAP_MATRIX_REPORT:-}" ]]; then
     mkdir -p "$(dirname "$NETTRAP_MATRIX_REPORT")"
     {
-        printf 'schema=1\n'
+        printf 'schema=2\n'
         printf 'tcp_handlers=%s\n' "${#tcp_names[@]}"
         printf 'udp_handlers=%s\n' "${#udp_names[@]}"
         printf 'tcp_responses=%s\n' "$tcp_responses"
         printf 'udp_responses=%s\n' "$udp_responses"
+        printf 'tcp_observed_responses=%s\n' "$(IFS=,; echo "${tcp_observed_responses[*]}")"
+        printf 'udp_observed_responses=%s\n' "$(IFS=,; echo "${udp_observed_responses[*]}")"
         printf 'tcp_names=%s\n' "$(IFS=,; echo "${tcp_names[*]}")"
         printf 'udp_names=%s\n' "$(IFS=,; echo "${udp_names[*]}")"
         printf 'tcp_capture_only=%s\n' "$(IFS=,; echo "${tcp_capture_only[*]}")"

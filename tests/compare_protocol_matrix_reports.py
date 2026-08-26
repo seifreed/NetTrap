@@ -11,11 +11,14 @@ REQUIRED_KEYS = {
     "udp_handlers",
     "tcp_responses",
     "udp_responses",
+    "tcp_observed_responses",
+    "udp_observed_responses",
     "tcp_names",
     "udp_names",
     "tcp_capture_only",
     "udp_capture_only",
 }
+EXPECTED_SCHEMA = "2"
 
 
 def read_report(path: Path) -> dict[str, str]:
@@ -40,6 +43,13 @@ def main() -> int:
         return 2
     linux = read_report(Path(sys.argv[1]))
     windows = read_report(Path(sys.argv[2]))
+    if linux["schema"] != EXPECTED_SCHEMA or windows["schema"] != EXPECTED_SCHEMA:
+        print(
+            f"unsupported protocol matrix schema: Linux={linux['schema']!r} "
+            f"Windows={windows['schema']!r}; expected {EXPECTED_SCHEMA!r}",
+            file=sys.stderr,
+        )
+        return 1
     if linux != windows:
         differing = sorted(key for key in REQUIRED_KEYS if linux[key] != windows[key])
         for key in differing:
