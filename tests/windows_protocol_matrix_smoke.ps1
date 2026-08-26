@@ -186,6 +186,62 @@ function Assert-TcpResponse([string] $Name, [byte[]] $Response) {
     }
 }
 
+function Read-UntilText($Stream, [string] $Marker) {
+    $data = [System.Collections.Generic.List[byte]]::new()
+    while ($true) {
+        $chunk = Read-Bytes $Stream
+        if ($chunk.Length -eq 0) {
+            throw "stream closed before receiving '$Marker'"
+        }
+        $data.AddRange($chunk)
+        if ([Text.Encoding]::ASCII.GetString($data.ToArray()).Contains($Marker)) {
+            return $data.ToArray()
+        }
+    }
+}
+
+function Invoke-TelnetProbe([int] $Port) {
+    $client = [System.Net.Sockets.TcpClient]::new()
+    $client.ReceiveTimeout = 5000
+    try {
+        $client.Connect("127.0.0.1", $Port)
+        $stream = $client.GetStream()
+        $stream.ReadTimeout = 5000
+
+        $banner = Read-UntilText $stream " login: "
+        $bannerText = [Text.Encoding]::ASCII.GetString($banner)
+        if ($bannerText -notmatch 'nettrap\.local login:') {
+            throw "invalid Telnet login banner"
+        }
+
+        $username = [Text.Encoding]::ASCII.GetBytes("matrix`r`n")
+        $stream.Write($username, 0, $username.Length)
+        [void](Read-UntilText $stream "Password: ")
+
+        $password = [Text.Encoding]::ASCII.GetBytes("secret`r`n")
+        $stream.Write($password, 0, $password.Length)
+        $success = Read-UntilText $stream "# "
+        $successText = [Text.Encoding]::ASCII.GetString($success)
+        if ($successText -notmatch 'Login successful\.') {
+            throw "Telnet authentication did not succeed"
+        }
+
+        $command = [Text.Encoding]::ASCII.GetBytes("id`r`n")
+        $stream.Write($command, 0, $command.Length)
+        $response = Read-UntilText $stream "# "
+        if ([Text.Encoding]::ASCII.GetString($response) -notmatch 'uid=0\(root\)') {
+            throw "Telnet shell command response was not returned"
+        }
+        if (-not $script:tcpObservedResponses.Contains("telnet")) {
+            [void]$script:tcpObservedResponses.Add("telnet")
+        }
+        Record-ResponseSize "tcp" "telnet" $response.Length
+        $script:tcpResponses++
+    } finally {
+        $client.Dispose()
+    }
+}
+
 function Assert-UdpResponse([string] $Name, [byte[]] $Response) {
     if ($Response.Length -eq 0) {
         throw "UDP listener on port $($udpPorts[$Name]) returned an empty response"
@@ -216,6 +272,10 @@ function Assert-UdpResponse([string] $Name, [byte[]] $Response) {
 }
 
 function Invoke-TcpProbe([string] $Name, [int] $Port, [byte[]] $Payload, [bool] $ServerFirst, [bool] $ExpectResponse) {
+    if ($Name -eq "telnet" -and $ExpectResponse) {
+        Invoke-TelnetProbe $Port
+        return
+    }
     $client = [System.Net.Sockets.TcpClient]::new()
     $client.ReceiveTimeout = 5000
     try {

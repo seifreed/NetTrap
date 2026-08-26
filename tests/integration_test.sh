@@ -180,6 +180,41 @@ run_telnet_banner() {
     grep -Fq 'login:' <<< "$output"
 }
 
+run_telnet_session() {
+    python3 - <<'PY'
+import socket
+
+sock = socket.create_connection(("127.0.0.1", 2323), timeout=5)
+sock.settimeout(5)
+
+def recv_until(marker):
+    data = b""
+    while marker not in data:
+        chunk = sock.recv(4096)
+        if not chunk:
+            raise SystemExit(f"telnet closed before {marker!r}")
+        data += chunk
+    return data
+
+try:
+    banner = recv_until(b" login: ")
+    if b"nettrap.local login:" not in banner:
+        raise SystemExit("telnet login banner missing hostname")
+    sock.sendall(b"matrix\r\n")
+    recv_until(b"Password: ")
+    sock.sendall(b"secret\r\n")
+    success = recv_until(b"# ")
+    if b"Login successful." not in success:
+        raise SystemExit("telnet authentication did not succeed")
+    sock.sendall(b"id\r\n")
+    response = recv_until(b"# ")
+    if b"uid=0(root)" not in response:
+        raise SystemExit("telnet shell command response was not returned")
+finally:
+    sock.close()
+PY
+}
+
 run_irc_registration() {
     local output
     output="$({ printf 'NICK matrix\r\nUSER matrix 0 * :matrix\r\n'; sleep 1; } |
@@ -915,6 +950,8 @@ run_test "Telnet port open" \
     "nc -z 127.0.0.1 2323"
 
 run_test "Telnet login banner" run_telnet_banner
+
+run_test "Telnet authenticated shell session" run_telnet_session
 
 echo ""
 echo "--- Complete Protocol Matrix ---"
