@@ -1625,6 +1625,66 @@ pub mod windivert {
         }
 
         #[test]
+        fn redirects_ipv6_tcp_and_restores_original_source_on_reply() {
+            let client = "2001:db8::10".parse::<Ipv6Addr>().unwrap();
+            let destination = "2001:db8::20".parse::<Ipv6Addr>().unwrap();
+            let redirects = vec![PortRedirect::new(443, true, 8443)];
+            let flows = Arc::new(Mutex::new(RedirectFlowTable::default()));
+
+            let mut outbound = vec![0u8; 60];
+            outbound[0] = 0x60;
+            outbound[4..6].copy_from_slice(&20u16.to_be_bytes());
+            outbound[6] = IPPROTO_TCP;
+            outbound[7] = 64;
+            outbound[8..24].copy_from_slice(&client.octets());
+            outbound[24..40].copy_from_slice(&destination.octets());
+            outbound[40..42].copy_from_slice(&40000u16.to_be_bytes());
+            outbound[42..44].copy_from_slice(&443u16.to_be_bytes());
+            outbound[52] = 0x50;
+            outbound[53] = 0x02;
+
+            let mut outbound_addr = WindivertAddress::default();
+            outbound_addr.set_direction(WINDIVERT_DIRECTION_OUT);
+            WinDivertInterceptor::redirect_packet(
+                &mut outbound,
+                outbound.len(),
+                &outbound_addr,
+                &redirects,
+                &flows,
+            )
+            .expect("outbound IPv6 TCP rewrite should succeed");
+
+            assert_eq!(&outbound[24..40], &Ipv6Addr::LOCALHOST.octets());
+            assert_eq!(&outbound[42..44], &8443u16.to_be_bytes());
+
+            let mut reply = vec![0u8; 60];
+            reply[0] = 0x60;
+            reply[4..6].copy_from_slice(&20u16.to_be_bytes());
+            reply[6] = IPPROTO_TCP;
+            reply[7] = 64;
+            reply[8..24].copy_from_slice(&Ipv6Addr::LOCALHOST.octets());
+            reply[24..40].copy_from_slice(&client.octets());
+            reply[40..42].copy_from_slice(&8443u16.to_be_bytes());
+            reply[42..44].copy_from_slice(&40000u16.to_be_bytes());
+            reply[52] = 0x50;
+            reply[53] = 0x10;
+
+            let mut reply_addr = WindivertAddress::default();
+            reply_addr.set_direction(WINDIVERT_DIRECTION_OUT);
+            WinDivertInterceptor::redirect_packet(
+                &mut reply,
+                reply.len(),
+                &reply_addr,
+                &redirects,
+                &flows,
+            )
+            .expect("IPv6 TCP reply rewrite should succeed");
+
+            assert_eq!(&reply[8..24], &destination.octets());
+            assert_eq!(&reply[40..42], &443u16.to_be_bytes());
+        }
+
+        #[test]
         fn rejects_non_windivert_interception_modes() {
             let config = InterceptorConfig {
                 mode: nettrap_core::config::InterceptionMode::Userspace,
