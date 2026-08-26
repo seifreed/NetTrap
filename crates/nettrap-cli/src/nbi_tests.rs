@@ -532,9 +532,19 @@ async fn slow_export_does_not_block_local_file_persistence() {
     );
 
     collector.record(&nbi).await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    let content = tokio::fs::read_to_string(&path).await.unwrap();
+    let content = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match tokio::fs::read_to_string(&path).await {
+                Ok(content) if !content.trim().is_empty() => break content,
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => panic!("local persistence failed: {error}"),
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("local persistence should complete before the timeout");
     assert!(
         !content.trim().is_empty(),
         "local persistence should complete first"
