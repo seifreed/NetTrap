@@ -78,6 +78,26 @@ function Stop-NetTrap {
     }
 }
 
+function Assert-TcpListenersClosed([int[]] $Ports) {
+    foreach ($port in $Ports) {
+        $closed = $false
+        for ($attempt = 0; $attempt -lt 20 -and -not $closed; $attempt++) {
+            $client = [Net.Sockets.TcpClient]::new()
+            try {
+                $client.Connect("127.0.0.1", $port)
+            } catch [System.Net.Sockets.SocketException] {
+                $closed = $true
+            } finally {
+                $client.Dispose()
+            }
+            if (-not $closed) { Start-Sleep -Milliseconds 250 }
+        }
+        if (-not $closed) {
+            throw "TCP listener on port $port remained open after shutdown"
+        }
+    }
+}
+
 function Wait-Tcp([int] $Port) {
     for ($i = 0; $i -lt 40; $i++) {
         if ($process.HasExited) { throw "NetTrap exited before listener startup" }
@@ -238,6 +258,8 @@ try {
         $iterations++
     }
     if ($iterations -eq 0) { throw "Windows hostile soak completed no iterations" }
+    Stop-NetTrap
+    Assert-TcpListenersClosed @(18080, 18054)
     Write-Host ("PASS: {0}s Windows hostile soak completed ({1} iterations, {2}-connection churn)" -f
         $duration, $iterations, $churn)
 } catch {
