@@ -190,14 +190,18 @@ pub mod windivert {
             now: Instant,
         ) -> Option<SocketAddr> {
             self.prune(now);
-            let flow_key = self.reverse.get(key).cloned().or_else(|| {
-                self.entries.iter().find_map(|(flow_key, flow)| {
+            let flow_key = if let Some(flow_key) = self.reverse.get(key).cloned() {
+                flow_key
+            } else {
+                let flow_key = self.entries.iter().find_map(|(flow_key, flow)| {
                     (flow_key.protocol == key.protocol
                         && flow_key.client == key.client
                         && flow.listener_port == key.listener_port)
                         .then(|| flow_key.clone())
-                })
-            })?;
+                })?;
+                self.reverse.insert(key.clone(), flow_key.clone());
+                flow_key
+            };
             let destination = self
                 .entries
                 .get(&flow_key)
