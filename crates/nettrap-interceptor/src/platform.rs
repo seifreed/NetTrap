@@ -667,7 +667,7 @@ pub mod windivert {
         fn redirect_packet(
             data: &mut [u8],
             len: usize,
-            addr: &WindivertAddress,
+            addr: &mut WindivertAddress,
             redirects: &[PortRedirect],
             flow_table: &Arc<Mutex<RedirectFlowTable>>,
         ) -> Result<()> {
@@ -742,6 +742,8 @@ pub mod windivert {
                 ) {
                     return Err(Error::Packet("Failed to rewrite outbound endpoint".into()));
                 }
+                // Deliver packets retargeted to a local listener through the inbound path.
+                addr.set_direction(WINDIVERT_DIRECTION_IN);
                 if new_flow {
                     flows.insert(key, listener_port, now);
                 }
@@ -838,8 +840,13 @@ pub mod windivert {
                     };
 
                     if !restore_original
-                        && let Err(err) =
-                            Self::redirect_packet(&mut packet_buf, len, &addr, &redirects, &flows)
+                        && let Err(err) = Self::redirect_packet(
+                            &mut packet_buf,
+                            len,
+                            &mut addr,
+                            &redirects,
+                            &flows,
+                        )
                     {
                         tracing::warn!(
                             "WinDivert packet rewrite failed; reinjecting original packet: {}",
@@ -1282,7 +1289,7 @@ pub mod windivert {
             WinDivertInterceptor::redirect_packet(
                 &mut outbound,
                 outbound_len,
-                &outbound_addr,
+                &mut outbound_addr,
                 &redirects,
                 &flows,
             )
@@ -1290,6 +1297,7 @@ pub mod windivert {
 
             assert_eq!(&outbound[16..20], &[127, 0, 0, 1]);
             assert_eq!(&outbound[22..24], &5353u16.to_be_bytes());
+            assert_eq!(outbound_addr.direction(), WINDIVERT_DIRECTION_IN);
 
             let mut inbound = vec![
                 0x45,
@@ -1332,7 +1340,7 @@ pub mod windivert {
             WinDivertInterceptor::redirect_packet(
                 &mut outbound_reply,
                 outbound_reply_len,
-                &outbound_reply_addr,
+                &mut outbound_reply_addr,
                 &redirects,
                 &flows,
             )
@@ -1343,7 +1351,7 @@ pub mod windivert {
             WinDivertInterceptor::redirect_packet(
                 &mut inbound,
                 inbound_len,
-                &inbound_addr,
+                &mut inbound_addr,
                 &redirects,
                 &flows,
             )
@@ -1406,7 +1414,7 @@ pub mod windivert {
             WinDivertInterceptor::redirect_packet(
                 &mut outbound,
                 outbound_len,
-                &outbound_addr,
+                &mut outbound_addr,
                 &redirects,
                 &flows,
             )
@@ -1414,6 +1422,7 @@ pub mod windivert {
 
             assert_eq!(&outbound[16..20], &[127, 0, 0, 1]);
             assert_eq!(&outbound[22..24], &8080u16.to_be_bytes());
+            assert_eq!(outbound_addr.direction(), WINDIVERT_DIRECTION_IN);
 
             let mut reply = vec![
                 0x45,
@@ -1464,7 +1473,7 @@ pub mod windivert {
             WinDivertInterceptor::redirect_packet(
                 &mut reply,
                 reply_len,
-                &reply_addr,
+                &mut reply_addr,
                 &redirects,
                 &flows,
             )
@@ -1542,7 +1551,7 @@ pub mod windivert {
             WinDivertInterceptor::redirect_packet(
                 &mut outbound,
                 outbound_len,
-                &outbound_addr,
+                &mut outbound_addr,
                 &redirects,
                 &flows,
             )
@@ -1612,7 +1621,7 @@ pub mod windivert {
             WinDivertInterceptor::redirect_packet(
                 &mut reply,
                 reply_len,
-                &reply_addr,
+                &mut reply_addr,
                 &redirects,
                 &flows,
             )
@@ -1650,7 +1659,7 @@ pub mod windivert {
             WinDivertInterceptor::redirect_packet(
                 &mut outbound,
                 outbound_len,
-                &outbound_addr,
+                &mut outbound_addr,
                 &redirects,
                 &flows,
             )
@@ -1677,7 +1686,7 @@ pub mod windivert {
             WinDivertInterceptor::redirect_packet(
                 &mut reply,
                 reply_len,
-                &reply_addr,
+                &mut reply_addr,
                 &redirects,
                 &flows,
             )
