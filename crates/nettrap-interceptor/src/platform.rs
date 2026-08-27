@@ -195,7 +195,7 @@ pub mod windivert {
             } else {
                 let flow_key = self.entries.iter().find_map(|(flow_key, flow)| {
                     (flow_key.protocol == key.protocol
-                        && flow_key.client == key.client
+                        && flow.original_destination == key.client
                         && flow.listener_port == key.listener_port)
                         .then(|| flow_key.clone())
                 })?;
