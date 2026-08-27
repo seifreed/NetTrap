@@ -1,6 +1,13 @@
 #!/bin/bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_TEMPLATE="${NETTRAP_CONFIG_TEMPLATE:-/etc/nettrap/config.toml}"
+NETTRAP_BIN="${NETTRAP_BIN:-nettrap}"
+if [[ ! -r "$CONFIG_TEMPLATE" ]]; then
+    CONFIG_TEMPLATE="$SCRIPT_DIR/../config/default.toml"
+fi
+
 echo "========================================"
 echo "NetTrap Complete Test Suite"
 echo "========================================"
@@ -544,7 +551,7 @@ run_full_protocol_matrix() {
     local matrix_script
     matrix_script="$(dirname -- "$0")/protocol_matrix_smoke.sh"
     NETTRAP_MATRIX_REPEAT="${NETTRAP_E2E_MATRIX_REPEAT:-2}" \
-        NETTRAP_BIN=nettrap "$matrix_script"
+        NETTRAP_BIN="$NETTRAP_BIN" "$matrix_script"
 }
 
 run_artifact_exports() {
@@ -561,16 +568,28 @@ run_artifact_exports() {
     test -s "$ARTIFACT_DIR/traffic.pcap"
 
     for format in json jsonl toon sarif csv; do
-        nettrap report -i "$events" -o "$ARTIFACT_DIR/report.$format" --format "$format" >/dev/null
+        "$NETTRAP_BIN" report -i "$events" -o "$ARTIFACT_DIR/report.$format" --format "$format" >/dev/null
         test -s "$ARTIFACT_DIR/report.$format"
     done
 
-    nettrap pcap -i "$ARTIFACT_DIR/traffic.pcap" -o "$ARTIFACT_DIR/replayed.jsonl" >/dev/null
+    "$NETTRAP_BIN" pcap -i "$ARTIFACT_DIR/traffic.pcap" -o "$ARTIFACT_DIR/replayed.jsonl" >/dev/null
     test -s "$ARTIFACT_DIR/replayed.jsonl"
 }
 
-sed 's/^output_format =.*/output_format = "toon"/; s/^pcap_enabled =.*/pcap_enabled = true/; /^output_format =/a output_path = "'"$ARTIFACT_DIR"'/events.jsonl"\npcap_path = "'"$ARTIFACT_DIR"'/traffic.pcap"\nsmtp_dir = "/tmp/nettrap-integration-smtp"' \
-    /etc/nettrap/config.toml >"$TEST_CONFIG"
+awk -v artifact_dir="$ARTIFACT_DIR" '
+    /^output_format =/ {
+        print "output_format = \"toon\""
+        print "output_path = \"" artifact_dir "/events.jsonl\""
+        print "pcap_path = \"" artifact_dir "/traffic.pcap\""
+        print "smtp_dir = \"/tmp/nettrap-integration-smtp\""
+        next
+    }
+    /^pcap_enabled =/ {
+        print "pcap_enabled = true"
+        next
+    }
+    { print }
+' "$CONFIG_TEMPLATE" >"$TEST_CONFIG"
 cat >>"$TEST_CONFIG" <<'EOF'
 
 [[listeners]]
@@ -850,7 +869,7 @@ EOF
 
 mkdir -p "$TFTP_ROOT"
 echo "Starting NetTrap engine..."
-timeout "$INTEGRATION_TIMEOUT_SECONDS" nettrap run -c "$TEST_CONFIG" &
+timeout "$INTEGRATION_TIMEOUT_SECONDS" "$NETTRAP_BIN" run -c "$TEST_CONFIG" &
 NETTRAP_PID=$!
 sleep 3
 
