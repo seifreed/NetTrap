@@ -1349,8 +1349,8 @@ pub mod windivert {
                 20,
                 0x14,
                 0xe9,
-                0x9c,
-                0x40,
+                0,
+                53,
                 0,
                 8,
                 0,
@@ -1479,8 +1479,8 @@ pub mod windivert {
                 20,
                 0x1f,
                 0x90,
-                0x9c,
-                0x40,
+                0,
+                80,
                 0,
                 0,
                 0,
@@ -1655,7 +1655,7 @@ pub mod windivert {
             reply.truncate(48);
             reply[8..24].copy_from_slice(&"2001:db8::10".parse::<Ipv6Addr>().unwrap().octets());
             reply[24..40].copy_from_slice(&"2001:db8::20".parse::<Ipv6Addr>().unwrap().octets());
-            reply[40..48].copy_from_slice(&[0x14, 0xe9, 0x9c, 0x40, 0, 8, 0, 0]);
+            reply[40..48].copy_from_slice(&[0x14, 0xe9, 0, 53, 0, 8, 0, 0]);
             let mut reply_addr = WindivertAddress::default();
             reply_addr.set_direction(WINDIVERT_DIRECTION_OUT);
             let reply_len = reply.len();
@@ -1725,7 +1725,7 @@ pub mod windivert {
             reply[8..24].copy_from_slice(&client.octets());
             reply[24..40].copy_from_slice(&destination.octets());
             reply[40..42].copy_from_slice(&8443u16.to_be_bytes());
-            reply[42..44].copy_from_slice(&40000u16.to_be_bytes());
+            reply[42..44].copy_from_slice(&443u16.to_be_bytes());
             reply[52] = 0x50;
             reply[53] = 0x10;
 
