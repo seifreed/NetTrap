@@ -23,8 +23,8 @@ pub mod windivert {
     use crate::prelude::*;
     use nettrap_windivert::{
         HANDLE, IPPROTO_TCP, IPPROTO_UDP, WINDIVERT_DIRECTION_IN, WINDIVERT_DIRECTION_OUT,
-        WINDIVERT_LAYER_NETWORK, WinDivert, WindivertAddress, WindivertDataNetwork, WindivertFlags,
-        WindivertIpHdr, WindivertIpv6Hdr, WindivertTcpHdr, WindivertUdpHdr, close_handle,
+        WINDIVERT_LAYER_NETWORK, WinDivert, WindivertAddress, WindivertFlags, WindivertIpHdr,
+        WindivertIpv6Hdr, WindivertTcpHdr, WindivertUdpHdr, close_handle,
     };
     use parking_lot::{Mutex, RwLock};
     use std::collections::{HashMap, VecDeque};
@@ -35,8 +35,6 @@ pub mod windivert {
     const MAX_REDIRECT_FLOWS: usize = 8192;
     const MAX_REDIRECT_EXPIRY_ENTRIES: usize = MAX_REDIRECT_FLOWS * 2;
     const REDIRECT_FLOW_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
-    // WinDivert requires inbound loopback injection to use the loopback interface.
-    const LOOPBACK_IF_IDX: u32 = 1;
 
     /// TCP or UDP destination-port mapping applied by the WinDivert NAT path.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,7 +145,7 @@ pub mod windivert {
 
             let reverse = ReverseFlowKey {
                 protocol: key.protocol,
-                client: key.client,
+                client: key.original_destination,
                 listener_port,
             };
             if let Some(previous) = self.reverse.insert(reverse, key.clone()) {
@@ -186,11 +184,11 @@ pub mod windivert {
             listener
         }
 
-        fn inbound_destination(
+        fn inbound_endpoints(
             &mut self,
             key: &ReverseFlowKey,
             now: Instant,
-        ) -> Option<SocketAddr> {
+        ) -> Option<(SocketAddr, SocketAddr)> {
             self.prune(now);
             let flow_key = if let Some(flow_key) = self.reverse.get(key).cloned() {
                 flow_key
@@ -204,14 +202,14 @@ pub mod windivert {
                 self.reverse.insert(key.clone(), flow_key.clone());
                 flow_key
             };
-            let destination = self
+            let endpoints = self
                 .entries
                 .get(&flow_key)
-                .map(|flow| flow.original_destination);
-            if destination.is_some() {
+                .map(|flow| (flow.original_destination, flow_key.client));
+            if endpoints.is_some() {
                 self.touch(&flow_key, now);
             }
-            destination
+            endpoints
         }
     }
 
@@ -696,7 +694,9 @@ pub mod windivert {
                 client: SocketAddr::new(dst, dst_port),
                 listener_port: src_port,
             };
-            if let Some(original_destination) = flows.inbound_destination(&reverse, now) {
+            if let Some((original_destination, original_client)) =
+                flows.inbound_endpoints(&reverse, now)
+            {
                 if !Self::rewrite_endpoint(
                     data,
                     is_ipv6,
@@ -707,6 +707,18 @@ pub mod windivert {
                 ) {
                     return Err(Error::Packet(
                         "Failed to rewrite loopback reply endpoint".into(),
+                    ));
+                }
+                if !Self::rewrite_endpoint(
+                    data,
+                    is_ipv6,
+                    transport_offset,
+                    false,
+                    original_client.ip(),
+                    original_client.port(),
+                ) {
+                    return Err(Error::Packet(
+                        "Failed to rewrite redirected reply destination".into(),
                     ));
                 }
                 return Ok(());
@@ -729,27 +741,27 @@ pub mod windivert {
                     return Ok(());
                 };
                 let new_flow = !flows.entries.contains_key(&key);
-                let loopback = if is_ipv6 {
-                    IpAddr::V6(Ipv6Addr::LOCALHOST)
-                } else {
-                    IpAddr::V4(Ipv4Addr::LOCALHOST)
-                };
                 if !Self::rewrite_endpoint(
                     data,
                     is_ipv6,
                     transport_offset,
+                    true,
+                    original_destination.ip(),
+                    original_destination.port(),
+                ) || !Self::rewrite_endpoint(
+                    data,
+                    is_ipv6,
+                    transport_offset,
                     false,
-                    loopback,
+                    key.client.ip(),
                     listener_port,
                 ) {
-                    return Err(Error::Packet("Failed to rewrite outbound endpoint".into()));
+                    return Err(Error::Packet(
+                        "Failed to rewrite redirected endpoints".into(),
+                    ));
                 }
-                // Deliver packets retargeted to a local listener through the inbound path.
+                // Reflect the packet into the inbound stack using the captured interface.
                 addr.set_direction(WINDIVERT_DIRECTION_IN);
-                addr.set_network(WindivertDataNetwork {
-                    if_idx: LOOPBACK_IF_IDX,
-                    sub_if_idx: 0,
-                });
                 if new_flow {
                     flows.insert(key, listener_port, now);
                 }
@@ -1200,15 +1212,18 @@ pub mod windivert {
             assert_eq!(table.entries.len(), 1);
             assert_eq!(table.outbound_listener(&key, now), Some(8443));
             assert_eq!(
-                table.inbound_destination(
+                table.inbound_endpoints(
                     &ReverseFlowKey {
                         protocol: IPPROTO_TCP,
-                        client: "192.0.2.10:40000".parse().unwrap(),
+                        client: "198.51.100.20:443".parse().unwrap(),
                         listener_port: 8443,
                     },
                     now,
                 ),
-                Some("198.51.100.20:443".parse().unwrap())
+                Some((
+                    "198.51.100.20:443".parse().unwrap(),
+                    "192.0.2.10:40000".parse().unwrap(),
+                ))
             );
 
             for _ in 0..MAX_REDIRECT_EXPIRY_ENTRIES * 2 {
@@ -1243,15 +1258,18 @@ pub mod windivert {
             table.reverse.clear();
 
             assert_eq!(
-                table.inbound_destination(
+                table.inbound_endpoints(
                     &ReverseFlowKey {
                         protocol: IPPROTO_TCP,
-                        client: "192.0.2.10:40000".parse().unwrap(),
+                        client: "198.51.100.20:443".parse().unwrap(),
                         listener_port: 8443,
                     },
                     now,
                 ),
-                Some("198.51.100.20:443".parse().unwrap())
+                Some((
+                    "198.51.100.20:443".parse().unwrap(),
+                    "192.0.2.10:40000".parse().unwrap(),
+                ))
             );
         }
 
@@ -1302,11 +1320,11 @@ pub mod windivert {
             )
             .expect("outbound rewrite should succeed");
 
-            assert_eq!(&outbound[16..20], &[127, 0, 0, 1]);
+            assert_eq!(&outbound[12..16], &[198, 51, 100, 20]);
+            assert_eq!(&outbound[16..20], &[192, 0, 2, 10]);
+            assert_eq!(&outbound[20..22], &53u16.to_be_bytes());
             assert_eq!(&outbound[22..24], &5353u16.to_be_bytes());
             assert_eq!(outbound_addr.direction(), WINDIVERT_DIRECTION_IN);
-            assert_eq!(outbound_addr.network().if_idx, LOOPBACK_IF_IDX);
-            assert_eq!(outbound_addr.network().sub_if_idx, 0);
 
             let mut inbound = vec![
                 0x45,
@@ -1321,14 +1339,14 @@ pub mod windivert {
                 IPPROTO_UDP,
                 0,
                 0,
-                127,
-                0,
-                0,
-                1,
                 192,
                 0,
                 2,
                 10,
+                198,
+                51,
+                100,
+                20,
                 0x14,
                 0xe9,
                 0x9c,
@@ -1355,7 +1373,9 @@ pub mod windivert {
             )
             .expect("outbound loopback reply rewrite should succeed");
             assert_eq!(&outbound_reply[12..16], &[198, 51, 100, 20]);
+            assert_eq!(&outbound_reply[16..20], &[192, 0, 2, 10]);
             assert_eq!(&outbound_reply[20..22], &53u16.to_be_bytes());
+            assert_eq!(&outbound_reply[22..24], &40000u16.to_be_bytes());
 
             WinDivertInterceptor::redirect_packet(
                 &mut inbound,
@@ -1367,6 +1387,7 @@ pub mod windivert {
             .expect("inbound rewrite should succeed");
 
             assert_eq!(&inbound[12..16], &[198, 51, 100, 20]);
+            assert_eq!(&inbound[16..20], &[192, 0, 2, 10]);
             assert_eq!(&inbound[20..22], &53u16.to_be_bytes());
         }
 
@@ -1429,11 +1450,11 @@ pub mod windivert {
             )
             .expect("outbound TCP rewrite should succeed");
 
-            assert_eq!(&outbound[16..20], &[127, 0, 0, 1]);
+            assert_eq!(&outbound[12..16], &[198, 51, 100, 20]);
+            assert_eq!(&outbound[16..20], &[192, 0, 2, 10]);
+            assert_eq!(&outbound[20..22], &80u16.to_be_bytes());
             assert_eq!(&outbound[22..24], &8080u16.to_be_bytes());
             assert_eq!(outbound_addr.direction(), WINDIVERT_DIRECTION_IN);
-            assert_eq!(outbound_addr.network().if_idx, LOOPBACK_IF_IDX);
-            assert_eq!(outbound_addr.network().sub_if_idx, 0);
 
             let mut reply = vec![
                 0x45,
@@ -1448,14 +1469,14 @@ pub mod windivert {
                 IPPROTO_TCP,
                 0,
                 0,
-                127,
-                0,
-                0,
-                1,
                 192,
                 0,
                 2,
                 10,
+                198,
+                51,
+                100,
+                20,
                 0x1f,
                 0x90,
                 0x9c,
@@ -1491,7 +1512,9 @@ pub mod windivert {
             .expect("loopback TCP reply rewrite should succeed");
 
             assert_eq!(&reply[12..16], &[198, 51, 100, 20]);
+            assert_eq!(&reply[16..20], &[192, 0, 2, 10]);
             assert_eq!(&reply[20..22], &80u16.to_be_bytes());
+            assert_eq!(&reply[22..24], &40000u16.to_be_bytes());
         }
 
         #[test]
@@ -1568,7 +1591,15 @@ pub mod windivert {
             )
             .expect("outbound IPv6 rewrite should succeed");
 
-            assert_eq!(&outbound[24..40], &Ipv6Addr::LOCALHOST.octets());
+            assert_eq!(
+                &outbound[8..24],
+                &"2001:db8::20".parse::<Ipv6Addr>().unwrap().octets()
+            );
+            assert_eq!(
+                &outbound[24..40],
+                &"2001:db8::10".parse::<Ipv6Addr>().unwrap().octets()
+            );
+            assert_eq!(&outbound[40..42], &53u16.to_be_bytes());
             assert_eq!(&outbound[42..44], &5353u16.to_be_bytes());
 
             let mut reply = vec![
@@ -1622,8 +1653,8 @@ pub mod windivert {
                 0,
             ];
             reply.truncate(48);
-            reply[8..24].copy_from_slice(&Ipv6Addr::LOCALHOST.octets());
-            reply[24..40].copy_from_slice(&"2001:db8::10".parse::<Ipv6Addr>().unwrap().octets());
+            reply[8..24].copy_from_slice(&"2001:db8::10".parse::<Ipv6Addr>().unwrap().octets());
+            reply[24..40].copy_from_slice(&"2001:db8::20".parse::<Ipv6Addr>().unwrap().octets());
             reply[40..48].copy_from_slice(&[0x14, 0xe9, 0x9c, 0x40, 0, 8, 0, 0]);
             let mut reply_addr = WindivertAddress::default();
             reply_addr.set_direction(WINDIVERT_DIRECTION_OUT);
@@ -1642,7 +1673,12 @@ pub mod windivert {
                 &reply[8..24],
                 &"2001:db8::20".parse::<Ipv6Addr>().unwrap().octets()
             );
+            assert_eq!(
+                &reply[24..40],
+                &"2001:db8::10".parse::<Ipv6Addr>().unwrap().octets()
+            );
             assert_eq!(&reply[40..42], &53u16.to_be_bytes());
+            assert_eq!(&reply[42..44], &40000u16.to_be_bytes());
         }
 
         #[test]
@@ -1676,7 +1712,9 @@ pub mod windivert {
             )
             .expect("outbound IPv6 TCP rewrite should succeed");
 
-            assert_eq!(&outbound[24..40], &Ipv6Addr::LOCALHOST.octets());
+            assert_eq!(&outbound[8..24], &destination.octets());
+            assert_eq!(&outbound[24..40], &client.octets());
+            assert_eq!(&outbound[40..42], &443u16.to_be_bytes());
             assert_eq!(&outbound[42..44], &8443u16.to_be_bytes());
 
             let mut reply = vec![0u8; 60];
@@ -1684,8 +1722,8 @@ pub mod windivert {
             reply[4..6].copy_from_slice(&20u16.to_be_bytes());
             reply[6] = IPPROTO_TCP;
             reply[7] = 64;
-            reply[8..24].copy_from_slice(&Ipv6Addr::LOCALHOST.octets());
-            reply[24..40].copy_from_slice(&client.octets());
+            reply[8..24].copy_from_slice(&client.octets());
+            reply[24..40].copy_from_slice(&destination.octets());
             reply[40..42].copy_from_slice(&8443u16.to_be_bytes());
             reply[42..44].copy_from_slice(&40000u16.to_be_bytes());
             reply[52] = 0x50;
@@ -1704,7 +1742,9 @@ pub mod windivert {
             .expect("IPv6 TCP reply rewrite should succeed");
 
             assert_eq!(&reply[8..24], &destination.octets());
+            assert_eq!(&reply[24..40], &client.octets());
             assert_eq!(&reply[40..42], &443u16.to_be_bytes());
+            assert_eq!(&reply[42..44], &40000u16.to_be_bytes());
         }
 
         #[test]
