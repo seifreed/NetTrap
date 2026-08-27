@@ -57,6 +57,7 @@ function Process-Output {
 }
 
 try {
+    $env:RUST_LOG = "nettrap_interceptor=debug,nettrap_cli=info"
     $process = Start-Process -FilePath $BinaryPath -ArgumentList @(
         "run", "--intercept", "-c", $configPath
     ) -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru

@@ -740,6 +740,16 @@ pub mod windivert {
                 let Some(listener_port) = listener_port else {
                     return Ok(());
                 };
+                tracing::debug!(
+                    %src,
+                    %dst,
+                    src_port,
+                    dst_port,
+                    listener_port,
+                    if_idx = addr.network().if_idx,
+                    sub_if_idx = addr.network().sub_if_idx,
+                    "WinDivert redirecting outbound packet"
+                );
                 let new_flow = !flows.entries.contains_key(&key);
                 if !Self::rewrite_endpoint(
                     data,
