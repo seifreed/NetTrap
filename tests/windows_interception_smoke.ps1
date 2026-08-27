@@ -26,7 +26,10 @@ output_path = "$($eventsPath.Replace('\', '/'))"
 name = "http-smoke"
 protocol = "tcp"
 port = 18088
-bind_address = "127.0.0.1"
+# WinDivert NAT injects rewritten packets into the inbound stack; wildcard
+# listeners are required because Windows does not deliver these packets to a
+# loopback-only socket.
+bind_address = "0.0.0.0"
 enabled = true
 emulate_response = true
 
@@ -34,7 +37,7 @@ emulate_response = true
 name = "dns-smoke"
 protocol = "udp"
 port = 53539
-bind_address = "127.0.0.1"
+bind_address = "0.0.0.0"
 enabled = true
 emulate_response = true
 "@ | Set-Content -Path $configPath -Encoding utf8

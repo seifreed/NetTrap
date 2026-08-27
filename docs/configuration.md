@@ -76,7 +76,7 @@ match until attribution or original-destination metadata is available.
 | `port` | u16 | required | Listen port |
 | `port_range` | string | - | Comma-separated ports or inclusive range to expand |
 | `protocol` | string | `"tcp"` | Protocol: tcp, udp |
-| `bind_address` | string | `"0.0.0.0"` | Bind IP address |
+| `bind_address` | string | `"0.0.0.0"` | Bind IP address. Windows x64 WinDivert NAT requires redirected listeners to use a wildcard address (`0.0.0.0`/`::`) rather than loopback-only binds. |
 | `enabled` | bool | `true` | Enable/disable |
 | `use_ssl` | bool | `false` | Enable TLS wrapping |
 | `hidden` | bool | `false` | Hidden (proxy-only) |
