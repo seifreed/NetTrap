@@ -721,6 +721,7 @@ pub mod windivert {
                         "Failed to rewrite redirected reply destination".into(),
                     ));
                 }
+                addr.set_direction(WINDIVERT_DIRECTION_IN);
                 return Ok(());
             }
 
@@ -1386,6 +1387,7 @@ pub mod windivert {
             assert_eq!(&outbound_reply[16..20], &[192, 0, 2, 10]);
             assert_eq!(&outbound_reply[20..22], &53u16.to_be_bytes());
             assert_eq!(&outbound_reply[22..24], &40000u16.to_be_bytes());
+            assert_eq!(outbound_reply_addr.direction(), WINDIVERT_DIRECTION_IN);
 
             WinDivertInterceptor::redirect_packet(
                 &mut inbound,
@@ -1525,6 +1527,7 @@ pub mod windivert {
             assert_eq!(&reply[16..20], &[192, 0, 2, 10]);
             assert_eq!(&reply[20..22], &80u16.to_be_bytes());
             assert_eq!(&reply[22..24], &40000u16.to_be_bytes());
+            assert_eq!(reply_addr.direction(), WINDIVERT_DIRECTION_IN);
         }
 
         #[test]
@@ -1689,6 +1692,7 @@ pub mod windivert {
             );
             assert_eq!(&reply[40..42], &53u16.to_be_bytes());
             assert_eq!(&reply[42..44], &40000u16.to_be_bytes());
+            assert_eq!(reply_addr.direction(), WINDIVERT_DIRECTION_IN);
         }
 
         #[test]
@@ -1755,6 +1759,7 @@ pub mod windivert {
             assert_eq!(&reply[24..40], &client.octets());
             assert_eq!(&reply[40..42], &443u16.to_be_bytes());
             assert_eq!(&reply[42..44], &40000u16.to_be_bytes());
+            assert_eq!(reply_addr.direction(), WINDIVERT_DIRECTION_IN);
         }
 
         #[test]
