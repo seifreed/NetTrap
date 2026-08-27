@@ -826,6 +826,7 @@ pub mod windivert {
                     } as usize;
 
                     let original = packet_buf[..len].to_vec();
+                    let original_addr = addr;
                     let mut restore_original = false;
                     let packet = match Self::parse_packet(&original, len, &addr) {
                         Ok(packet) => packet,
@@ -884,7 +885,7 @@ pub mod windivert {
                                     .into(),
                             ));
                         }
-                        api.send(handle, &packet_buf[..len], &addr).map_err(|fallback| {
+                        api.send(handle, &packet_buf[..len], &original_addr).map_err(|fallback| {
                             Error::Interception(format!(
                                 "WinDivertSend failed for modified packet ({}), and original packet fallback failed: {}",
                                 error, fallback
