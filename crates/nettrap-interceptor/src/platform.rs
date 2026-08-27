@@ -23,8 +23,8 @@ pub mod windivert {
     use crate::prelude::*;
     use nettrap_windivert::{
         HANDLE, IPPROTO_TCP, IPPROTO_UDP, WINDIVERT_DIRECTION_IN, WINDIVERT_DIRECTION_OUT,
-        WINDIVERT_LAYER_NETWORK, WinDivert, WindivertAddress, WindivertFlags, WindivertIpHdr,
-        WindivertIpv6Hdr, WindivertTcpHdr, WindivertUdpHdr, close_handle,
+        WINDIVERT_LAYER_NETWORK, WinDivert, WindivertAddress, WindivertDataNetwork, WindivertFlags,
+        WindivertIpHdr, WindivertIpv6Hdr, WindivertTcpHdr, WindivertUdpHdr, close_handle,
     };
     use parking_lot::{Mutex, RwLock};
     use std::collections::{HashMap, VecDeque};
@@ -35,6 +35,8 @@ pub mod windivert {
     const MAX_REDIRECT_FLOWS: usize = 8192;
     const MAX_REDIRECT_EXPIRY_ENTRIES: usize = MAX_REDIRECT_FLOWS * 2;
     const REDIRECT_FLOW_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+    // WinDivert requires inbound loopback injection to use the loopback interface.
+    const LOOPBACK_IF_IDX: u32 = 1;
 
     /// TCP or UDP destination-port mapping applied by the WinDivert NAT path.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -744,6 +746,10 @@ pub mod windivert {
                 }
                 // Deliver packets retargeted to a local listener through the inbound path.
                 addr.set_direction(WINDIVERT_DIRECTION_IN);
+                addr.set_network(WindivertDataNetwork {
+                    if_idx: LOOPBACK_IF_IDX,
+                    sub_if_idx: 0,
+                });
                 if new_flow {
                     flows.insert(key, listener_port, now);
                 }
@@ -1299,6 +1305,8 @@ pub mod windivert {
             assert_eq!(&outbound[16..20], &[127, 0, 0, 1]);
             assert_eq!(&outbound[22..24], &5353u16.to_be_bytes());
             assert_eq!(outbound_addr.direction(), WINDIVERT_DIRECTION_IN);
+            assert_eq!(outbound_addr.network().if_idx, LOOPBACK_IF_IDX);
+            assert_eq!(outbound_addr.network().sub_if_idx, 0);
 
             let mut inbound = vec![
                 0x45,
@@ -1424,6 +1432,8 @@ pub mod windivert {
             assert_eq!(&outbound[16..20], &[127, 0, 0, 1]);
             assert_eq!(&outbound[22..24], &8080u16.to_be_bytes());
             assert_eq!(outbound_addr.direction(), WINDIVERT_DIRECTION_IN);
+            assert_eq!(outbound_addr.network().if_idx, LOOPBACK_IF_IDX);
+            assert_eq!(outbound_addr.network().sub_if_idx, 0);
 
             let mut reply = vec![
                 0x45,
