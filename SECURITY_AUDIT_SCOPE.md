@@ -10,8 +10,11 @@ The review should cover:
 - Untrusted TCP/UDP parsing, protocol dispatch, framing, and resource limits.
 - Linux firewall redirection, nftables/iptables cleanup, privilege boundaries,
   and crash recovery.
-- Windows listener/capture adapters and the experimental WinDivert TCP/UDP
-  NAT path used by `--intercept` on x86_64.
+- Windows listener/capture adapters and the active x86_64 WinDivert path:
+  bounded TCP/UDP NAT flow tracking, IPv4/IPv6 header rewrites, checksum
+  recalculation, reinjection failure recovery, and fail-closed startup. The
+  ARM64 path remains Npcap listener/capture only. Real-host validation is still
+  required before treating Windows transparent interception as production-ready.
 - TLS certificate generation, key storage, and local termination boundaries.
 - REST/API exposure, configuration migration, filesystem writes, and reports.
 - Docker/Kubernetes manifests, release workflows, Sigstore signing, SBOMs, and
@@ -35,7 +38,7 @@ cargo deny check
 ./scripts/quality-gates.sh quick
 actionlint .github/workflows/*.yml
 bash tests/verify_platform.sh
-# On a privileged Windows x86_64 runner with WinDivert files installed:
+# On Windows x86_64, verify transparent interception and fail-closed startup:
 pwsh -File tests/windows_interception_smoke.ps1 -BinaryPath .\nettrap.exe
 # Requires authenticated gh CLI; writes only to target/.
 bash scripts/security-evidence.sh
@@ -48,6 +51,17 @@ alert set for an auditor handoff; generated files are intentionally kept under
 `target/security-audit/`.
 The release workflow verifies Sigstore bundles, GitHub artifact attestations,
 SBOMs, and checksums before publishing.
+
+The security evidence keeps the complete Code Scanning alert count. Release
+admission blocks open high or critical technical findings; Scorecard's
+`CodeReviewID` and `CIIBestPracticesID` process checks remain visible in the
+evidence but are not exploitable-code findings.
+
+Tagged releases also require `SECURITY_AUDIT_REPORT.md` (or the path supplied by
+`NETTRAP_EXTERNAL_AUDIT_REPORT`). `scripts/verify-external-audit.sh` rejects a
+missing, undated, placeholder, or incomplete report before publication. This
+gate deliberately fails until an independent auditor supplies the report; the
+repository does not claim that audit has been performed.
 
 ## Acceptance Criteria
 

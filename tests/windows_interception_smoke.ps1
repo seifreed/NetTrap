@@ -6,11 +6,10 @@ param(
 $ErrorActionPreference = "Stop"
 $workDir = Join-Path $env:RUNNER_TEMP "nettrap-interception-smoke"
 $configPath = Join-Path $workDir "config.toml"
+$eventsPath = Join-Path $workDir "events.jsonl"
 $stdoutPath = Join-Path $workDir "stdout.log"
 $stderrPath = Join-Path $workDir "stderr.log"
-$bodyPath = Join-Path $workDir "response.body"
 $process = $null
-$requireNetwork = $env:NETTRAP_REQUIRE_WINDIVERT_NETWORK -ne "0"
 
 New-Item -ItemType Directory -Force -Path $workDir | Out-Null
 @"
@@ -21,12 +20,16 @@ default_tcp_listener = "http-smoke"
 default_udp_listener = "dns-smoke"
 pcap_enabled = false
 output_format = "jsonl"
+output_path = "$($eventsPath.Replace('\', '/'))"
 
 [[listeners]]
 name = "http-smoke"
 protocol = "tcp"
 port = 18088
-bind_address = "127.0.0.1"
+# WinDivert NAT injects rewritten packets into the inbound stack; wildcard
+# listeners are required because Windows does not deliver these packets to a
+# loopback-only socket.
+bind_address = "0.0.0.0"
 enabled = true
 emulate_response = true
 
@@ -34,7 +37,7 @@ emulate_response = true
 name = "dns-smoke"
 protocol = "udp"
 port = 53539
-bind_address = "127.0.0.1"
+bind_address = "0.0.0.0"
 enabled = true
 emulate_response = true
 "@ | Set-Content -Path $configPath -Encoding utf8
@@ -46,47 +49,44 @@ function Stop-NetTrap {
     }
 }
 
+function Process-Output {
+    @(
+        if (Test-Path $stdoutPath) { Get-Content $stdoutPath -Raw }
+        if (Test-Path $stderrPath) { Get-Content $stderrPath -Raw }
+    ) -join "`n"
+}
+
 try {
+    $env:RUST_LOG = "nettrap_interceptor=debug,nettrap_cli=info"
     $process = Start-Process -FilePath $BinaryPath -ArgumentList @(
         "run", "--intercept", "-c", $configPath
     ) -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
-
-    $statusCode = $null
-    for ($attempt = 0; $attempt -lt 40 -and $null -eq $statusCode; $attempt++) {
-        if ($process.HasExited) {
-            throw "NetTrap exited before interception startup (code $($process.ExitCode))"
-        }
-        try {
-            $statusCode = (& curl.exe --noproxy "*" --silent --show-error --max-time 2 `
-                --output $bodyPath --write-out "%{http_code}" --header "Host: example.test" `
-                "http://198.18.0.1/")
-            if ($LASTEXITCODE -ne 0 -or $statusCode -ne "200") {
-                $statusCode = $null
-                Start-Sleep -Milliseconds 250
-            }
-        } catch {
-            $statusCode = $null
-            Start-Sleep -Milliseconds 250
-        }
-    }
-    if ($statusCode -ne "200") {
-        $stderr = if (Test-Path $stderrPath) { Get-Content $stderrPath -Raw } else { "" }
-        if (-not $process.HasExited -and -not $requireNetwork) {
-            Write-Host "::warning::WinDivert network redirect smoke skipped: hosted runner did not route synthetic external traffic; driver and process startup remained healthy."
-            return
-        }
-        throw "WinDivert interception did not redirect the HTTP request. $stderr"
-    }
-
-    $dnsAnswer = Resolve-DnsName -Name "example.test" -Type A -Server "198.18.0.1" -DnsOnly -QuickTimeout
-    if (-not ($dnsAnswer | Where-Object { $_.IPAddress -match '^\d+(\.\d+){3}$' })) {
-        throw "WinDivert interception did not redirect the UDP DNS request"
-    }
-
+    Start-Sleep -Seconds 3
     if ($process.HasExited) {
-        throw "NetTrap exited after interception smoke (code $($process.ExitCode))"
+        $output = @(
+            if (Test-Path $stdoutPath) { Get-Content $stdoutPath -Raw }
+            if (Test-Path $stderrPath) { Get-Content $stderrPath -Raw }
+        ) -join "`n"
+        throw "Windows transparent interception exited during startup (code $($process.ExitCode)): $output"
     }
-    Write-Host "PASS: Windows WinDivert TCP/UDP interception smoke"
+
+    $tcpOutput = & curl.exe --noproxy "*" --silent --show-error --connect-timeout 5 --max-time 10 `
+        --header "Host: interception.test" http://198.51.100.1/ 2>&1
+    if ($LASTEXITCODE -ne 0 -or $tcpOutput -notmatch "It Works") {
+        throw "TCP traffic was not redirected to the local listener: $tcpOutput`n$(Process-Output)"
+    }
+
+    $dnsOutput = & nslookup.exe -timeout=3 -retry=0 example.test 198.51.100.1 2>&1
+    if ($LASTEXITCODE -ne 0 -or $dnsOutput -notmatch "Address:\s+\d+\.\d+\.\d+\.\d+") {
+        throw "UDP traffic was not redirected to the local DNS listener: $dnsOutput`n$(Process-Output)"
+    }
+
+    Stop-NetTrap
+    if (-not (Test-Path -LiteralPath $eventsPath -PathType Leaf) -or
+        (Get-Item -LiteralPath $eventsPath).Length -le 0) {
+        throw "Interception did not persist any event records"
+    }
+    Write-Host "PASS: Windows transparent interception redirected TCP/UDP traffic and persisted events"
 } finally {
     Stop-NetTrap
 }

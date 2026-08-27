@@ -5,8 +5,12 @@
 //! tricked into escaping it via symbolic links or path traversal.
 
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::Path;
+use std::sync::Mutex;
+
+// ponytail: one process-wide lock keeps append lines atomic; split locks only if throughput requires it.
+static APPEND_LINE_LOCK: Mutex<()> = Mutex::new(());
 
 #[cfg(unix)]
 pub fn open_regular_file_beneath_root(root: &Path, relative_path: &Path) -> io::Result<File> {
@@ -469,9 +473,20 @@ pub fn append_regular_file(path: &Path) -> io::Result<File> {
     }
 }
 
+/// Append one complete record to a regular file without interleaving writers.
+pub fn append_regular_file_line(path: &Path, line: &[u8]) -> io::Result<()> {
+    let _guard = APPEND_LINE_LOCK
+        .lock()
+        .map_err(|_| io::Error::other("append line lock poisoned"))?;
+    let mut file = append_regular_file(path)?;
+    file.write_all(line)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{append_regular_file, create_regular_file, read_limited_file};
+    use super::{
+        append_regular_file, append_regular_file_line, create_regular_file, read_limited_file,
+    };
     #[cfg(unix)]
     use super::{ensure_no_symlink_ancestors, open_regular_file_beneath_root};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -659,6 +674,31 @@ mod tests {
             .expect("trailing current-dir component should be accepted");
 
         assert!(file.metadata().expect("metadata").is_file());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn append_regular_file_line_keeps_concurrent_records_intact() {
+        let root = temp_dir("nettrap-fsutil-append-line");
+        std::fs::create_dir_all(&root).expect("create root");
+        let path = root.join("events.jsonl");
+        let mut threads = Vec::new();
+
+        for index in 0..128 {
+            let path = path.clone();
+            threads.push(std::thread::spawn(move || {
+                let line = format!("{{\"index\":{index}}}\n");
+                append_regular_file_line(&path, line.as_bytes()).expect("append complete line");
+            }));
+        }
+        for thread in threads {
+            thread.join().expect("append thread should finish");
+        }
+
+        let content = std::fs::read_to_string(&path).expect("read appended lines");
+        let lines: Vec<_> = content.lines().collect();
+        assert_eq!(lines.len(), 128);
+        assert!(lines.iter().all(|line| line.starts_with("{\"index\":")));
         let _ = std::fs::remove_dir_all(root);
     }
 }

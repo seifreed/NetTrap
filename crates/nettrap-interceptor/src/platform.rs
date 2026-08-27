@@ -23,8 +23,8 @@ pub mod windivert {
     use crate::prelude::*;
     use nettrap_windivert::{
         HANDLE, IPPROTO_TCP, IPPROTO_UDP, WINDIVERT_DIRECTION_IN, WINDIVERT_DIRECTION_OUT,
-        WINDIVERT_LAYER_NETWORK, WinDivert, WindivertAddress, WindivertIpHdr, WindivertIpv6Hdr,
-        WindivertTcpHdr, WindivertUdpHdr, close_handle,
+        WINDIVERT_LAYER_NETWORK, WinDivert, WindivertAddress, WindivertFlags, WindivertIpHdr,
+        WindivertIpv6Hdr, WindivertTcpHdr, WindivertUdpHdr, close_handle,
     };
     use parking_lot::{Mutex, RwLock};
     use std::collections::{HashMap, VecDeque};
@@ -145,7 +145,7 @@ pub mod windivert {
 
             let reverse = ReverseFlowKey {
                 protocol: key.protocol,
-                client: key.client,
+                client: key.original_destination,
                 listener_port,
             };
             if let Some(previous) = self.reverse.insert(reverse, key.clone()) {
@@ -184,21 +184,32 @@ pub mod windivert {
             listener
         }
 
-        fn inbound_destination(
+        fn inbound_endpoints(
             &mut self,
             key: &ReverseFlowKey,
             now: Instant,
-        ) -> Option<SocketAddr> {
+        ) -> Option<(SocketAddr, SocketAddr)> {
             self.prune(now);
-            let flow_key = self.reverse.get(key)?.clone();
-            let destination = self
+            let flow_key = if let Some(flow_key) = self.reverse.get(key).cloned() {
+                flow_key
+            } else {
+                let flow_key = self.entries.iter().find_map(|(flow_key, flow)| {
+                    (flow_key.protocol == key.protocol
+                        && flow.original_destination == key.client
+                        && flow.listener_port == key.listener_port)
+                        .then(|| flow_key.clone())
+                })?;
+                self.reverse.insert(key.clone(), flow_key.clone());
+                flow_key
+            };
+            let endpoints = self
                 .entries
                 .get(&flow_key)
-                .map(|flow| flow.original_destination);
-            if destination.is_some() {
+                .map(|flow| (flow.original_destination, flow_key.client));
+            if endpoints.is_some() {
                 self.touch(&flow_key, now);
             }
-            destination
+            endpoints
         }
     }
 
@@ -656,7 +667,7 @@ pub mod windivert {
         fn redirect_packet(
             data: &mut [u8],
             len: usize,
-            addr: &WindivertAddress,
+            addr: &mut WindivertAddress,
             redirects: &[PortRedirect],
             flow_table: &Arc<Mutex<RedirectFlowTable>>,
         ) -> Result<()> {
@@ -675,6 +686,45 @@ pub mod windivert {
             let now = Instant::now();
             let mut flows = flow_table.lock();
 
+            // Match replies before applying the outbound request rewrite. WinDivert
+            // may classify replies as outbound and the local source can vary by
+            // listener binding, so the flow key is the authoritative discriminator.
+            let reverse = ReverseFlowKey {
+                protocol,
+                client: SocketAddr::new(dst, dst_port),
+                listener_port: src_port,
+            };
+            if let Some((original_destination, original_client)) =
+                flows.inbound_endpoints(&reverse, now)
+            {
+                if !Self::rewrite_endpoint(
+                    data,
+                    is_ipv6,
+                    transport_offset,
+                    true,
+                    original_destination.ip(),
+                    original_destination.port(),
+                ) {
+                    return Err(Error::Packet(
+                        "Failed to rewrite loopback reply endpoint".into(),
+                    ));
+                }
+                if !Self::rewrite_endpoint(
+                    data,
+                    is_ipv6,
+                    transport_offset,
+                    false,
+                    original_client.ip(),
+                    original_client.port(),
+                ) {
+                    return Err(Error::Packet(
+                        "Failed to rewrite redirected reply destination".into(),
+                    ));
+                }
+                addr.set_direction(WINDIVERT_DIRECTION_IN);
+                return Ok(());
+            }
+
             if addr.direction() == WINDIVERT_DIRECTION_OUT {
                 if dst.is_loopback() {
                     return Ok(());
@@ -691,36 +741,17 @@ pub mod windivert {
                 let Some(listener_port) = listener_port else {
                     return Ok(());
                 };
-                if !flows.entries.contains_key(&key) {
-                    flows.insert(key, listener_port, now);
-                }
-                let loopback = if is_ipv6 {
-                    IpAddr::V6(Ipv6Addr::LOCALHOST)
-                } else {
-                    IpAddr::V4(Ipv4Addr::LOCALHOST)
-                };
-                if !Self::rewrite_endpoint(
-                    data,
-                    is_ipv6,
-                    transport_offset,
-                    false,
-                    loopback,
+                tracing::debug!(
+                    %src,
+                    %dst,
+                    src_port,
+                    dst_port,
                     listener_port,
-                ) {
-                    return Err(Error::Packet("Failed to rewrite outbound endpoint".into()));
-                }
-            } else {
-                if !src.is_loopback() {
-                    return Ok(());
-                }
-                let reverse = ReverseFlowKey {
-                    protocol,
-                    client: SocketAddr::new(dst, dst_port),
-                    listener_port: src_port,
-                };
-                let Some(original_destination) = flows.inbound_destination(&reverse, now) else {
-                    return Ok(());
-                };
+                    if_idx = addr.network().if_idx,
+                    sub_if_idx = addr.network().sub_if_idx,
+                    "WinDivert redirecting outbound packet"
+                );
+                let new_flow = !flows.entries.contains_key(&key);
                 if !Self::rewrite_endpoint(
                     data,
                     is_ipv6,
@@ -728,8 +759,22 @@ pub mod windivert {
                     true,
                     original_destination.ip(),
                     original_destination.port(),
+                ) || !Self::rewrite_endpoint(
+                    data,
+                    is_ipv6,
+                    transport_offset,
+                    false,
+                    key.client.ip(),
+                    listener_port,
                 ) {
-                    return Err(Error::Packet("Failed to rewrite inbound endpoint".into()));
+                    return Err(Error::Packet(
+                        "Failed to rewrite redirected endpoints".into(),
+                    ));
+                }
+                // Reflect the packet into the inbound stack using the captured interface.
+                addr.set_direction(WINDIVERT_DIRECTION_IN);
+                if new_flow {
+                    flows.insert(key, listener_port, now);
                 }
             }
 
@@ -740,11 +785,26 @@ pub mod windivert {
             }
             Ok(())
         }
+
+        fn restore_original_packet(data: &mut [u8], original: &[u8], len: usize) -> bool {
+            let (Some(destination), Some(source)) = (data.get_mut(..len), original.get(..len))
+            else {
+                return false;
+            };
+            destination.copy_from_slice(source);
+            true
+        }
     }
 
     #[async_trait]
     impl Interceptor for WinDivertInterceptor {
         async fn init(&mut self) -> Result<()> {
+            if self.redirects.is_empty() {
+                return Err(Error::Config(
+                    "WinDivert interception requires at least one listener redirect rule".into(),
+                ));
+            }
+
             tracing::info!(
                 "Initializing WinDivert interceptor with filter: {}",
                 self.filter
@@ -752,14 +812,22 @@ pub mod windivert {
 
             let mut windivert = WinDivert::new();
             let handle = windivert
-                .open(&self.filter, 0, WINDIVERT_LAYER_NETWORK, 0)
+                .open(
+                    &self.filter,
+                    0,
+                    WINDIVERT_LAYER_NETWORK,
+                    WindivertFlags::DEFAULT.bits(),
+                )
                 .map_err(|e| Error::Interception(format!("Failed to open WinDivert: {}", e)))?;
 
             *self.handle.write() = Some(handle as usize);
             *self.windivert.lock() = Some(windivert);
             *self.running.write() = true;
 
-            tracing::info!("WinDivert interceptor initialized successfully");
+            tracing::info!(
+                "WinDivert interceptor initialized with {} redirect rule(s)",
+                self.redirects.len()
+            );
             Ok(())
         }
 
@@ -787,24 +855,72 @@ pub mod windivert {
                     } as usize;
 
                     let original = packet_buf[..len].to_vec();
-                    let packet = Self::parse_packet(&original, len, &addr)?;
+                    let original_addr = addr;
+                    let mut restore_original = false;
+                    let packet = match Self::parse_packet(&original, len, &addr) {
+                        Ok(packet) => packet,
+                        Err(err) => {
+                            tracing::warn!(
+                                "WinDivert packet parse failed; reinjecting original packet: {}",
+                                err
+                            );
+                            restore_original = true;
+                            None
+                        }
+                    };
 
-                    Self::redirect_packet(&mut packet_buf, len, &addr, &redirects, &flows)?;
+                    if !restore_original
+                        && let Err(err) = Self::redirect_packet(
+                            &mut packet_buf,
+                            len,
+                            &mut addr,
+                            &redirects,
+                            &flows,
+                        )
+                    {
+                        tracing::warn!(
+                            "WinDivert packet rewrite failed; reinjecting original packet: {}",
+                            err
+                        );
+                        restore_original = true;
+                    }
+                    if restore_original
+                        && !Self::restore_original_packet(&mut packet_buf, &original, len)
+                    {
+                        return Err(Error::Packet(
+                            "Failed to restore original WinDivert packet after rewrite error"
+                                .into(),
+                        ));
+                    }
 
                     let guard = windivert.lock();
                     let api = guard
                         .as_ref()
                         .ok_or_else(|| Error::InvalidState("WinDivert not initialized".into()))?;
                     let mut send_addr = addr;
-                    api.calc_checksums(&mut packet_buf[..len], &mut send_addr)
-                        .map_err(|e| {
+                    let send_result = api
+                        .calc_checksums(&mut packet_buf[..len], &mut send_addr)
+                        .and_then(|()| api.send(handle, &packet_buf[..len], &send_addr));
+                    if let Err(error) = send_result {
+                        // A failed rewrite or checksum/send must not strand the packet in the
+                        // divert queue. Reinject the untouched frame before surfacing the error.
+                        tracing::warn!(
+                            "WinDivert modified-packet reinjection failed; retrying original packet: {}",
+                            error
+                        );
+                        if !Self::restore_original_packet(&mut packet_buf, &original, len) {
+                            return Err(Error::Packet(
+                                "Failed to restore original WinDivert packet after reinjection error"
+                                    .into(),
+                            ));
+                        }
+                        api.send(handle, &packet_buf[..len], &original_addr).map_err(|fallback| {
                             Error::Interception(format!(
-                                "WinDivert checksum calculation failed: {}",
-                                e
+                                "WinDivertSend failed for modified packet ({}), and original packet fallback failed: {}",
+                                error, fallback
                             ))
                         })?;
-                    api.send(handle, &packet_buf[..len], &send_addr)
-                        .map_err(|e| Error::Interception(format!("WinDivertSend failed: {}", e)))?;
+                    }
 
                     {
                         let mut guard = stats.write();
@@ -872,7 +988,7 @@ pub mod windivert {
     }
 
     fn build_filter(config: &InterceptorConfig) -> Result<String> {
-        let mut clauses = vec!["(ip or ipv6) and (tcp or udp)".to_string()];
+        let mut clauses = vec!["(ip or ipv6) and (tcp or udp) and !impostor".to_string()];
 
         if let Some(iface) = &config.interface
             && let Some(ifidx) = parse_windivert_interface_index(Some(iface.as_str()))?
@@ -886,6 +1002,21 @@ pub mod windivert {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[tokio::test]
+        async fn init_fails_closed_before_opening_windivert() {
+            let config = InterceptorConfig {
+                mode: nettrap_core::config::InterceptionMode::WinDivert,
+                ..Default::default()
+            };
+            let mut interceptor = WinDivertInterceptor::new(config).expect("valid config");
+
+            let error = interceptor
+                .init()
+                .await
+                .expect_err("WinDivert must reject startup without redirect rules");
+            assert!(matches!(error, Error::Config(message) if message.contains("redirect rule")));
+        }
 
         #[test]
         fn parses_ipv4_tcp_packet() {
@@ -1038,6 +1169,20 @@ pub mod windivert {
         }
 
         #[test]
+        fn restoring_original_packet_discards_partial_rewrite() {
+            let original = [0x45, 0x00, 0x00, 0x14];
+            let mut rewritten = [0x45, 0x00, 0x00, 0x14];
+            rewritten[1] = 0xff;
+
+            assert!(WinDivertInterceptor::restore_original_packet(
+                &mut rewritten,
+                &original,
+                original.len()
+            ));
+            assert_eq!(rewritten, original);
+        }
+
+        #[test]
         fn build_filter_uses_interface_constraint_without_dummy_clause() {
             let config = InterceptorConfig {
                 mode: nettrap_core::config::InterceptionMode::WinDivert,
@@ -1047,7 +1192,7 @@ pub mod windivert {
 
             assert_eq!(
                 build_filter(&config).unwrap(),
-                "(ip or ipv6) and (tcp or udp) and ifIdx == 7"
+                "(ip or ipv6) and (tcp or udp) and !impostor and ifIdx == 7"
             );
         }
 
@@ -1060,7 +1205,7 @@ pub mod windivert {
 
             assert_eq!(
                 build_filter(&config).unwrap(),
-                "(ip or ipv6) and (tcp or udp)"
+                "(ip or ipv6) and (tcp or udp) and !impostor"
             );
         }
 
@@ -1078,15 +1223,18 @@ pub mod windivert {
             assert_eq!(table.entries.len(), 1);
             assert_eq!(table.outbound_listener(&key, now), Some(8443));
             assert_eq!(
-                table.inbound_destination(
+                table.inbound_endpoints(
                     &ReverseFlowKey {
                         protocol: IPPROTO_TCP,
-                        client: "192.0.2.10:40000".parse().unwrap(),
+                        client: "198.51.100.20:443".parse().unwrap(),
                         listener_port: 8443,
                     },
                     now,
                 ),
-                Some("198.51.100.20:443".parse().unwrap())
+                Some((
+                    "198.51.100.20:443".parse().unwrap(),
+                    "192.0.2.10:40000".parse().unwrap(),
+                ))
             );
 
             for _ in 0..MAX_REDIRECT_EXPIRY_ENTRIES * 2 {
@@ -1106,6 +1254,34 @@ pub mod windivert {
                 table.insert(key, 1000, now);
             }
             assert!(table.entries.len() <= MAX_REDIRECT_FLOWS);
+        }
+
+        #[test]
+        fn redirect_flow_table_recovers_when_reverse_index_is_missing() {
+            let mut table = RedirectFlowTable::default();
+            let key = FlowKey {
+                protocol: IPPROTO_TCP,
+                client: "192.0.2.10:40000".parse().unwrap(),
+                original_destination: "198.51.100.20:443".parse().unwrap(),
+            };
+            let now = Instant::now();
+            table.insert(key, 8443, now);
+            table.reverse.clear();
+
+            assert_eq!(
+                table.inbound_endpoints(
+                    &ReverseFlowKey {
+                        protocol: IPPROTO_TCP,
+                        client: "198.51.100.20:443".parse().unwrap(),
+                        listener_port: 8443,
+                    },
+                    now,
+                ),
+                Some((
+                    "198.51.100.20:443".parse().unwrap(),
+                    "192.0.2.10:40000".parse().unwrap(),
+                ))
+            );
         }
 
         #[test]
@@ -1149,14 +1325,17 @@ pub mod windivert {
             WinDivertInterceptor::redirect_packet(
                 &mut outbound,
                 outbound_len,
-                &outbound_addr,
+                &mut outbound_addr,
                 &redirects,
                 &flows,
             )
             .expect("outbound rewrite should succeed");
 
-            assert_eq!(&outbound[16..20], &[127, 0, 0, 1]);
+            assert_eq!(&outbound[12..16], &[198, 51, 100, 20]);
+            assert_eq!(&outbound[16..20], &[192, 0, 2, 10]);
+            assert_eq!(&outbound[20..22], &53u16.to_be_bytes());
             assert_eq!(&outbound[22..24], &5353u16.to_be_bytes());
+            assert_eq!(outbound_addr.direction(), WINDIVERT_DIRECTION_IN);
 
             let mut inbound = vec![
                 0x45,
@@ -1171,14 +1350,312 @@ pub mod windivert {
                 IPPROTO_UDP,
                 0,
                 0,
-                127,
-                0,
-                0,
-                1,
                 192,
                 0,
                 2,
                 10,
+                198,
+                51,
+                100,
+                20,
+                0x14,
+                0xe9,
+                0,
+                53,
+                0,
+                8,
+                0,
+                0,
+            ];
+            let mut inbound_addr = WindivertAddress::default();
+            inbound_addr.set_direction(WINDIVERT_DIRECTION_IN);
+            let inbound_len = inbound.len();
+
+            let mut outbound_reply = inbound.clone();
+            let mut outbound_reply_addr = WindivertAddress::default();
+            outbound_reply_addr.set_direction(WINDIVERT_DIRECTION_OUT);
+            let outbound_reply_len = outbound_reply.len();
+            WinDivertInterceptor::redirect_packet(
+                &mut outbound_reply,
+                outbound_reply_len,
+                &mut outbound_reply_addr,
+                &redirects,
+                &flows,
+            )
+            .expect("outbound loopback reply rewrite should succeed");
+            assert_eq!(&outbound_reply[12..16], &[198, 51, 100, 20]);
+            assert_eq!(&outbound_reply[16..20], &[192, 0, 2, 10]);
+            assert_eq!(&outbound_reply[20..22], &53u16.to_be_bytes());
+            assert_eq!(&outbound_reply[22..24], &40000u16.to_be_bytes());
+            assert_eq!(outbound_reply_addr.direction(), WINDIVERT_DIRECTION_IN);
+
+            WinDivertInterceptor::redirect_packet(
+                &mut inbound,
+                inbound_len,
+                &mut inbound_addr,
+                &redirects,
+                &flows,
+            )
+            .expect("inbound rewrite should succeed");
+
+            assert_eq!(&inbound[12..16], &[198, 51, 100, 20]);
+            assert_eq!(&inbound[16..20], &[192, 0, 2, 10]);
+            assert_eq!(&inbound[20..22], &53u16.to_be_bytes());
+        }
+
+        #[test]
+        fn redirects_ipv4_tcp_and_restores_original_source_on_reply() {
+            let mut outbound = vec![
+                0x45,
+                0,
+                0,
+                40,
+                0,
+                0,
+                0,
+                0,
+                64,
+                IPPROTO_TCP,
+                0,
+                0,
+                192,
+                0,
+                2,
+                10,
+                198,
+                51,
+                100,
+                20,
+                0x9c,
+                0x40,
+                0,
+                80,
+                0,
+                0,
+                0,
+                1,
+                0,
+                0,
+                0,
+                0,
+                0x50,
+                0x02,
+                0x20,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ];
+            let redirects = vec![PortRedirect::new(80, true, 8080)];
+            let flows = Arc::new(Mutex::new(RedirectFlowTable::default()));
+            let mut outbound_addr = WindivertAddress::default();
+            outbound_addr.set_direction(WINDIVERT_DIRECTION_OUT);
+            let outbound_len = outbound.len();
+
+            WinDivertInterceptor::redirect_packet(
+                &mut outbound,
+                outbound_len,
+                &mut outbound_addr,
+                &redirects,
+                &flows,
+            )
+            .expect("outbound TCP rewrite should succeed");
+
+            assert_eq!(&outbound[12..16], &[198, 51, 100, 20]);
+            assert_eq!(&outbound[16..20], &[192, 0, 2, 10]);
+            assert_eq!(&outbound[20..22], &80u16.to_be_bytes());
+            assert_eq!(&outbound[22..24], &8080u16.to_be_bytes());
+            assert_eq!(outbound_addr.direction(), WINDIVERT_DIRECTION_IN);
+
+            let mut reply = vec![
+                0x45,
+                0,
+                0,
+                40,
+                0,
+                0,
+                0,
+                0,
+                64,
+                IPPROTO_TCP,
+                0,
+                0,
+                192,
+                0,
+                2,
+                10,
+                198,
+                51,
+                100,
+                20,
+                0x1f,
+                0x90,
+                0,
+                80,
+                0,
+                0,
+                0,
+                2,
+                0,
+                0,
+                0,
+                1,
+                0x50,
+                0x10,
+                0x20,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ];
+            let mut reply_addr = WindivertAddress::default();
+            reply_addr.set_direction(WINDIVERT_DIRECTION_OUT);
+            let reply_len = reply.len();
+
+            WinDivertInterceptor::redirect_packet(
+                &mut reply,
+                reply_len,
+                &mut reply_addr,
+                &redirects,
+                &flows,
+            )
+            .expect("loopback TCP reply rewrite should succeed");
+
+            assert_eq!(&reply[12..16], &[198, 51, 100, 20]);
+            assert_eq!(&reply[16..20], &[192, 0, 2, 10]);
+            assert_eq!(&reply[20..22], &80u16.to_be_bytes());
+            assert_eq!(&reply[22..24], &40000u16.to_be_bytes());
+            assert_eq!(reply_addr.direction(), WINDIVERT_DIRECTION_IN);
+        }
+
+        #[test]
+        fn redirects_ipv6_udp_and_restores_original_source_on_reply() {
+            let mut outbound = vec![
+                0x60,
+                0,
+                0,
+                0,
+                0,
+                8,
+                IPPROTO_UDP,
+                64,
+                0x20,
+                0x01,
+                0x0d,
+                0xb8,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0x10,
+                0x20,
+                0x01,
+                0x0d,
+                0xb8,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0x20,
+                0x9c,
+                0x40,
+                0,
+                53,
+                0,
+                8,
+                0,
+                0,
+            ];
+            outbound.truncate(48);
+            outbound[8..24].copy_from_slice(&"2001:db8::10".parse::<Ipv6Addr>().unwrap().octets());
+            outbound[24..40].copy_from_slice(&"2001:db8::20".parse::<Ipv6Addr>().unwrap().octets());
+            outbound[40..48].copy_from_slice(&[0x9c, 0x40, 0, 53, 0, 8, 0, 0]);
+            let redirects = vec![PortRedirect::new(53, false, 5353)];
+            let flows = Arc::new(Mutex::new(RedirectFlowTable::default()));
+            let mut outbound_addr = WindivertAddress::default();
+            outbound_addr.set_direction(WINDIVERT_DIRECTION_OUT);
+            let outbound_len = outbound.len();
+
+            WinDivertInterceptor::redirect_packet(
+                &mut outbound,
+                outbound_len,
+                &mut outbound_addr,
+                &redirects,
+                &flows,
+            )
+            .expect("outbound IPv6 rewrite should succeed");
+
+            assert_eq!(
+                &outbound[8..24],
+                &"2001:db8::20".parse::<Ipv6Addr>().unwrap().octets()
+            );
+            assert_eq!(
+                &outbound[24..40],
+                &"2001:db8::10".parse::<Ipv6Addr>().unwrap().octets()
+            );
+            assert_eq!(&outbound[40..42], &53u16.to_be_bytes());
+            assert_eq!(&outbound[42..44], &5353u16.to_be_bytes());
+
+            let mut reply = vec![
+                0x60,
+                0,
+                0,
+                0,
+                0,
+                8,
+                IPPROTO_UDP,
+                64,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+                0x20,
+                0x01,
+                0x0d,
+                0xb8,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0x10,
                 0x14,
                 0xe9,
                 0x9c,
@@ -1188,20 +1665,101 @@ pub mod windivert {
                 0,
                 0,
             ];
-            let mut inbound_addr = WindivertAddress::default();
-            inbound_addr.set_direction(WINDIVERT_DIRECTION_IN);
-            let inbound_len = inbound.len();
+            reply.truncate(48);
+            reply[8..24].copy_from_slice(&"2001:db8::10".parse::<Ipv6Addr>().unwrap().octets());
+            reply[24..40].copy_from_slice(&"2001:db8::20".parse::<Ipv6Addr>().unwrap().octets());
+            reply[40..48].copy_from_slice(&[0x14, 0xe9, 0, 53, 0, 8, 0, 0]);
+            let mut reply_addr = WindivertAddress::default();
+            reply_addr.set_direction(WINDIVERT_DIRECTION_OUT);
+            let reply_len = reply.len();
+
             WinDivertInterceptor::redirect_packet(
-                &mut inbound,
-                inbound_len,
-                &inbound_addr,
+                &mut reply,
+                reply_len,
+                &mut reply_addr,
                 &redirects,
                 &flows,
             )
-            .expect("inbound rewrite should succeed");
+            .expect("loopback IPv6 reply rewrite should succeed");
 
-            assert_eq!(&inbound[12..16], &[198, 51, 100, 20]);
-            assert_eq!(&inbound[20..22], &53u16.to_be_bytes());
+            assert_eq!(
+                &reply[8..24],
+                &"2001:db8::20".parse::<Ipv6Addr>().unwrap().octets()
+            );
+            assert_eq!(
+                &reply[24..40],
+                &"2001:db8::10".parse::<Ipv6Addr>().unwrap().octets()
+            );
+            assert_eq!(&reply[40..42], &53u16.to_be_bytes());
+            assert_eq!(&reply[42..44], &40000u16.to_be_bytes());
+            assert_eq!(reply_addr.direction(), WINDIVERT_DIRECTION_IN);
+        }
+
+        #[test]
+        fn redirects_ipv6_tcp_and_restores_original_source_on_reply() {
+            let client = "2001:db8::10".parse::<Ipv6Addr>().unwrap();
+            let destination = "2001:db8::20".parse::<Ipv6Addr>().unwrap();
+            let redirects = vec![PortRedirect::new(443, true, 8443)];
+            let flows = Arc::new(Mutex::new(RedirectFlowTable::default()));
+
+            let mut outbound = vec![0u8; 60];
+            outbound[0] = 0x60;
+            outbound[4..6].copy_from_slice(&20u16.to_be_bytes());
+            outbound[6] = IPPROTO_TCP;
+            outbound[7] = 64;
+            outbound[8..24].copy_from_slice(&client.octets());
+            outbound[24..40].copy_from_slice(&destination.octets());
+            outbound[40..42].copy_from_slice(&40000u16.to_be_bytes());
+            outbound[42..44].copy_from_slice(&443u16.to_be_bytes());
+            outbound[52] = 0x50;
+            outbound[53] = 0x02;
+
+            let mut outbound_addr = WindivertAddress::default();
+            outbound_addr.set_direction(WINDIVERT_DIRECTION_OUT);
+            let outbound_len = outbound.len();
+            WinDivertInterceptor::redirect_packet(
+                &mut outbound,
+                outbound_len,
+                &mut outbound_addr,
+                &redirects,
+                &flows,
+            )
+            .expect("outbound IPv6 TCP rewrite should succeed");
+
+            assert_eq!(&outbound[8..24], &destination.octets());
+            assert_eq!(&outbound[24..40], &client.octets());
+            assert_eq!(&outbound[40..42], &443u16.to_be_bytes());
+            assert_eq!(&outbound[42..44], &8443u16.to_be_bytes());
+
+            let mut reply = vec![0u8; 60];
+            reply[0] = 0x60;
+            reply[4..6].copy_from_slice(&20u16.to_be_bytes());
+            reply[6] = IPPROTO_TCP;
+            reply[7] = 64;
+            reply[8..24].copy_from_slice(&client.octets());
+            reply[24..40].copy_from_slice(&destination.octets());
+            reply[40..42].copy_from_slice(&8443u16.to_be_bytes());
+            reply[42..44].copy_from_slice(&443u16.to_be_bytes());
+            reply[52] = 0x50;
+            reply[53] = 0x10;
+
+            let mut reply_addr = WindivertAddress::default();
+            reply_addr.set_direction(WINDIVERT_DIRECTION_OUT);
+            let reply_len = reply.len();
+            WinDivertInterceptor::redirect_packet(
+                &mut reply,
+                reply_len,
+                &mut reply_addr,
+                &redirects,
+                &flows,
+            )
+            .expect("IPv6 TCP reply rewrite should succeed");
+
+            assert_eq!(&reply[8..24], &destination.octets());
+            assert_eq!(&reply[24..40], &client.octets());
+            assert_eq!(&reply[40..42], &443u16.to_be_bytes());
+            assert_eq!(&reply[42..44], &40000u16.to_be_bytes());
+            assert_eq!(reply_addr.direction(), WINDIVERT_DIRECTION_IN);
         }
 
         #[test]

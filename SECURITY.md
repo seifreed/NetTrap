@@ -28,6 +28,14 @@ Maintainers aim to acknowledge a report within seven days and provide an
 initial triage decision within fourteen days. These are response targets, not
 service-level guarantees.
 
+## Repository Controls
+
+Changes to `main` require a pull request with at least one approving review.
+Stale approvals are dismissed, code-owner and last-push approvals are required,
+administrator enforcement is enabled on the protected branch, and the pull
+request must pass the Linux and Windows builds, protocol-parity comparison,
+quality gates, and security-audit checks.
+
 ## Scope
 
 High-priority reports include unsafe packet interception, privilege escalation,

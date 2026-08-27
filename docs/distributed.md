@@ -116,7 +116,7 @@ When `health_bind` is configured, NetTrap exposes:
 scrape_configs:
   - job_name: 'nettrap'
     static_configs:
-      - targets: ['nettrap-node1:9090', 'nettrap-node2:9090']
+      - targets: ['nettrap-node1:9091', 'nettrap-node2:9091']
     metrics_path: '/metrics'
 ```
 
@@ -141,8 +141,8 @@ This identity is included in:
 For local testing with multiple nodes:
 
 ```bash
-# Start a 2-node cluster with Elasticsearch + Kibana
-docker-compose up -d
+# Start the 3-node local cluster and its TCP event collector
+docker compose -f docker-compose.test.yml up -d
 
 # View node1 health
 curl http://localhost:9091/health
@@ -150,11 +150,8 @@ curl http://localhost:9091/health
 # View node2 health
 curl http://localhost:9092/health
 
-# Query events in Elasticsearch
-curl http://localhost:9200/nettrap-events/_search?pretty
-
-# Open Kibana dashboard
-open http://localhost:5601
+# View events accepted by the collector
+docker compose -f docker-compose.test.yml logs -f collector
 ```
 
 ## Scaling

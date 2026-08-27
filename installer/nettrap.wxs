@@ -26,6 +26,7 @@
             <File Id="Changelog" Source="$(var.ChangelogPath)" />
             <File Id="Security" Source="$(var.SecurityPath)" />
             <File Id="KnownLimitations" Source="$(var.KnownLimitationsPath)" />
+            <File Id="SecurityAuditScope" Source="$(var.SecurityAuditScopePath)" />
             <File Id="ThirdPartyNotices" Source="$(var.ThirdPartyNoticesPath)" />
             <File Id="PlatformSupport" Source="$(var.PlatformSupportPath)" />
             <File Id="ProtocolSupport" Source="$(var.ProtocolSupportPath)" />

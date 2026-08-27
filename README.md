@@ -12,6 +12,7 @@
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-1.97.1-orange?style=flat-square&logo=rust&logoColor=white" alt="Rust Version"></a>
   <a href="https://github.com/seifreed/NetTrap/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="License: MIT"></a>
   <a href="https://github.com/seifreed/nettrap/actions"><img src="https://img.shields.io/github/actions/workflow/status/seifreed/nettrap/ci.yml?style=flat-square&logo=github&label=CI" alt="CI Status"></a>
+  <a href="https://scorecard.dev/viewer/?uri=github.com/seifreed/NetTrap"><img src="https://api.scorecard.dev/projects/github.com/seifreed/NetTrap/badge" alt="OpenSSF Scorecard"></a>
   <img src="https://img.shields.io/badge/detectors-35-blue?style=flat-square" alt="Protocol detectors">
   <img src="https://img.shields.io/badge/crates-52-blue?style=flat-square" alt="Crates">
 </p>
@@ -26,7 +27,7 @@
 
 ## Overview
 
-**NetTrap** is a late-alpha network service emulation and behavioral capture engine written in Rust. Direct listener mode is the primary supported path. Linux and Windows x86_64 transparent redirection are experimental; macOS and Windows ARM64 remain listener/capture only. The 35 registered detectors have different fidelity levels and do not represent 35 complete protocol servers.
+**NetTrap** is a late-alpha network service emulation and behavioral capture engine written in Rust. Direct listener mode is the primary supported path. Linux transparent redirection is experimental; Windows x86_64 transparent interception uses bounded packet-preserving NAT and remains experimental pending real-host validation, while macOS and Windows ARM64 remain listener/capture only. The 35 registered detectors have different fidelity levels and do not represent 35 complete protocol servers.
 
 ### Why NetTrap?
 

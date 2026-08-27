@@ -10,7 +10,7 @@ the release workflow; it does not imply transparent interception support.
 | Linux ARM64 | Yes | Supported | Experimental `iptables`/`ip6tables` or direct `nft` redirection | Native Rust build and tests |
 | macOS x86_64 | Yes | Supported | Not supported | Native Rust gates plus `dig` and `curl` E2E |
 | macOS ARM64 | Yes | Supported | Not supported | Native Rust gates plus `dig` and `curl` E2E |
-| Windows x86_64 | Yes | Supported | Experimental WinDivert TCP/UDP NAT redirection | Native Rust gates, binary/config smoke, protocol matrix parity, and listener parity; full WinDivert redirect assertion requires a self-hosted runner with deterministic outbound routing |
+| Windows x86_64 | Yes | Supported | Experimental bounded WinDivert NAT redirection | Native Rust gates, binary/config smoke, protocol matrix parity, listener parity, and interception smoke |
 | Windows ARM64 | Yes | Supported | Not supported; Npcap capture is experimental | Native Rust gates, binary/config smoke, protocol matrix parity, and TCP/UDP listener parity smoke |
 | Linux x86/ARM32 | No | Not supported | Not supported | No CI target or release asset |
 | Windows x86 | No | Not supported | Not supported | No CI target or release asset |
@@ -21,14 +21,17 @@ the release workflow; it does not imply transparent interception support.
   service directly.
 - Linux transparent redirection changes host firewall rules and requires
   privileges. It isolates redirects in dedicated NetTrap chains or the
-  `nettrap` nftables table and removes stale managed state on the next startup.
+  per-process `nettrap_<pid>` nftables table and removes stale managed state on
+  the next startup.
   `iptables-nft` compatibility is supported through the system wrapper; direct
   nftables uses the same port and interface restrictions. The opt-in namespace
   contract runs as `NETTRAP_NAMESPACE_E2E=1` with root privileges on Linux.
 - macOS has no transparent redirection implementation.
-- Windows x86_64 `--intercept` uses WinDivert for experimental TCP/UDP NAT
-  redirection. Release ZIP/MSI artifacts bundle the pinned WinDivert binaries
-  and license text beside the executable.
+- Windows x86_64 `--intercept` uses a bounded packet-preserving NAT adapter and
+  fails before opening the driver when no redirectable listener exists. It is
+  experimental until a real Windows host validates connectivity, checksums,
+  cleanup, and crash recovery. Release ZIP/MSI artifacts bundle the pinned
+  WinDivert binaries and license text.
 - Npcap is an external prerequisite for experimental live capture on Windows;
   it is not bundled.
 - Process attribution, TLS termination, and live packet capture remain
@@ -47,7 +50,7 @@ outside this table may work but are unsupported until added to CI.
 | Linux ARM64 | Ubuntu 24.04 ARM GitHub-hosted runner |
 | macOS x86_64 | macOS 15 Intel GitHub-hosted runner |
 | macOS ARM64 | macOS 14 ARM GitHub-hosted runner |
-| Windows x86_64 | Current `windows-latest` GitHub-hosted runner; full redirect assertion on self-hosted Windows |
+| Windows x86_64 | Current `windows-latest` GitHub-hosted runner; full redirect assertion requires a Windows host with WinDivert driver |
 | Windows ARM64 | Windows 11 ARM GitHub-hosted runner |
 
 ## macOS Decision

@@ -30,9 +30,9 @@ event contracts before `1.0.0`.
   PostgreSQL simple-query completion.
 - The Docker smoke now includes an `smbclient` negotiation probe against the
   synthetic SMB listener and records that file-sharing sessions remain out of scope.
-- Scheduled heavy quality gates now run a 10-minute HTTP/DNS runtime soak and
-  exercise every registered fuzz target; release calls retain a bounded
-  60-second soak.
+- Scheduled heavy quality gates and release calls now run a bounded 30-minute
+  HTTP/DNS runtime soak and exercise every registered fuzz target; Windows
+  platform release jobs add a bounded 60-second soak.
 - Docker smoke now holds 128 concurrent HTTP sockets and verifies that a normal
   request remains available after the listener limit is reached.
 
@@ -43,11 +43,14 @@ event contracts before `1.0.0`.
 - Platform integration tests now fail closed on DNS/HTTP errors.
 - Release publication now waits for the explicit security audit and heavy
   reusable quality gates, and creates the checksum workspace before attestation.
+- Windows x86_64 WinDivert now runs the bounded packet-preserving NAT adapter;
+  modified-packet reinjection falls back to the untouched frame on checksum or
+  send errors.
 
 ### Security
 
-- Windows `--intercept` now fails closed instead of opening the incomplete
-  WinDivert path.
+- Windows x86_64 `--intercept` rejects startup without redirect rules and keeps
+  the original frame available as a reinjection fallback on NAT errors.
 - DNS query summaries reject non-EDNS additional records before invoking the
   third-party parser, avoiding malformed TSIG panic paths.
 - Kubernetes and Docker examples no longer grant packet/network capabilities.

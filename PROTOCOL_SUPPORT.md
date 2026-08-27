@@ -23,17 +23,23 @@ where their configured loopback listener cannot synthesize a response; all
 other handlers must return non-empty wire data. TLS response behavior is also
 covered by the OpenSSL client path below.
 
-The scheduled heavy quality gate repeats that matrix 32 times while checking
-process liveness and bounded file-descriptor/RSS growth, and injects truncated
-HTTP/DNS frames between rounds. This is a bounded hostile-load contract, not a
-claim of unrestricted production-scale soak coverage.
+The scheduled heavy quality gate runs that matrix for a bounded 30-minute
+window (and at least 32 rounds) while checking process liveness and bounded
+file-descriptor/RSS growth. Each round injects a 4 KiB malformed payload into
+every TCP and UDP handler, followed by truncated HTTP/DNS frames. This is a
+bounded hostile-load contract, not a claim of unrestricted production-scale
+soak coverage.
 
 Windows CI and release jobs run `tests/windows_protocol_matrix_smoke.ps1` over
 the same 30 TCP and 14 UDP listener matrix and enforce the same 26/11
-response-versus-capture-only contract, truncated HTTP/DNS probes, and bounded
-working-set/handle growth. Scheduled CI repeats the Windows matrix 32 times;
-release and non-scheduled runs repeat it twice. This makes the protocol smoke a
-parity check rather than a Windows-only subset.
+response-versus-capture-only contract, 4 KiB malformed probes for every
+handler, truncated HTTP/DNS probes, and bounded working-set/handle growth.
+Scheduled CI runs the Windows matrix for a bounded 30-minute window (and at
+least 32 rounds); release and non-scheduled runs repeat it twice. This makes
+the protocol smoke a parity check rather than a Windows-only subset.
+Release jobs also enforce a bounded 60-second matrix window before packaging.
+The Windows listener smoke also runs real `curl.exe` client probes for HTTP,
+DNS, TLS, SMTP, FTP, POP3, and IMAP, including SMTP message persistence.
 
 The required client contract is `dig` 9.x, `curl` 8.x, OpenSSL 3.x or
 LibreSSL 3.x, plus `ldapsearch` when installed. `tests/verify_platform.sh`
@@ -54,7 +60,7 @@ after the same E2E suite passes with it.
 | POP3 | USER/PASS and mailbox-command emulation | Yes (curl POP3) | Synthetic mailbox only |
 | IRC | Registration/channel command emulation and logging | No | Partial IRC session behavior |
 | IMAP/IMAPS | Explicit listener banner and command subset | Yes (curl IMAP auth probe) | No content detector; must be selected by listener name |
-| TFTP | RRQ/WRQ block handling and configured file root | No | No required real-client transfer E2E |
+| TFTP | RRQ/WRQ block handling and configured file root | Yes (Python/PowerShell UDP transfer probes) | No required broad TFTP-client compatibility gate |
 | Telnet | Negotiation/prompt responses and command capture | No | Port-open smoke only; not a full terminal server |
 | SSH | Banner and partial KEX/authentication responses | Yes (`ssh`, banner/KEX handshake) | Does not complete a normal OpenSSH authentication session |
 | SMB | SMB1/SMB2 parsing and synthetic negotiation | Yes (`smbclient`, negotiation probe) | Fixed partial SMB2 behavior; the client does not establish file sharing or a full SMB2/SMB3 session |

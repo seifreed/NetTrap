@@ -78,7 +78,7 @@ case "$OS" in
     MINGW*|MSYS*|CYGWIN*)
         echo "Checking Windows interception contract..."
         if [ "$ARCH" = "x86_64" ] || [ "$ARCH" = "amd64" ]; then
-            echo "✓ WinDivert TCP/UDP NAT interception is experimental and requires external driver files"
+            echo "✓ WinDivert transparent interception uses bounded NAT; live driver validation is covered by the Windows smoke"
         else
             echo "✓ Windows ARM64 remains listener/capture-only through Npcap"
         fi
@@ -160,6 +160,22 @@ name = "http"
 protocol = "tcp"
 port = 18088
 bind_address = "127.0.0.1"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "dns-v6"
+protocol = "udp"
+port = 53540
+bind_address = "::1"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "http-v6"
+protocol = "tcp"
+port = 18089
+bind_address = "::1"
 enabled = true
 emulate_response = true
 
@@ -250,6 +266,22 @@ if command -v dig &> /dev/null; then
         echo "✓ DNS TCP test passed"
     else
         echo "✗ DNS TCP test failed"
+        cat /tmp/dns_result.txt
+        exit 1
+    fi
+    dns_v6_ok=false
+    for _ in $(seq 1 "$INTEGRATION_RETRIES"); do
+        if dig -6 @::1 -p 53540 test.example.com A +short > /tmp/dns_result.txt 2>&1 \
+            && grep -qE "^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$" /tmp/dns_result.txt; then
+            dns_v6_ok=true
+            break
+        fi
+        sleep "$INTEGRATION_RETRY_DELAY_SECS"
+    done
+    if [ "$dns_v6_ok" = true ]; then
+        echo "✓ DNS IPv6 test passed"
+    else
+        echo "✗ DNS IPv6 test failed"
         cat /tmp/dns_result.txt
         exit 1
     fi
@@ -363,6 +395,16 @@ if command -v curl &> /dev/null; then
     fi
 else
     echo "✗ curl is required for the HTTP integration test"
+    exit 1
+fi
+
+HTTP_V6_RESULT=$(curl --noproxy '*' --silent --show-error --output /dev/null \
+    --write-out "%{http_code}" --retry 5 --retry-connrefused --retry-delay 1 \
+    --header "Host: example.test" "http://[::1]:18089/")
+if [ "$HTTP_V6_RESULT" = "200" ]; then
+    echo "✓ HTTP IPv6 test passed"
+else
+    echo "✗ HTTP IPv6 test failed (status $HTTP_V6_RESULT)"
     exit 1
 fi
 

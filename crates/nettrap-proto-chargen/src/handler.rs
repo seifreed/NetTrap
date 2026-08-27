@@ -44,7 +44,7 @@ impl ChargenHandler {
     /// Generate a single UDP response with no shared history.
     pub fn handle_udp(&self) -> Vec<u8> {
         let mut rng = rand::rng();
-        let len = rng.random_range(0..=MAX_CHARGEN_UDP_BYTES);
+        let len = rng.random_range(1..=MAX_CHARGEN_UDP_BYTES);
         let start_offset = rng.random_range(0..PRINTABLE.len());
 
         tracing::info!("Chargen: generating {} UDP bytes", len);
@@ -109,6 +109,7 @@ mod tests {
         let response = handler.handle_udp();
         let tcp = handler.handle(1);
 
+        assert!(!response.is_empty());
         assert!(response.len() <= MAX_CHARGEN_UDP_BYTES);
         assert_eq!(&tcp[..72], &PRINTABLE[..72]);
     }

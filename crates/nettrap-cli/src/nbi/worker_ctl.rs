@@ -11,7 +11,7 @@ use super::{
     NbiCollector, NetworkBehaviorIndicator, atomic_fetch_add_saturating,
     saturating_sum_usize_as_u64, usize_to_u64_saturating,
 };
-use nettrap_fsutil::append_regular_file;
+use nettrap_fsutil::append_regular_file_line;
 
 fn send_worker_ack(sender: tokio::sync::oneshot::Sender<()>, context: &str) {
     if sender.send(()).is_err() {
@@ -455,17 +455,10 @@ impl NbiCollector {
                 Ok(json) => {
                     let path = path.clone();
                     let file_result = tokio::task::spawn_blocking(move || {
-                        use std::io::Write;
-
-                        let mut file = append_regular_file(&path).map_err(|err| {
+                        let line = format!("{json}\n");
+                        append_regular_file_line(&path, line.as_bytes()).map_err(|err| {
                             format!("failed to open NBI file {}: {}", path.display(), err)
-                        })?;
-                        file.write_all(json.as_bytes())
-                            .map_err(|err| format!("failed to write NBI event to file: {}", err))?;
-                        file.write_all(b"\n").map_err(|err| {
-                            format!("failed to write NBI newline to file: {}", err)
-                        })?;
-                        Ok::<(), String>(())
+                        })
                     })
                     .await
                     .map_err(|err| format!("NBI file worker failed: {}", err))

@@ -58,6 +58,17 @@ impl WindivertAddress {
         }
         unsafe { std::ptr::read_unaligned(self.data.as_ptr() as *const WindivertDataNetwork) }
     }
+
+    /// Replace the network metadata used when WinDivert reinjects a packet.
+    pub fn set_network(&mut self, network: WindivertDataNetwork) {
+        const NETWORK_SIZE: usize = std::mem::size_of::<WindivertDataNetwork>();
+        if self.data.len() < NETWORK_SIZE {
+            return;
+        }
+        unsafe {
+            std::ptr::write_unaligned(self.data.as_mut_ptr() as *mut WindivertDataNetwork, network);
+        }
+    }
 }
 
 fn windivert_buffer_len(len: usize) -> Result<u32, String> {
@@ -388,7 +399,31 @@ pub fn close_handle(_handle: HANDLE) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::windivert_buffer_len;
+    use super::{WindivertAddress, WindivertDataNetwork, windivert_buffer_len};
+
+    #[test]
+    fn windivert_address_matches_network_layer_abi() {
+        assert_eq!(std::mem::size_of::<WindivertAddress>(), 80);
+        assert_eq!(std::mem::offset_of!(WindivertAddress, timestamp), 0);
+        assert_eq!(std::mem::offset_of!(WindivertAddress, flags), 8);
+        assert_eq!(std::mem::offset_of!(WindivertAddress, reserved2), 12);
+        assert_eq!(std::mem::offset_of!(WindivertAddress, data), 16);
+        assert_eq!(WindivertAddress::OUTBOUND_BIT, 0x0002_0000);
+    }
+
+    #[test]
+    fn windivert_address_network_metadata_round_trips() {
+        let mut address = WindivertAddress::default();
+        let network = WindivertDataNetwork {
+            if_idx: 1,
+            sub_if_idx: 7,
+        };
+
+        address.set_network(network);
+
+        assert_eq!(address.network().if_idx, 1);
+        assert_eq!(address.network().sub_if_idx, 7);
+    }
 
     #[test]
     fn windivert_buffer_len_accepts_u32_max() {

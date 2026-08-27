@@ -23,6 +23,7 @@ pub struct NfqueueInterceptor {
     interface: Option<String>,
     redirect_rules: Vec<PortRedirect>,
     run_marker: String,
+    nft_table: String,
     firewall_backend: FirewallBackend,
     saved_ipv4_forward: RwLock<Option<String>>,
     saved_ipv6_forward: RwLock<Option<String>>,
@@ -100,7 +101,7 @@ impl IpFamily {
 const IP_FAMILIES: [IpFamily; 2] = [IpFamily::V4, IpFamily::V6];
 const NETTRAP_OUTPUT_CHAIN: &str = "NETTRAP_OUTPUT";
 const NETTRAP_PREROUTING_CHAIN: &str = "NETTRAP_PREROUTING";
-const NETTRAP_NFT_TABLE: &str = "nettrap";
+const NETTRAP_NFT_TABLE_PREFIX: &str = "nettrap";
 const NETTRAP_JUMP_COMMENT: &str = "nettrap-managed";
 const IPV4_FORWARD_PATH: &str = "/proc/sys/net/ipv4/ip_forward";
 const IPV6_FORWARD_PATH: &str = "/proc/sys/net/ipv6/conf/all/forwarding";
@@ -189,6 +190,7 @@ impl NfqueueInterceptor {
             interface: None,
             redirect_rules: Vec::new(),
             run_marker: format!("nettrap:{}", std::process::id()),
+            nft_table: format!("{}_{}", NETTRAP_NFT_TABLE_PREFIX, std::process::id()),
             firewall_backend: detect_firewall_backend(),
             saved_ipv4_forward: RwLock::new(None),
             saved_ipv6_forward: RwLock::new(None),
@@ -279,14 +281,15 @@ impl NfqueueInterceptor {
 
     fn install_nft_redirect_rules(&self) -> Result<()> {
         self.managed_families.write().clear();
+        let table = self.nft_table.as_str();
         let chain = match self.mode {
             NetworkMode::SingleHost => NETTRAP_OUTPUT_CHAIN,
             NetworkMode::MultiHost => NETTRAP_PREROUTING_CHAIN,
         };
 
         for family in IP_FAMILIES {
-            self.try_run_nft(family, &["delete", "table", NETTRAP_NFT_TABLE])?;
-            self.run_nft(family, &["add", "table", NETTRAP_NFT_TABLE])?;
+            self.try_run_nft(family, &["delete", "table", table])?;
+            self.run_nft(family, &["add", "table", table])?;
             let hook = match self.mode {
                 NetworkMode::SingleHost => "output",
                 NetworkMode::MultiHost => "prerouting",
@@ -294,22 +297,8 @@ impl NfqueueInterceptor {
             self.run_nft(
                 family,
                 &[
-                    "add",
-                    "chain",
-                    NETTRAP_NFT_TABLE,
-                    chain,
-                    "{",
-                    "type",
-                    "nat",
-                    "hook",
-                    hook,
-                    "priority",
-                    "-100",
-                    ";",
-                    "policy",
-                    "accept",
-                    ";",
-                    "}",
+                    "add", "chain", table, chain, "{", "type", "nat", "hook", hook, "priority",
+                    "-100", ";", "policy", "accept", ";", "}",
                 ],
             )?;
 
@@ -318,7 +307,7 @@ impl NfqueueInterceptor {
                 let mut args = vec![
                     "add".to_string(),
                     "rule".to_string(),
-                    NETTRAP_NFT_TABLE.to_string(),
+                    table.to_string(),
                     chain.to_string(),
                     family.nft_family().to_string(),
                     "daddr".to_string(),
@@ -439,9 +428,10 @@ impl NfqueueInterceptor {
 
     fn remove_nft_redirect_rules(&self) -> Result<()> {
         let families = self.managed_families.read().clone();
+        let table = self.nft_table.as_str();
         let mut errors = Vec::new();
         for family in families.iter().rev() {
-            if let Err(err) = self.run_nft(*family, &["delete", "table", NETTRAP_NFT_TABLE]) {
+            if let Err(err) = self.run_nft(*family, &["delete", "table", table]) {
                 tracing::warn!("Failed to clean nft {} table: {}", family.nft_family(), err);
                 errors.push(format!("nft {}: {}", family.nft_family(), err));
             }
@@ -1070,6 +1060,18 @@ mod tests {
             ));
             assert!(contains_args(&args, &["-j", NETTRAP_OUTPUT_CHAIN]));
         }
+    }
+
+    #[test]
+    fn nft_table_name_is_scoped_to_process() {
+        let interceptor =
+            NfqueueInterceptor::new(InterceptorConfig::default()).expect("interceptor builds");
+
+        assert_eq!(
+            interceptor.nft_table,
+            format!("{}_{}", NETTRAP_NFT_TABLE_PREFIX, std::process::id())
+        );
+        assert_ne!(interceptor.nft_table, NETTRAP_NFT_TABLE_PREFIX);
     }
 
     #[test]

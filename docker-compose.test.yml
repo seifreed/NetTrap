@@ -1,8 +1,6 @@
-version: '3.8'
-
 services:
   collector:
-    image: debian:bookworm-slim
+    image: debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
     container_name: nettrap-collector
     command: >
       bash -c "apt-get update -qq && apt-get install -y -qq ncat > /dev/null 2>&1 &&

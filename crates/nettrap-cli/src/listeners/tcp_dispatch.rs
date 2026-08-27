@@ -1312,11 +1312,28 @@ pub(crate) async fn handle_upnp_tcp(
     destination: &SessionDestination,
     output_path: Option<&std::path::Path>,
 ) -> Vec<u8> {
-    let Ok(handler) = crate::protocol_handlers::init_upnp_handler(destination.ip()) else {
+    let listen_host = ctx
+        .config
+        .server_name
+        .as_deref()
+        .unwrap_or(destination.ip());
+    let Ok(handler) = crate::protocol_handlers::init_upnp_handler(listen_host) else {
         tracing::warn!(
-            "Ignoring UPnP TCP request for invalid listener IP {}",
-            destination.ip()
+            "Ignoring UPnP TCP request for invalid listener host {}",
+            listen_host
         );
+        log_event(
+            output_path,
+            ctx.name(),
+            peer,
+            "upnp_request_rejected",
+            &format!(
+                "invalid listener host {}, {} bytes",
+                listen_host,
+                data.len()
+            ),
+        )
+        .await;
         return Vec::new();
     };
     let response = handler.handle_http(data);

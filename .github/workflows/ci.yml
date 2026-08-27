@@ -24,6 +24,7 @@ jobs:
   build-linux:
     name: Build & Test (Linux ${{ matrix.target }})
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -101,19 +102,17 @@ jobs:
         run: |
             docker run --rm --entrypoint /bin/bash nettrap:test /app/protocol_matrix_smoke.sh
 
-      - name: Generate Linux protocol matrix parity report (x64 only)
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
+      - name: Generate Linux protocol matrix parity report
         env:
           NETTRAP_BIN: ${{ github.workspace }}/target/${{ matrix.target }}/release/nettrap
-          NETTRAP_MATRIX_REPORT: ${{ runner.temp }}/nettrap-protocol-matrix-linux.txt
+          NETTRAP_MATRIX_REPORT: ${{ runner.temp }}/nettrap-protocol-matrix-${{ matrix.name }}.txt
         run: bash tests/protocol_matrix_smoke.sh
 
-      - name: Upload Linux protocol matrix parity report (x64 only)
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
+      - name: Upload Linux protocol matrix parity report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: protocol-matrix-linux-x64
-          path: ${{ runner.temp }}/nettrap-protocol-matrix-linux.txt
+          name: protocol-matrix-${{ matrix.name }}
+          path: ${{ runner.temp }}/nettrap-protocol-matrix-${{ matrix.name }}.txt
           if-no-files-found: error
           archive: false
 
@@ -133,8 +132,9 @@ jobs:
 
   build-macos:
     name: Build & Test (macOS ${{ matrix.target }})
-    if: github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'push' || github.event_name == 'pull_request' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -210,6 +210,39 @@ jobs:
           enabled = true
           emulate_response = true
           response_delay_ms = 0
+
+          [[listeners]]
+          name = "dns-tcp"
+          protocol = "tcp"
+          port = 53532
+          bind_address = "127.0.0.1"
+          enabled = true
+          emulate_response = true
+
+          [[listeners]]
+          name = "dns-v6"
+          protocol = "udp"
+          port = 53531
+          bind_address = "::1"
+          enabled = true
+          emulate_response = true
+
+          [[listeners]]
+          name = "http-v6"
+          protocol = "tcp"
+          port = 8089
+          bind_address = "::1"
+          enabled = true
+          emulate_response = true
+
+          [[listeners]]
+          name = "tls"
+          protocol = "tcp"
+          port = 18444
+          bind_address = "127.0.0.1"
+          enabled = true
+          emulate_response = true
+          use_ssl = true
           EOF
 
       - name: Run integration tests
@@ -222,7 +255,13 @@ jobs:
 
           echo "=== macOS Integration Tests ==="
           dig @127.0.0.1 -p 53530 example.com A +short | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
-          curl --fail --silent --header 'Host: example.test' http://127.0.0.1:8088/ | grep -F 'It Works!'
+          dig +tcp @127.0.0.1 -p 53532 example.com A +short | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
+          dig @::1 -p 53531 example.com A +short | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
+          curl --noproxy '*' --fail --silent --header 'Host: example.test' http://127.0.0.1:8088/ | grep -F 'It Works!'
+          curl --noproxy '*' --fail --silent --header 'Host: example.test' 'http://[::1]:8089/' | grep -F 'It Works!'
+          tls_output="$(openssl s_client -connect 127.0.0.1:18444 \
+            -servername example.test -showcerts </dev/null 2>&1 || true)"
+          grep -F 'BEGIN CERTIFICATE' <<<"$tls_output"
 
           kill $NETTRAP_PID
           wait $NETTRAP_PID || true
@@ -236,8 +275,9 @@ jobs:
 
   build-windows:
     name: Build & Test (Windows ${{ matrix.target }})
-    if: github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'push' || github.event_name == 'pull_request' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -260,6 +300,10 @@ jobs:
           $sdkArchive = Join-Path $env:RUNNER_TEMP "npcap-sdk.zip"
           $sdkRoot = Join-Path $env:RUNNER_TEMP "npcap-sdk"
           Invoke-WebRequest -Uri "https://npcap.com/dist/npcap-sdk-1.16.zip" -OutFile $sdkArchive
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $sdkArchive).Hash.ToLowerInvariant()
+          if ($hash -ne "f0a8be7778ee3ae1b99bbbecb27a3ff0f6c111a4093f1c78c5c5a099607184db") {
+            throw "Npcap SDK archive SHA-256 mismatch: $hash"
+          }
           Expand-Archive -Path $sdkArchive -DestinationPath $sdkRoot -Force
           $libDir = Join-Path $sdkRoot $(if ("${{ matrix.arch }}" -eq "arm64") { "Lib\ARM64" } else { "Lib\x64" })
           "LIB=$libDir;$env:LIB" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
@@ -281,13 +325,20 @@ jobs:
           New-Item -ItemType Directory -Force -Path $runtime | Out-Null
           Copy-Item (Join-Path $root "WinDivert-2.2.2-A\x64\WinDivert.dll") $runtime
           Copy-Item (Join-Path $root "WinDivert-2.2.2-A\x64\WinDivert64.sys") $runtime
+          foreach ($required in @("WinDivert.dll", "WinDivert64.sys")) {
+            $path = Join-Path $runtime $required
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or
+                (Get-Item -LiteralPath $path).Length -le 0) {
+              throw "WinDivert runtime file is missing or empty: $path"
+            }
+          }
           "PATH=$runtime;$env:PATH" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
         shell: pwsh
 
       - name: Setup Npcap notice
         run: |
           Write-Host "::notice::Windows builds support listener mode and Npcap-backed capture"
-          Write-Host "::notice::Windows x64 also includes experimental WinDivert TCP/UDP NAT redirection"
+          Write-Host "::notice::Windows transparent interception uses experimental packet-preserving NAT; the x64 smoke requires the WinDivert driver"
           Write-Host "::notice::Install Npcap from https://nmap.org/npcap/"
         shell: pwsh
 
@@ -319,12 +370,12 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Run tests
-        if: matrix.arch != 'arm64'
-        run: cargo test --all --target ${{ matrix.target }} -- --test-threads=1
-
-      - name: Compile tests (Windows ARM64)
-        if: matrix.arch == 'arm64'
-        run: cargo test --all --target ${{ matrix.target }} --no-run
+        run: |
+          if ("${{ matrix.arch }}" -eq "arm64") {
+            $env:RUSTFLAGS = "-C link-arg=/DELAYLOAD:wpcap.dll -C link-arg=/DEFAULTLIB:delayimp.lib"
+          }
+          cargo test --all --target ${{ matrix.target }} -- --test-threads=1
+        shell: pwsh
 
       - name: Create config for testing
         run: |
@@ -379,30 +430,33 @@ jobs:
       - name: Run Windows protocol matrix parity smoke
         env:
           NETTRAP_MATRIX_REPEAT: ${{ github.event_name == 'schedule' && '32' || '2' }}
+          NETTRAP_MATRIX_DURATION_SECONDS: ${{ github.event_name == 'schedule' && '1800' || '0' }}
         run: ./tests/windows_protocol_matrix_smoke.ps1 -BinaryPath "${{ github.workspace }}\target\${{ matrix.target }}\release\nettrap.exe"
         shell: pwsh
 
-      - name: Generate Windows protocol matrix parity report (x64)
-        if: matrix.arch == 'x64'
+      - name: Run Windows hostile soak
+        env:
+          NETTRAP_SOAK_SECONDS: ${{ github.event_name == 'schedule' && '1800' || '60' }}
+        run: ./tests/windows_soak_test.ps1 -BinaryPath "${{ github.workspace }}\target\${{ matrix.target }}\release\nettrap.exe"
+        shell: pwsh
+
+      - name: Generate Windows protocol matrix parity report
         env:
           NETTRAP_MATRIX_REPEAT: "1"
-          NETTRAP_MATRIX_REPORT: ${{ runner.temp }}\nettrap-protocol-matrix-windows.txt
+          NETTRAP_MATRIX_REPORT: ${{ runner.temp }}\nettrap-protocol-matrix-${{ matrix.name }}.txt
         run: ./tests/windows_protocol_matrix_smoke.ps1 -BinaryPath "${{ github.workspace }}\target\${{ matrix.target }}\release\nettrap.exe"
         shell: pwsh
 
-      - name: Upload Windows protocol matrix parity report (x64)
-        if: matrix.arch == 'x64'
+      - name: Upload Windows protocol matrix parity report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: protocol-matrix-windows-x64
-          path: ${{ runner.temp }}\nettrap-protocol-matrix-windows.txt
+          name: protocol-matrix-${{ matrix.name }}
+          path: ${{ runner.temp }}\nettrap-protocol-matrix-${{ matrix.name }}.txt
           if-no-files-found: error
           archive: false
 
-      - name: Run Windows interception smoke (x64)
+      - name: Run Windows interception NAT smoke (x64)
         if: matrix.arch == 'x64'
-        env:
-          NETTRAP_REQUIRE_WINDIVERT_NETWORK: ${{ runner.environment == 'self-hosted' && '1' || '0' }}
         run: ./tests/windows_interception_smoke.ps1 -BinaryPath "${{ github.workspace }}\target\${{ matrix.target }}\release\nettrap.exe"
         shell: pwsh
 
@@ -418,6 +472,7 @@ jobs:
     name: Verify Linux/Windows protocol parity
     needs: [build-linux, build-windows]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -425,18 +480,21 @@ jobs:
       - name: Download protocol matrix reports
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: protocol-matrix-*-x64
+          pattern: protocol-matrix-*
           path: reports
           merge-multiple: true
 
       - name: Compare protocol matrix contracts
         run: python3 tests/compare_protocol_matrix_reports.py \
-          reports/nettrap-protocol-matrix-linux.txt \
-          reports/nettrap-protocol-matrix-windows.txt
+          reports/nettrap-protocol-matrix-linux-x64.txt \
+          reports/nettrap-protocol-matrix-linux-arm64.txt \
+          reports/nettrap-protocol-matrix-windows-x64.txt \
+          reports/nettrap-protocol-matrix-windows-arm64.txt
 
   security-audit:
     name: Security Audit
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -447,7 +505,7 @@ jobs:
           toolchain: 1.97.1
 
       - name: Install cargo-audit
-        run: cargo install cargo-audit
+        run: cargo install cargo-audit --locked
 
       - name: Run security audit
         run: cargo audit

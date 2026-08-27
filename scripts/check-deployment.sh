@@ -2,6 +2,7 @@
 set -euo pipefail
 
 manifest="deploy/kubernetes/deployment.yaml"
+runtime_image="Dockerfile"
 
 grep -Eq '^        image: .+@sha256:[0-9a-f]{64}$' "$manifest"
 grep -Fq '      automountServiceAccountToken: false' "$manifest"
@@ -9,6 +10,9 @@ grep -Fq '          type: RuntimeDefault' "$manifest"
 grep -Fq '          allowPrivilegeEscalation: false' "$manifest"
 grep -Fq '          readOnlyRootFilesystem: true' "$manifest"
 grep -Fq '            - ALL' "$manifest"
+grep -Fq '        prometheus.io/port: "9091"' "$manifest"
+grep -Fq '    iptables' "$runtime_image"
+grep -Fq '    nftables' "$runtime_image"
 
 if grep -Fq ':latest' "$manifest"; then
     echo "Kubernetes deployment must not use a mutable latest tag" >&2

@@ -751,6 +751,18 @@ async fn handle_upnp_udp(ctx: &ListenerContext, socket: &UdpSocket, packet: UdpP
             "Ignoring UPnP UDP request for invalid listener IP {}",
             packet.destination.ip()
         );
+        log_event(
+            packet.output_path,
+            ctx.name(),
+            packet.src,
+            "upnp_request_rejected",
+            &format!(
+                "invalid listener IP {}, {} bytes",
+                packet.destination.ip(),
+                packet.len
+            ),
+        )
+        .await;
         return;
     };
     let response = handler.handle_ssdp(packet.query_data);

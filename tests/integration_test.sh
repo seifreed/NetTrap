@@ -1,6 +1,13 @@
 #!/bin/bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_TEMPLATE="${NETTRAP_CONFIG_TEMPLATE:-/etc/nettrap/config.toml}"
+NETTRAP_BIN="${NETTRAP_BIN:-nettrap}"
+if [[ ! -r "$CONFIG_TEMPLATE" ]]; then
+    CONFIG_TEMPLATE="$SCRIPT_DIR/../config/default.toml"
+fi
+
 echo "========================================"
 echo "NetTrap Complete Test Suite"
 echo "========================================"
@@ -9,6 +16,7 @@ echo ""
 FAILED=0
 PASSED=0
 TEST_CONFIG="$(mktemp /tmp/nettrap-integration.XXXXXX.toml)"
+ARTIFACT_DIR="$(mktemp -d /tmp/nettrap-integration-artifacts.XXXXXX)"
 SMTP_DIR="/tmp/nettrap-integration-smtp"
 SMTP_MESSAGE="/tmp/nettrap-integration-message.eml"
 IRC_PORT=16667
@@ -21,6 +29,7 @@ QUOTD_PORT=11717
 MEMCACHED_PORT=11211
 SOCKS_PORT=11080
 TFTP_UDP_PORT=1069
+TFTP_ROOT="/tmp/nettrap-integration-tftp"
 SNMP_UDP_PORT=1161
 SIP_UDP_PORT=15060
 UPNP_UDP_PORT=11900
@@ -33,6 +42,15 @@ CHARGEN_UDP_PORT=11920
 QUOTD_UDP_PORT=11718
 SYSLOG_UDP_PORT=1514
 RAW_UDP_PORT=19099
+DNS_TCP_PORT=5354
+NKN_TCP_PORT=19090
+RAW_TCP_PORT=19091
+DUMMY_TCP_PORT=19092
+UPNP_TCP_PORT=19093
+RDP_TCP_PORT=13389
+TLS_TCP_PORT=19444
+SYSLOG_TCP_PORT=1515
+INTEGRATION_TIMEOUT_SECONDS=300
 
 cleanup() {
     if [ -n "${NETTRAP_PID:-}" ]; then
@@ -40,7 +58,7 @@ cleanup() {
         wait "$NETTRAP_PID" 2>/dev/null || true
     fi
     rm -f /tmp/test_output.txt "$TEST_CONFIG" "$SMTP_MESSAGE"
-    rm -rf "$SMTP_DIR"
+    rm -rf "$SMTP_DIR" "$ARTIFACT_DIR" "$TFTP_ROOT"
 }
 
 trap cleanup EXIT
@@ -172,6 +190,41 @@ run_telnet_banner() {
     grep -Fq 'login:' <<< "$output"
 }
 
+run_telnet_session() {
+    python3 - <<'PY'
+import socket
+
+sock = socket.create_connection(("127.0.0.1", 2323), timeout=5)
+sock.settimeout(5)
+
+def recv_until(marker):
+    data = b""
+    while marker not in data:
+        chunk = sock.recv(4096)
+        if not chunk:
+            raise SystemExit(f"telnet closed before {marker!r}")
+        data += chunk
+    return data
+
+try:
+    banner = recv_until(b" login: ")
+    if b"nettrap.local login:" not in banner:
+        raise SystemExit("telnet login banner missing hostname")
+    sock.sendall(b"matrix\r\n")
+    recv_until(b"Password: ")
+    sock.sendall(b"secret\r\n")
+    success = recv_until(b"# ")
+    if b"Login successful." not in success:
+        raise SystemExit("telnet authentication did not succeed")
+    sock.sendall(b"id\r\n")
+    response = recv_until(b"# ")
+    if b"uid=0(root)" not in response:
+        raise SystemExit("telnet shell command response was not returned")
+finally:
+    sock.close()
+PY
+}
+
 run_irc_registration() {
     local output
     output="$({ printf 'NICK matrix\r\nUSER matrix 0 * :matrix\r\n'; sleep 1; } |
@@ -207,6 +260,13 @@ run_memcached_version() {
     grep -Fq 'VERSION 1.6.22' <<< "$output"
 }
 
+run_memcached_set() {
+    local output
+    output="$(printf 'set e2e 0 0 5\r\nhello\r\n' |
+        timeout 5 nc 127.0.0.1 "$MEMCACHED_PORT" 2>/dev/null || true)"
+    grep -Fxq 'STORED' <<< "${output//$'\r'/}"
+}
+
 run_socks_handshake() {
     local response_path status
     response_path="$(mktemp /tmp/nettrap-socks.XXXXXX)"
@@ -220,10 +280,35 @@ run_socks_handshake() {
     return "$status"
 }
 
+run_socks_connect() {
+    python3 - "$SOCKS_PORT" <<'PY'
+import socket
+import sys
+
+sock = socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=3)
+sock.settimeout(3)
+try:
+    sock.sendall(b"\x05\x01\x00")
+    if sock.recv(2) != b"\x05\x00":
+        raise SystemExit("SOCKS5 no-auth negotiation failed")
+    sock.sendall(b"\x05\x01\x00\x03\x0bexample.test\x00\x50")
+    response = sock.recv(10)
+finally:
+    sock.close()
+
+if len(response) != 10 or response[:4] != b"\x05\x00\x00\x01":
+    raise SystemExit(f"invalid SOCKS5 CONNECT response: {response.hex()}")
+PY
+}
+
 run_udp_hex_probe() {
     local port=$1
     local payload_hex=$2
     local minimum_bytes=$3
+    if [[ "$port" == "$SIP_UDP_PORT" ]]; then
+        run_sip_options
+        return
+    fi
     python3 - "$port" "$payload_hex" "$minimum_bytes" <<'PY'
 import socket
 import sys
@@ -264,15 +349,256 @@ run_udp_empty_probe() {
     run_udp_hex_probe "$1" "" "$2"
 }
 
-run_ntp_udp_probe() {
-    local payload_hex
-    payload_hex="1b$(printf '00%.0s' $(seq 1 47))"
-    run_udp_hex_probe "$NTP_UDP_PORT" "$payload_hex" 1
+run_tftp_rrq() {
+    python3 - "$TFTP_UDP_PORT" <<'PY'
+import socket
+import sys
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.settimeout(3)
+try:
+    sock.sendto(b"\x00\x01smoke.txt\x00octet\x00", ("127.0.0.1", int(sys.argv[1])))
+    response, _ = sock.recvfrom(65535)
+finally:
+    sock.close()
+
+if len(response) < 4 or int.from_bytes(response[:2], "big") not in (3, 5):
+    raise SystemExit(f"invalid TFTP RRQ response: {response[:8].hex()}")
+PY
 }
 
-sed '/^output_format =/a smtp_dir = "/tmp/nettrap-integration-smtp"' \
-    /etc/nettrap/config.toml >"$TEST_CONFIG"
+run_tftp_wrq() {
+    python3 - "$TFTP_UDP_PORT" "$TFTP_ROOT" <<'PY'
+import pathlib
+import socket
+import sys
+
+port = int(sys.argv[1])
+root = pathlib.Path(sys.argv[2]) / "tftp_upload" / "upload.bin"
+payload = b"nettrap-tftp-upload"
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.settimeout(3)
+try:
+    sock.sendto(b"\x00\x02upload.bin\x00octet\x00", ("127.0.0.1", port))
+    response, peer = sock.recvfrom(65535)
+    if response != b"\x00\x04\x00\x00":
+        raise SystemExit(f"invalid TFTP WRQ ACK: {response[:8].hex()}")
+    sock.sendto(b"\x00\x03\x00\x01" + payload, peer)
+    response, _ = sock.recvfrom(65535)
+    if response != b"\x00\x04\x00\x01":
+        raise SystemExit(f"invalid TFTP DATA ACK: {response[:8].hex()}")
+finally:
+    sock.close()
+
+if root.read_bytes() != payload:
+    raise SystemExit("TFTP upload content was not persisted")
+PY
+}
+
+run_snmp_get() {
+    python3 - "$SNMP_UDP_PORT" <<'PY'
+import socket
+import sys
+
+payload = bytes.fromhex(
+    "302602010004067075626c6963a019020101020100020100300e300c"
+    "06082b060102010101000500"
+)
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.settimeout(3)
+try:
+    sock.sendto(payload, ("127.0.0.1", int(sys.argv[1])))
+    response, _ = sock.recvfrom(65535)
+finally:
+    sock.close()
+
+if len(response) < 8 or response[0] != 0x30 or 0xA2 not in response:
+    raise SystemExit(f"invalid SNMP GET response: {response[:16].hex()}")
+PY
+}
+
+run_sip_options() {
+    python3 - "$SIP_UDP_PORT" <<'PY'
+import socket
+import sys
+
+payload = (
+    b"OPTIONS sip:matrix.test SIP/2.0\r\n"
+    b"Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-matrix\r\n"
+    b"From: <sip:matrix@matrix.test>;tag=matrix\r\n"
+    b"To: <sip:matrix@matrix.test>\r\n"
+    b"Call-ID: matrix-call\r\n"
+    b"CSeq: 1 OPTIONS\r\n"
+    b"Content-Length: 0\r\n\r\n"
+)
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.settimeout(3)
+try:
+    sock.sendto(payload, ("127.0.0.1", int(sys.argv[1])))
+    response, _ = sock.recvfrom(65535)
+finally:
+    sock.close()
+
+if not response.startswith(b"SIP/2.0 200 OK"):
+    raise SystemExit(f"invalid SIP OPTIONS response: {response[:80]!r}")
+PY
+}
+
+run_ntp_semantic_probe() {
+    python3 - "$NTP_UDP_PORT" <<'PY'
+import socket
+import sys
+
+request = bytes([0x1B]) + bytes(47)
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.settimeout(3)
+try:
+    sock.sendto(request, ("127.0.0.1", int(sys.argv[1])))
+    response, _ = sock.recvfrom(65535)
+finally:
+    sock.close()
+
+if len(response) < 48 or (response[0] & 0x07) != 4 or ((response[0] >> 3) & 0x07) != 3:
+    raise SystemExit(f"invalid NTP server response: {response[:8].hex()}")
+PY
+}
+
+run_coap_get() {
+    python3 - "$COAP_UDP_PORT" <<'PY'
+import socket
+import sys
+
+request = bytes.fromhex("41011234aa")
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.settimeout(3)
+try:
+    sock.sendto(request, ("127.0.0.1", int(sys.argv[1])))
+    response, _ = sock.recvfrom(65535)
+finally:
+    sock.close()
+
+if len(response) < 4 or (response[0] >> 6) != 1 or response[1] < 0x40:
+    raise SystemExit(f"invalid CoAP response: {response[:16].hex()}")
+if response[2:4] != request[2:4] or response[4] != request[4]:
+    raise SystemExit("CoAP response did not preserve message ID and token")
+PY
+}
+
+run_nkn_jsonrpc() {
+    python3 - "$NKN_TCP_PORT" <<'PY'
+import json
+import socket
+import sys
+
+payload = b'{"jsonrpc":"2.0","method":"getnodestate","id":7}'
+sock = socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=3)
+sock.settimeout(3)
+try:
+    sock.sendall(payload)
+    response = json.loads(sock.recv(4096))
+finally:
+    sock.close()
+if response.get("jsonrpc") != "2.0" or response.get("id") != 7:
+    raise SystemExit(f"unexpected NKN JSON-RPC response: {response!r}")
+PY
+}
+
+run_rdp_negotiation() {
+    python3 -c '
+import sys
+
+data = sys.stdin.buffer.read()
+length = int.from_bytes(data[2:4], "big") if len(data) >= 4 else 0
+if len(data) < 4 or data[:2] != b"\x03\x00" or length < 4 or length > len(data):
+    raise SystemExit("invalid RDP TPKT response")
+' < <(
+        printf '\003\000\000\023\016\340\000\000\000\000\000\001\000\010\000\003\000\000\000' |
+            timeout 5 nc 127.0.0.1 "$RDP_TCP_PORT" 2>/dev/null || true
+    )
+}
+
+run_upnp_tcp_description() {
+    local output
+    output="$(printf 'GET /desc.xml HTTP/1.1\r\nHost: matrix.test\r\nConnection: close\r\n\r\n' |
+        timeout 5 nc 127.0.0.1 "$UPNP_TCP_PORT" 2>/dev/null || true)"
+    grep -Fq 'HTTP/1.1 200' <<< "$output"
+}
+
+run_raw_tcp_echo() {
+    local output
+    output="$(printf 'raw-e2e\n' | timeout 5 nc 127.0.0.1 "$RAW_TCP_PORT" 2>/dev/null || true)"
+    grep -Fq 'raw-e2e' <<< "$output"
+}
+
+run_tcp_capture_probe() {
+    local port=$1
+    local payload_hex=$2
+    python3 - "$port" "$payload_hex" <<'PY'
+import socket
+import sys
+
+port = int(sys.argv[1])
+payload = bytes.fromhex(sys.argv[2])
+sock = socket.create_connection(("127.0.0.1", port), timeout=3)
+try:
+    sock.sendall(payload)
+finally:
+    sock.close()
+PY
+}
+
+run_full_protocol_matrix() {
+    local matrix_script
+    matrix_script="$(dirname -- "$0")/protocol_matrix_smoke.sh"
+    NETTRAP_MATRIX_REPEAT="${NETTRAP_E2E_MATRIX_REPEAT:-2}" \
+        NETTRAP_BIN="$NETTRAP_BIN" "$matrix_script"
+}
+
+run_artifact_exports() {
+    kill -TERM "$NETTRAP_PID" 2>/dev/null || true
+    wait "$NETTRAP_PID" 2>/dev/null || true
+    NETTRAP_PID=""
+
+    local events="$ARTIFACT_DIR/events.jsonl"
+    test -s "$events"
+    test -s "$ARTIFACT_DIR/events.html"
+    test -s "$ARTIFACT_DIR/events.toon"
+    test -s "$ARTIFACT_DIR/events.sarif.json"
+    test -s "$ARTIFACT_DIR/events.csv"
+    test -s "$ARTIFACT_DIR/traffic.pcap"
+
+    for format in json jsonl toon sarif csv; do
+        "$NETTRAP_BIN" report -i "$events" -o "$ARTIFACT_DIR/report.$format" --format "$format" >/dev/null
+        test -s "$ARTIFACT_DIR/report.$format"
+    done
+
+    "$NETTRAP_BIN" pcap -i "$ARTIFACT_DIR/traffic.pcap" -o "$ARTIFACT_DIR/replayed.jsonl" >/dev/null
+    test -s "$ARTIFACT_DIR/replayed.jsonl"
+}
+
+awk -v artifact_dir="$ARTIFACT_DIR" '
+    /^output_format =/ {
+        print "output_format = \"toon\""
+        print "output_path = \"" artifact_dir "/events.jsonl\""
+        print "pcap_path = \"" artifact_dir "/traffic.pcap\""
+        print "smtp_dir = \"/tmp/nettrap-integration-smtp\""
+        next
+    }
+    /^pcap_enabled =/ {
+        print "pcap_enabled = true"
+        next
+    }
+    { print }
+' "$CONFIG_TEMPLATE" >"$TEST_CONFIG"
 cat >>"$TEST_CONFIG" <<'EOF'
+
+[[listeners]]
+name = "dns-tcp"
+protocol = "tcp"
+port = 5354
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
 
 [[listeners]]
 name = "https"
@@ -374,6 +700,63 @@ port = $SOCKS_PORT
 bind_address = "0.0.0.0"
 enabled = true
 emulate_response = true
+
+[[listeners]]
+name = "nkn"
+protocol = "tcp"
+port = $NKN_TCP_PORT
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "raw-tcp"
+protocol = "tcp"
+port = $RAW_TCP_PORT
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "dummy-tcp"
+protocol = "tcp"
+port = $DUMMY_TCP_PORT
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "upnp-tcp"
+protocol = "tcp"
+port = $UPNP_TCP_PORT
+bind_address = "0.0.0.0"
+server_name = "nettrap.local"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "rdp"
+protocol = "tcp"
+port = $RDP_TCP_PORT
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "tls-tcp"
+protocol = "tcp"
+port = $TLS_TCP_PORT
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
+
+[[listeners]]
+name = "syslogrecv-tcp"
+protocol = "tcp"
+port = $SYSLOG_TCP_PORT
+bind_address = "0.0.0.0"
+enabled = true
+emulate_response = true
 EOF
 
 cat >>"$TEST_CONFIG" <<EOF
@@ -385,6 +768,7 @@ port = $TFTP_UDP_PORT
 bind_address = "0.0.0.0"
 enabled = true
 emulate_response = true
+tftproot = "$TFTP_ROOT"
 
 [[listeners]]
 name = "snmp-udp"
@@ -483,15 +867,18 @@ enabled = true
 emulate_response = true
 EOF
 
+mkdir -p "$TFTP_ROOT"
 echo "Starting NetTrap engine..."
-timeout 120 nettrap run -c "$TEST_CONFIG" &
+timeout "$INTEGRATION_TIMEOUT_SECONDS" "$NETTRAP_BIN" run -c "$TEST_CONFIG" &
 NETTRAP_PID=$!
 sleep 3
 
 echo "Waiting for services..."
-for port in 445 5353 8080 110 143 1389 1883 2222 2323 3306 5432 6379 12121 12525 18443 \
+for port in 445 5353 "$DNS_TCP_PORT" 8080 110 143 1389 1883 2222 2323 3306 5432 6379 12121 12525 18443 \
     "$IRC_PORT" "$FINGER_PORT" "$IDENT_PORT" "$DAYTIME_PORT" "$TIME_PORT" \
-    "$CHARGEN_PORT" "$QUOTD_PORT" "$MEMCACHED_PORT" "$SOCKS_PORT"; do
+    "$CHARGEN_PORT" "$QUOTD_PORT" "$MEMCACHED_PORT" "$SOCKS_PORT" \
+    "$NKN_TCP_PORT" "$RAW_TCP_PORT" "$DUMMY_TCP_PORT" "$UPNP_TCP_PORT" \
+    "$RDP_TCP_PORT" "$TLS_TCP_PORT" "$SYSLOG_TCP_PORT"; do
     ready=false
     for _ in $(seq 1 40); do
         if if [ "$port" = 5353 ]; then
@@ -517,6 +904,9 @@ echo "--- DNS Protocol Tests ---"
 run_test "DNS A query" \
     "dig @127.0.0.1 -p 5353 example.com A +short | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'"
 
+run_test "DNS TCP A query" \
+    "dig +tcp @127.0.0.1 -p $DNS_TCP_PORT example.com A +short | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'"
+
 run_test "DNS AAAA query" \
     "dig @127.0.0.1 -p 5353 example.com AAAA +short"
 
@@ -527,19 +917,18 @@ echo ""
 
 echo "--- UDP Protocol Tests ---"
 
-run_test "TFTP RRQ" \
-    "run_udp_hex_probe $TFTP_UDP_PORT 0001736d6f6b652e747874006f6374657400 1"
+run_test "TFTP RRQ" run_tftp_rrq
 
-run_test "SNMP GET" \
-    "run_udp_hex_probe $SNMP_UDP_PORT 302602010004067075626c6963a019020101020100020100300e300c06082b060102010101000500 1"
+run_test "TFTP WRQ" run_tftp_wrq
+
+run_test "SNMP GET" run_snmp_get
 
 run_test "SIP OPTIONS" \
     "run_udp_hex_probe $SIP_UDP_PORT 4f5054494f4e53207369703a6d61747269782e74657374205349502f322e300d0a5669613a205349502f322e302f554450203132372e302e302e313a353036303b6272616e63683d7a39684734624b2d6d61747269780d0a46726f6d3a203c7369703a6d6174726978406d61747269782e746573743e3b7461673d6d61747269780d0a546f3a203c7369703a6d6174726978406d61747269782e746573743e0d0a43616c6c2d49443a206d61747269782d63616c6c0d0a435365713a2031204f5054494f4e530d0a436f6e74656e742d4c656e6774683a20300d0a0d0a 1"
 
-run_test "NTP request" run_ntp_udp_probe
+run_test "NTP request" run_ntp_semantic_probe
 
-run_test "CoAP request" \
-    "run_udp_hex_probe $COAP_UDP_PORT 41011234aa 1"
+run_test "CoAP request" run_coap_get
 
 run_test "Daytime UDP response" "run_udp_empty_probe $DAYTIME_UDP_PORT 1"
 
@@ -623,7 +1012,28 @@ run_test "Redis PING" \
 
 run_test "Memcached version" run_memcached_version
 
+run_test "Memcached SET" run_memcached_set
+
 run_test "SOCKS5 handshake" run_socks_handshake
+
+run_test "SOCKS5 CONNECT" run_socks_connect
+
+run_test "NKN JSON-RPC request" run_nkn_jsonrpc
+
+run_test "Raw TCP echo" run_raw_tcp_echo
+
+run_test "RDP negotiation" run_rdp_negotiation
+
+run_test "UPnP TCP description" run_upnp_tcp_description
+
+run_test "TLS TCP capture" \
+    "run_tcp_capture_probe $TLS_TCP_PORT 160301000401000000"
+
+run_test "Syslog TCP capture" \
+    "run_tcp_capture_probe $SYSLOG_TCP_PORT 3c33343e3120323032362d30312d30315430303a30303a30305a20686f73742061707020312049443437202d20736d6f6b65"
+
+run_test "Dummy TCP capture" \
+    "run_tcp_capture_probe $DUMMY_TCP_PORT 70726f62650a"
 
 echo ""
 
@@ -666,6 +1076,16 @@ run_test "Telnet port open" \
     "nc -z 127.0.0.1 2323"
 
 run_test "Telnet login banner" run_telnet_banner
+
+run_test "Telnet authenticated shell session" run_telnet_session
+
+echo ""
+echo "--- Complete Protocol Matrix ---"
+
+run_test "All protocol handlers hostile matrix" run_full_protocol_matrix
+
+echo "--- Artifact Output Tests ---"
+run_test "Report and PCAP artifact exports" run_artifact_exports
 
 echo ""
 
