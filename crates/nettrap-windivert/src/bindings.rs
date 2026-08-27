@@ -60,21 +60,6 @@ impl WindivertAddress {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::WindivertAddress;
-
-    #[test]
-    fn windivert_address_matches_network_layer_abi() {
-        assert_eq!(std::mem::size_of::<WindivertAddress>(), 80);
-        assert_eq!(std::mem::offset_of!(WindivertAddress, timestamp), 0);
-        assert_eq!(std::mem::offset_of!(WindivertAddress, flags), 8);
-        assert_eq!(std::mem::offset_of!(WindivertAddress, reserved2), 12);
-        assert_eq!(std::mem::offset_of!(WindivertAddress, data), 16);
-        assert_eq!(WindivertAddress::OUTBOUND_BIT, 0x0002_0000);
-    }
-}
-
 fn windivert_buffer_len(len: usize) -> Result<u32, String> {
     u32::try_from(len)
         .map_err(|_| format!("WinDivert buffer length exceeds u32::MAX ({len} bytes)"))
@@ -403,7 +388,17 @@ pub fn close_handle(_handle: HANDLE) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::windivert_buffer_len;
+    use super::{WindivertAddress, windivert_buffer_len};
+
+    #[test]
+    fn windivert_address_matches_network_layer_abi() {
+        assert_eq!(std::mem::size_of::<WindivertAddress>(), 80);
+        assert_eq!(std::mem::offset_of!(WindivertAddress, timestamp), 0);
+        assert_eq!(std::mem::offset_of!(WindivertAddress, flags), 8);
+        assert_eq!(std::mem::offset_of!(WindivertAddress, reserved2), 12);
+        assert_eq!(std::mem::offset_of!(WindivertAddress, data), 16);
+        assert_eq!(WindivertAddress::OUTBOUND_BIT, 0x0002_0000);
+    }
 
     #[test]
     fn windivert_buffer_len_accepts_u32_max() {
